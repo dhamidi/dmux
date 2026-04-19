@@ -1,0 +1,19 @@
+# Binaries
+/gomux
+/gomux.exe
+/cmd/gomux/gomux
+/cmd/gomux/gomux.exe
+
+# Test binaries
+*.test
+*.out
+
+# Go workspace / vendoring
+/vendor/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
