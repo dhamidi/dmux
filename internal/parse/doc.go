@@ -18,6 +18,12 @@
 // Args []string. Nested blocks appear as a Command whose body is another
 // CommandList.
 //
+// # I/O surfaces
+//
+// None. The caller hands in source text as a string; the package
+// neither reads files nor opens sockets. The standalone example below
+// does the file read itself.
+//
 // # In isolation
 //
 // Shipped with a standalone `dmux-parse` example that reads a config

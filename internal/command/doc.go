@@ -19,14 +19,32 @@
 //	}
 //
 //	type Ctx struct {
-//	    Server *session.Server
-//	    Client *session.Client   // nil for non-client-originated cmds
-//	    Target Target            // resolved from -t / defaults
+//	    Server ServerView    // interface; *session.Server satisfies it
+//	    Client ClientView    // nil for non-client-originated cmds
+//	    Target Target        // resolved from -t / defaults
 //	    Args   ParsedArgs
-//	    Queue  *Queue            // to enqueue follow-up commands
+//	    Queue  *Queue        // to enqueue follow-up commands
+//	}
+//
+//	type ServerView interface {
+//	    Sessions() iter.Seq[Session]
+//	    LookupSession(name string) (Session, bool)
+//	    Options() *options.Store
+//	    ...                     // every method a builtin actually needs
+//	}
+//
+//	type ClientView interface {
+//	    ID() ClientID
+//	    Session() Session
+//	    SetKeyTable(name string)
+//	    ...
 //	}
 //
 //	type Queue struct { ... }    // async, supports callback items
+//
+// Builtins program against the ServerView / ClientView interfaces, so
+// the framework imports nothing from session and tests construct fakes
+// without booting a real Server.
 //
 // # Registration
 //
@@ -49,10 +67,17 @@
 // event fires — this is how confirm-before and command-prompt pause
 // execution for user input without blocking the server loop.
 //
+// # I/O surfaces
+//
+// None in the framework. The Queue runs callbacks on a goroutine but
+// performs no I/O of its own. Any I/O performed by a builtin happens
+// through interfaces it pulls off Ctx (ServerView, ClientView, or a
+// caller-injected helper like a job.Runner or format.ShellRunner).
+//
 // # In isolation
 //
 // Register a fake "hello" command, dispatch a parsed CommandList
-// against a blank Server, assert on side effects. The builtin suite
+// against a stub ServerView, assert on side effects. The builtin suite
 // is not required to test the framework.
 //
 // # Non-goals

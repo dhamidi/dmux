@@ -3,9 +3,23 @@
 //
 // # Boundary
 //
-// When a client connects with the Control flag set, the server writes
-// control-mode lines to the client's output channel instead of rendered
-// terminal bytes. The protocol is line-based text:
+//	func NewWriter(out io.Writer, src EventSource) *Writer
+//	(*Writer).Close() error
+//
+//	type EventSource interface {
+//	    Subscribe(handler func(Event)) (unsubscribe func())
+//	}
+//
+//	type Event interface { isControlEvent() }
+//	// concrete events: PaneOutput, SessionChanged, WindowAdd,
+//	// WindowClose, WindowPaneChanged, LayoutChange, Exit
+//
+// Writer takes any io.Writer (the client connection in production, a
+// bytes.Buffer in tests) and any EventSource (the running server in
+// production, a test harness that fires synthetic events). It does not
+// import session.
+//
+// The protocol is line-based text:
 //
 //	%output %<pane> <base64-bytes>
 //	%session-changed <session-id> <name>
@@ -16,11 +30,18 @@
 //	%exit <reason>
 //	%begin <time> <number> <flags>    ... output ... %end <...>
 //
-// The Writer in this package subscribes to session hooks on
-// construction and produces these lines. Commands arriving from the
-// client are parsed by package command as usual; their output is
-// bracketed in %begin/%end blocks so the consumer can correlate
-// request and response.
+// Commands arriving from the client are parsed by package command as
+// usual; their output is bracketed in %begin/%end blocks so the
+// consumer can correlate request and response.
+//
+// # I/O surfaces
+//
+//   - Writes bytes to the caller-supplied io.Writer.
+//   - Reads time.Now() for %begin timestamps (clock injectable for
+//     deterministic tests).
+//
+// No filesystem, no network, no goroutines beyond the EventSource
+// callback's own.
 //
 // # Why it's a separate package
 //
@@ -31,8 +52,9 @@
 //
 // # In isolation
 //
-// Testable by driving a fake session.Server's event stream and
-// asserting on the bytes the Writer produces. No real client needed.
+// Testable by constructing a Writer with a bytes.Buffer and a stub
+// EventSource, firing events, and asserting on the buffer. No
+// session, no client, no socket.
 //
 // # Non-goals
 //

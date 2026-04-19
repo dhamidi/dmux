@@ -3,28 +3,46 @@
 //
 // # Boundary
 //
-// Compose(in Input) Frame, where Input is:
+// Compose(in Input) Frame, where every collaborator is an interface so
+// no Tier 1 package needs to be imported just to render:
 //
 //	type Input struct {
-//	    Size       Size              // client's terminal size
-//	    Layout     *layout.Tree      // active window's layout
-//	    Panes      Snapshotter       // pane snapshots by LeafID
-//	    Status     []status.Segment  // rendered status line(s)
-//	    Overlays   []ClientOverlay   // popups, menus, display-panes, etc.
-//	    Theme      Theme             // border colors, inactive dimming
+//	    Size     Size           // client's terminal size
+//	    Tiling   Tiling         // interface; *layout.Tree satisfies it
+//	    Panes    Snapshotter    // interface; pane snapshots by LeafID
+//	    Status   []Line         // pre-rendered status rows from caller
+//	    Overlays []ClientOverlay
+//	    Theme    Theme
 //	}
 //
-// Snapshotter is an interface with Snapshot(LeafID, *RenderState) — so
-// tests can use fake panes, and render doesn't import pane. The Frame
-// is a grid of cells plus the desired cursor state.
+//	type Tiling interface {
+//	    Rect(leaf LeafID) Rect
+//	    Leaves() iter.Seq[LeafID]
+//	    Active() LeafID
+//	}
+//
+//	type Snapshotter interface {
+//	    Snapshot(leaf LeafID, rs *RenderState)
+//	}
+//
+// Tests can supply a struct-literal Tiling and a fake Snapshotter; render
+// imports neither layout nor pane. LeafID is a type alias re-exported
+// here to avoid importing layout for the type. Status lines are passed
+// in as already-rendered cell rows so render does not import status.
+// The Frame is a grid of cells plus the desired cursor state.
+//
+// # I/O surfaces
+//
+// None. Compose is a pure function: data in, Frame out. Writing the
+// Frame to a real terminal is term.Flush's job.
 //
 // # Layers
 //
 // Composed bottom-up:
 //
 //  1. Window background
-//  2. Each pane rectangle from layout.Rect(), populated from its
-//     render state
+//  2. Each pane rectangle from Tiling.Rect(), populated from its
+//     render state via Snapshotter.Snapshot()
 //  3. Pane borders, with the active pane highlighted
 //  4. Status line(s) at configured position
 //  5. ClientOverlays (popups, menus, display-panes numerals), in order

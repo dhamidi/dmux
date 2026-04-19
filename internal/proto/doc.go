@@ -3,10 +3,17 @@
 //
 // # Boundary
 //
-// Pure encode/decode. Reads and writes framed, typed messages over an
-// io.Reader / io.Writer. Does no I/O loop management, owns no goroutines,
-// and knows nothing about sessions, panes, or terminals. A test can
-// round-trip every message type through net.Pipe without booting a server.
+// Pure encode/decode. Encoder writes framed, typed messages to any
+// io.Writer; Decoder reads them from any io.Reader. Does no I/O loop
+// management, owns no goroutines, opens no sockets, and knows nothing
+// about sessions, panes, or terminals. A test can round-trip every
+// message type through net.Pipe without booting a server.
+//
+// # I/O surfaces
+//
+// None of its own. Callers supply the io.Reader/io.Writer; transport
+// (net.Listen on a UNIX socket, a TCP conn, a net.Pipe in tests) is
+// entirely the caller's choice.
 //
 // # Wire format
 //

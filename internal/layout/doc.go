@@ -33,6 +33,11 @@
 // the full window rect for the zoomed leaf and a zero rect for others.
 // This is how tmux's `resize-pane -Z` works.
 //
+// # I/O surfaces
+//
+// None. Pure data structure with arithmetic on Rects and a string
+// (un)marshaller. No goroutines, no filesystem, no network.
+//
 // # In isolation
 //
 // Testable without any panes existing. A visualization test renders

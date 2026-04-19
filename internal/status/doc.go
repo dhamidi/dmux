@@ -2,21 +2,29 @@
 //
 // # Boundary
 //
-// Render(client *session.Client, server *session.Server) []Line
-// produces zero or more Lines of cells. Each Line is the width of the
-// client and a single row tall. Lines are positioned by the caller
-// (package render) according to the status-position option.
+//	func Render(in Input) []Line
 //
-// A status line is configured by three format strings:
+//	type Input struct {
+//	    Width    int           // client terminal width in cells
+//	    Templates Templates    // status-left, status-right, status-format-N
+//	    FormatEnv format.Env   // Context + ShellRunner + clock for #(...) etc.
+//	    Theme    Theme         // default fg/bg if a range omits one
+//	}
 //
-//   - status-left
-//   - status-format-0, status-format-1, ... (numbered per line)
-//   - status-right
+//	type Templates struct {
+//	    Left, Right string
+//	    Lines       []string
+//	}
 //
-// Each is expanded against a session.Context using package format.
-// The expanded strings may contain embedded #[fg=color,bg=color]
-// style markers that this package parses into cell attributes — tmux
-// calls these "style ranges."
+// status takes only interface-typed inputs. Production wires the
+// session.Client / session.Server in by constructing the Templates
+// (option lookups), the format.Env (Context implementation backed by
+// session, ShellRunner backed by job), and the Width (Client.Size).
+// status itself imports neither session nor command nor job.
+//
+// The expanded strings may contain embedded #[fg=color,bg=color] style
+// markers that this package parses into cell attributes — tmux calls
+// these "style ranges."
 //
 // # Style ranges and clicks
 //
@@ -26,11 +34,16 @@
 // these; the server loop translates mouse events into command
 // dispatches.
 //
+// # I/O surfaces
+//
+// None. Render is a pure function of its inputs. Any I/O implied by
+// #(...) lives in the format.Env.ShellRunner the caller supplies.
+//
 // # In isolation
 //
-// Renderable against a mocked session.Context. Golden-file tests
-// verify particular format strings produce the right cells without
-// ever booting a real server or pane.
+// Renderable against a stub format.Context. Golden-file tests verify
+// particular format strings produce the right cells without ever
+// booting a real server or pane.
 //
 // # Non-goals
 //

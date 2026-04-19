@@ -2,12 +2,22 @@
 //
 // # Boundary
 //
-// Expand(template string, ctx Context) (string, error) is the entire
-// public surface. Context is an interface:
+// Expand(template string, env Env) (string, error). Env bundles the two
+// interfaces this package needs:
+//
+//	type Env struct {
+//	    Ctx   Context     // variable lookups
+//	    Shell ShellRunner // for #(...); nil disables shell expansion
+//	    Now   func() time.Time   // optional; defaults to time.Now
+//	}
 //
 //	type Context interface {
 //	    Lookup(key string) (string, bool)
 //	    Children(listKey string) []Context
+//	}
+//
+//	type ShellRunner interface {
+//	    Run(cmdline string) (stdout string, err error)
 //	}
 //
 // The template syntax mirrors tmux:
@@ -17,12 +27,18 @@
 //   - #{s/from/to/:var}       regex substitute
 //   - #{||:a,b}  #{&&:a,b}    boolean combinators
 //   - #{T:var}  #{t:var}      time formatting
-//   - #(shell-cmd)            external command (via package job)
+//   - #(shell-cmd)            external command (delegated to ShellRunner)
 //
-// Because Context is an interface, package session provides the bindings
-// when expanding for a status line or display-message, but format itself
-// has no dependency on session and can be used with a plain
-// map[string]string for testing or for any string-templating task.
+// Because every collaborator is an interface, package session provides
+// Context when expanding a status line, package job satisfies ShellRunner
+// in production, and tests pass a plain map[string]string Context plus
+// a fake ShellRunner. format itself imports neither session nor job.
+//
+// # I/O surfaces
+//
+// None of its own. Any I/O implied by #(...) happens in the caller's
+// ShellRunner; if the caller doesn't supply one, those expansions return
+// an error and no process is spawned.
 //
 // # In isolation
 //

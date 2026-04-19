@@ -3,14 +3,21 @@
 //
 // # Boundary
 //
-// A tiny interface:
+// A tiny interface, satisfied by build-tagged platform implementations:
 //
-//	ForegroundCommand(pid int) (string, error)
-//	ForegroundCWD(pid int) (string, error)
+//	type OS interface {
+//	    ForegroundCommand(pid int) (string, error)
+//	    ForegroundCWD(pid int) (string, error)
+//	}
+//
+//	func System() OS    // returns the host's implementation
 //
 // Given the PID of a shell running in a pane, return the command name
 // of the pane's current foreground process (for `automatic-rename`) and
 // its current working directory (for `new-window` with the default `-c`).
+//
+// Callers depend on the OS interface, not the build-tagged concrete
+// types, so tests substitute a fake without #ifdefs.
 //
 // # Platforms
 //
@@ -22,6 +29,14 @@
 //              process within a ConPTY
 //
 // Each platform file is build-tagged.
+//
+// # I/O surfaces
+//
+//   - Reads the OS's process table (procfs files, sysctl, kvm, or
+//     NtQueryInformationProcess depending on platform).
+//   - On Linux: opens /proc/<pid>/comm and /proc/<pid>/cwd.
+//
+// All I/O is read-only and scoped to a pid passed in by the caller.
 //
 // # In isolation
 //

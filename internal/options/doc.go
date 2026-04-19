@@ -25,10 +25,14 @@
 // This keeps this package agnostic to the actual option set and makes it
 // reusable as a generic config store.
 //
+// # I/O surfaces
+//
+// None. Pure in-memory data structure.
+//
 // # In isolation
 //
 // Can be dropped into any Go program that needs a scoped config tree.
-// No dependency on the rest of dmux.
+// No dependency on the rest of dmux. No third-party imports.
 //
 // # Non-goals
 //

@@ -8,20 +8,42 @@
 //
 //	Run(cfg Config) int
 //
-// Returns the process exit code. Config carries the socket path,
-// the argv to send as MSG_COMMAND, flags (control mode, readonly),
-// and the open tty file handles.
+//	type Config struct {
+//	    Dialer    Dialer       // returns a net.Conn to the server
+//	    Starter   ServerStarter // called if Dialer fails (no server yet)
+//	    TTYIn     *os.File     // raw stdin
+//	    TTYOut    *os.File     // raw stdout
+//	    TermName  string       // $TERM, read by the caller
+//	    Caps      term.CapSource
+//	    Env       []string     // captured environ; passed to IDENTIFY
+//	    Cwd       string       // captured cwd; passed to IDENTIFY
+//	    Argv      []string     // sent as COMMAND
+//	    Flags     ClientFlags  // control mode, readonly, etc.
+//	}
+//
+//	type Dialer interface {
+//	    Dial() (net.Conn, error)
+//	}
+//
+//	type ServerStarter interface {
+//	    Start() error    // fork/exec the server, then return
+//	}
+//
+// Returns the process exit code. Every external dependency — the socket
+// path, how to start a server, how to read $TERM and the environ —
+// is injected. cmd/dmux is the only place that turns command-line flags
+// into a real Dialer (net.Dial("unix", path)) and a real ServerStarter.
 //
 // # What the client does
 //
-//  1. Dial the socket. If no server is listening, fork/exec one (Unix)
-//     or start a detached server process (Windows) and retry.
-//  2. Send VERSION and IDENTIFY_* messages: TERM, terminfo entries
-//     or feature set, tty name, cwd, environment (filtered by the
-//     server-side update-environment option on the other side),
-//     client pid, flags. Finish with IDENTIFY_DONE.
-//  3. Put its terminal in raw mode via package term. Install
-//     signal / polling-based resize detection.
+//  1. Call Dialer.Dial(). If it fails, call ServerStarter.Start() and
+//     retry the dial.
+//  2. Send VERSION and IDENTIFY_* messages: TermName, terminfo entries
+//     or feature set, tty name, Cwd, Env (already captured by the
+//     caller and possibly filtered), client pid, Flags. Finish with
+//     IDENTIFY_DONE.
+//  3. Put TTYIn/TTYOut into raw mode via package term. Install
+//     signal / polling-based resize detection on the tty handles.
 //  4. Enter the forwarding loop:
 //     - read stdin → STDIN message
 //     - read socket → STDOUT / STDERR → write to real terminal,
@@ -30,6 +52,19 @@
 //     - Ctrl-D on stdin while at the prompt? No — the detach key
 //       is a server-side binding; the client just forwards bytes.
 //  5. On EXIT, restore the terminal and return the given code.
+//
+// # I/O surfaces
+//
+//   - Dials a socket via the injected Dialer.
+//   - Optionally starts a server via the injected ServerStarter.
+//   - Reads/writes TTYIn and TTYOut.
+//   - Reads/writes the net.Conn returned by Dialer.
+//   - File-RPC: opens files named by the server's READ_OPEN /
+//     WRITE_OPEN messages, scoped to whatever the client process can
+//     access.
+//
+// No environment reads, no /etc/passwd, no signal handler installation
+// of its own — the caller hands those in.
 //
 // # What the client does NOT do
 //

@@ -46,12 +46,21 @@
 //                         and confirm-before dialog
 //
 // Sub-packages are independent of each other; they all depend only on
-// this package for the interfaces.
+// this package for the interfaces. modes/popup wraps a pane via the
+// pane.Pane interface (passed in at construction), not the concrete
+// type, so popup is testable without spawning a real PTY.
+//
+// # I/O surfaces
+//
+// None in this package. Sub-packages perform no I/O of their own —
+// any side effects flow through the Outcome value (Command enqueues a
+// command; CloseMode tells the caller to remove the mode) or through
+// caller-supplied helpers passed at construction time.
 //
 // # Non-goals
 //
 // Modes do not reach into session state directly. They either return
 // a Command outcome (enqueued by the server loop) or manipulate state
 // passed in at construction time. This keeps them testable with a
-// fake Server.
+// stub Server.
 package modes

@@ -8,21 +8,47 @@
 //
 //	Run(cfg Config) error
 //
-// Config carries the socket path, initial .dmux.conf path, and
-// platform hooks (daemonize on Unix, Windows service integration if
-// ever added). Run blocks until the server exits.
+//	type Config struct {
+//	    Listener   net.Listener      // pre-bound; caller chose path/perms
+//	    ConfigSrc  io.Reader         // initial .dmux.conf contents; nil ok
+//	    Spawner    job.Spawner       // for run-shell, if-shell, #(...)
+//	    PTYStarter pty.Starter       // wraps pty.Start; injectable for tests
+//	    OS         osinfo.OS         // for automatic-rename
+//	    Shell      shell.Sources     // env / passwd lookup for default-shell
+//	    Clock      func() time.Time  // status ticks, timeouts
+//	    Signals    SignalSource      // SIGHUP/SIGTERM channel; stub in tests
+//	}
+//
+// The server takes every external dependency as an interface or pre-built
+// value. It opens no sockets, reads no env, installs no signal handlers
+// of its own — the caller does, and hands them in. cmd/dmux is the only
+// place that does the actual binding to net.Listen, os/signal,
+// os.Environ, etc.
+//
+// Run blocks until the server exits.
 //
 // # What the loop owns
 //
-//   - A UNIX-domain listener and an accepted-client goroutine pool
+//   - The injected Listener and an accepted-client goroutine pool
 //   - A *session.Server (the state)
 //   - A *command.Queue (work to do)
 //   - A timer wheel for status ticks, display-panes timeouts,
 //     auto-rename polling, silence/activity alerts, job timeouts
+//     (driven by the injected Clock)
 //   - A redraw debouncer that coalesces per-client redraw requests
-//   - Signal handling (SIGHUP/SIGTERM on Unix → graceful shutdown;
-//     SIGWINCH is ignored here — the server's own terminal isn't
-//     the interesting one, clients report their size via proto)
+//   - The injected SignalSource for graceful shutdown
+//
+// # I/O surfaces
+//
+//   - Accepts connections from Listener.Accept().
+//   - Reads/writes proto.Messages on each accepted conn.
+//   - Reads ConfigSrc once at startup.
+//   - Spawns goroutines: one per accepted client, plus the per-pane
+//     PTY copy goroutines owned by package pane.
+//
+// Everything else (binding the socket, installing real signal handlers,
+// reading /etc/dmux.conf, daemonizing on Unix) happens in cmd/dmux
+// before Run is called.
 //
 // # Per-client goroutine
 //

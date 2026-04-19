@@ -29,10 +29,21 @@
 //	    ID        WindowID
 //	    Name      string
 //	    Layout    *layout.Tree
-//	    Panes     map[layout.LeafID]*pane.Pane
+//	    Panes     map[layout.LeafID]Pane    // interface, not pane.Pane
 //	    Active    layout.LeafID
 //	    Options   *options.Store
 //	}
+//
+//	type Pane interface {
+//	    Title() string
+//	    Snapshot(rs *render.RenderState)
+//	    Resize(cols, rows int)
+//	    Close() error
+//	}
+//
+// Window holds Pane-the-interface so session does not import pane.
+// Production wires in *pane.Pane (which satisfies the interface);
+// tests wire in a struct literal.
 //
 //	type Client struct {
 //	    ID        ClientID
@@ -54,10 +65,15 @@
 // returns its Name for "session_name"; `#{W:#{window_name}}` works
 // because Session returns its Winlinks for Children("W").
 //
+// # I/O surfaces
+//
+// None. Pure state, no goroutines, no clocks. Mutations are synchronous
+// method calls.
+//
 // # In isolation
 //
 // Buildable in a test without any I/O: construct a Server, add
-// Sessions, Windows, and mock Panes, assert on the model. Serialization
+// Sessions, Windows, and stub Panes, assert on the model. Serialization
 // helpers let tests round-trip state for layout and reattach scenarios.
 //
 // # Non-goals

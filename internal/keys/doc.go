@@ -15,9 +15,15 @@
 //     bracketed paste, and mouse sequences.
 //
 //  3. A named table registry: Table holds Key → Binding, and Registry
-//     holds Name → *Table. A Binding is an opaque value provided by
-//     the caller (in practice, a command.Command), so this package
-//     does not import command.
+//     holds Name → *Table. A Binding is `any` — an opaque value
+//     provided by the caller (in practice, a command.Command), so this
+//     package does not import command.
+//
+// # I/O surfaces
+//
+//   - Decoder reads bytes from a caller-supplied io.Reader.
+//
+// No environment reads, no filesystem reads, no goroutines, no network.
 //
 // # Nested bindings
 //
