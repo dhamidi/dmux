@@ -1,4 +1,4 @@
-// Package client is the thin gomux client: it connects to the server
+// Package client is the thin dmux client: it connects to the server
 // socket, identifies itself, forwards stdin and display output, and
 // exits with the status the server tells it to.
 //

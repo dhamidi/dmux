@@ -7,7 +7,7 @@
 // bool, and []string. New(parent *Store) returns a child Store whose
 // lookups fall through to the parent if a key is unset locally.
 //
-// The intended hierarchy for gomux:
+// The intended hierarchy for dmux:
 //
 //	server  (global)
 //	  └── session
@@ -28,11 +28,11 @@
 // # In isolation
 //
 // Can be dropped into any Go program that needs a scoped config tree.
-// No dependency on the rest of gomux.
+// No dependency on the rest of dmux.
 //
 // # Non-goals
 //
 // No file I/O. No parsing of user config. That's cfg.c in tmux; in
-// gomux, the config file is parsed by package parse into a CommandList
+// dmux, the config file is parsed by package parse into a CommandList
 // of `set-option` commands, which mutate the Store.
 package options

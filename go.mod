@@ -1,4 +1,4 @@
-module github.com/yourname/gomux
+module github.com/yourname/dmux
 
 go 1.23
 

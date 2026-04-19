@@ -1,4 +1,4 @@
-// Package parse turns gomux command-language source text into an AST
+// Package parse turns dmux command-language source text into an AST
 // of commands and blocks.
 //
 // # Boundary
@@ -20,8 +20,8 @@
 //
 // # In isolation
 //
-// Shipped with a standalone `gomux-parse` example that reads a config
-// file and prints the AST as JSON — useful for linting .gomux.conf
+// Shipped with a standalone `dmux-parse` example that reads a config
+// file and prints the AST as JSON — useful for linting .dmux.conf
 // files without booting a server.
 //
 // # Non-goals

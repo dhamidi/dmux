@@ -15,7 +15,7 @@
 //
 // # Operations
 //
-// All copy-mode commands are normal gomux commands, registered in
+// All copy-mode commands are normal dmux commands, registered in
 // package command/builtin under names like `send -X cursor-up`,
 // `send -X begin-selection`, `send -X copy-selection`, etc. This
 // package provides the state and rendering; commands dispatched

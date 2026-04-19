@@ -1,8 +1,8 @@
 # Binaries
-/gomux
-/gomux.exe
-/cmd/gomux/gomux
-/cmd/gomux/gomux.exe
+/dmux
+/dmux.exe
+/cmd/dmux/dmux
+/cmd/dmux/dmux.exe
 
 # Test binaries
 *.test

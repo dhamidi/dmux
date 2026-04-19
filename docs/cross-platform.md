@@ -1,6 +1,6 @@
 # Cross-platform notes
 
-gomux targets Linux, macOS, and Windows 10 1803+ in Windows Terminal.
+dmux targets Linux, macOS, and Windows 10 1803+ in Windows Terminal.
 ~70% of the codebase is OS-neutral Go. The rest is isolated to three
 packages with build-tagged files.
 

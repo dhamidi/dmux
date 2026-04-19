@@ -8,7 +8,7 @@
 //	type Item struct {
 //	    Label    string        // may contain #{...} format markers
 //	    Mnemonic rune          // optional single-key shortcut
-//	    Command  string        // gomux command source to run
+//	    Command  string        // dmux command source to run
 //	    Enabled  bool
 //	    Separator bool         // render as a horizontal rule
 //	}

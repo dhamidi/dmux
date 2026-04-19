@@ -1,4 +1,4 @@
-# gomux
+# dmux
 
 A terminal multiplexer in Go, built on [libghostty-vt](https://github.com/ghostty-org/ghostty)
 via the official [go-libghostty](https://github.com/mitchellh/go-libghostty) bindings.
@@ -18,7 +18,7 @@ anything from a higher tier. This constraint is what lets each module be
 tested and used in isolation.
 
 ```
-Tier 5  cmd/gomux                              entry point
+Tier 5  cmd/dmux                              entry point
 Tier 4  server            client                processes
 Tier 3  command  status  modes/*  control      interaction
 Tier 2  render  format  session  job           composition

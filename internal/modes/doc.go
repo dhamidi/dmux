@@ -1,4 +1,4 @@
-// Package modes defines the two mode interfaces used throughout gomux
+// Package modes defines the two mode interfaces used throughout dmux
 // and houses the individual mode implementations in sub-packages.
 //
 // # Two mode kinds

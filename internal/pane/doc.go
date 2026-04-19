@@ -1,7 +1,7 @@
 // Package pane is a single PTY paired with a libghostty-vt Terminal.
 //
-// This is the fundamental unit of terminal emulation in gomux. Every
-// shell running under gomux is one Pane.
+// This is the fundamental unit of terminal emulation in dmux. Every
+// shell running under dmux is one Pane.
 //
 // # Boundary
 //

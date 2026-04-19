@@ -23,7 +23,7 @@
 //
 // The package ships a small example that opens a PTY, execs $SHELL, and
 // copies stdin/stdout — a standalone "shell in a shell" utility with no
-// other gomux dependencies.
+// other dmux dependencies.
 //
 // # Non-goals
 //

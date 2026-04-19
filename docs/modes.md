@@ -1,6 +1,6 @@
 # Modes and overlays
 
-Modal UI in gomux splits into two shapes. Getting this split right is
+Modal UI in dmux splits into two shapes. Getting this split right is
 load-bearing — everything from `prefix q` to nested key bindings falls
 out of it.
 

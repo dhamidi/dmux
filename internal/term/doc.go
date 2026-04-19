@@ -27,7 +27,7 @@
 // # In isolation
 //
 // A small example uses the package to play Conway's Game of Life on
-// the real terminal, with no gomux state involved.
+// the real terminal, with no dmux state involved.
 //
 // # Non-goals
 //

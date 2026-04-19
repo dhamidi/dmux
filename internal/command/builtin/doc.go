@@ -1,4 +1,4 @@
-// Package builtin contains gomux's built-in commands, one file per
+// Package builtin contains dmux's built-in commands, one file per
 // command.
 //
 // # Boundary
@@ -7,7 +7,7 @@
 // package exports nothing — its entire effect is the side effect of
 // import-time registration.
 //
-//	import _ "github.com/yourname/gomux/internal/command/builtin"
+//	import _ "github.com/yourname/dmux/internal/command/builtin"
 //
 // Approximately ~60 commands total, grouped by file naming convention
 // that mirrors tmux's:
@@ -45,7 +45,7 @@
 //
 // # Splitting for embedders
 //
-// Someone embedding gomux who doesn't want copy-mode or menus can
+// Someone embedding dmux who doesn't want copy-mode or menus can
 // import only the sub-sets they need. The framework (package command)
 // has no hard requirement on any specific builtin being present.
 //

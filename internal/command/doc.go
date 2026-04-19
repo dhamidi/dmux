@@ -6,7 +6,7 @@
 // The framework lives here. The actual builtins live in
 // command/builtin. Splitting them means (a) this package is testable
 // with one-off fake commands, and (b) an embedder can build a
-// stripped-down gomux by picking which builtins to import.
+// stripped-down dmux by picking which builtins to import.
 //
 // # Core types
 //

@@ -25,7 +25,7 @@
 //
 // # In isolation
 //
-// A standalone `gomux-osinfo PID` example prints the foreground command
+// A standalone `dmux-osinfo PID` example prints the foreground command
 // and cwd for any pid — reusable for any Go program that needs these.
 //
 // # Non-goals

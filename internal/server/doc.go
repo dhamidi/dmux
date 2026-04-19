@@ -1,4 +1,4 @@
-// Package server is the long-lived gomux server process: the event
+// Package server is the long-lived dmux server process: the event
 // loop, the client accept path, timers, redraw scheduling, and the
 // glue that ties every lower-tier package together.
 //
@@ -8,7 +8,7 @@
 //
 //	Run(cfg Config) error
 //
-// Config carries the socket path, initial .gomux.conf path, and
+// Config carries the socket path, initial .dmux.conf path, and
 // platform hooks (daemonize on Unix, Windows service integration if
 // ever added). Run blocks until the server exits.
 //

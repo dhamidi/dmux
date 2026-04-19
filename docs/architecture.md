@@ -1,6 +1,6 @@
 # Architecture
 
-gomux is a client-server terminal multiplexer. The server is a long-lived
+dmux is a client-server terminal multiplexer. The server is a long-lived
 process that owns all pane terminals, sessions, and windows. Clients are
 thin processes that connect over a UNIX-domain socket, forward stdin
 bytes to the server, and display the bytes the server sends back.
@@ -12,7 +12,7 @@ import from higher tiers. Sideways imports within a tier are also
 avoided where possible.
 
 ```
-Tier 5  cmd/gomux                              entry point
+Tier 5  cmd/dmux                              entry point
 Tier 4  server            client                processes
 Tier 3  command  status  modes/*  control      interaction
 Tier 2  render  format  session  job           composition

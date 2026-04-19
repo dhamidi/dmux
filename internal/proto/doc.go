@@ -1,4 +1,4 @@
-// Package proto defines the wire protocol between the gomux client and
+// Package proto defines the wire protocol between the dmux client and
 // server.
 //
 // # Boundary
