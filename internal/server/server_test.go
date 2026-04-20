@@ -687,6 +687,81 @@ func TestRenderLoop(t *testing.T) {
 	}
 }
 
+// TestRenderLoopStatusBar verifies that when the "status" option is "on",
+// the render loop includes a status bar row in the composed output. The
+// session name appears in the status bar via the #{session_name} variable
+// in the default status-right format string.
+func TestRenderLoopStatusBar(t *testing.T) {
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	// Build a session with a fake pane; status is "on" by default.
+	state := session.NewServer()
+	sess := session.NewSession(session.SessionID("$1"), "statustest", state.Options)
+	paneID := session.PaneID(1)
+	win := session.NewWindow(session.WindowID("@1"), "main", sess.Options)
+	win.AddPane(paneID, &testFakePane{})
+	win.Layout = layout.New(3, 2, paneID)
+	sess.AddWindow(win)
+	state.AddSession(sess)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		State:    state,
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+
+	sendHandshake(t, clientConn)
+	time.Sleep(10 * time.Millisecond)
+
+	// Attach the client to the status-test session to trigger a render.
+	cm := proto.CommandMsg{Argv: []string{"attach-session", "-t", "statustest"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write attach-session: %v", err)
+	}
+
+	if err := clientConn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	msgType, payload, err := proto.ReadMsg(clientConn)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if msgType != proto.MsgStdout {
+		t.Fatalf("expected MsgStdout, got %s", msgType)
+	}
+	var sm proto.StdoutMsg
+	if err := sm.Decode(payload); err != nil {
+		t.Fatalf("decode StdoutMsg: %v", err)
+	}
+
+	// The default status-right is " #{session_name}" which expands to
+	// " statustest". Verify the session name appears in the status bar row.
+	if !strings.Contains(string(sm.Data), "statustest") {
+		preview := sm.Data
+		if len(preview) > 200 {
+			preview = preview[:200]
+		}
+		t.Fatalf("expected 'statustest' in ANSI output (status bar), got: %q", preview)
+	}
+	clientConn.SetDeadline(time.Time{}) //nolint:errcheck
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}
+
 // TestClientShutdownRequest verifies that a client sending MsgShutdown
 // triggers server shutdown without an external signal.
 func TestClientShutdownRequest(t *testing.T) {

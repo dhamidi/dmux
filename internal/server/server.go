@@ -14,6 +14,7 @@ import (
 	"github.com/dhamidi/dmux/internal/command"
 	_ "github.com/dhamidi/dmux/internal/command/builtin"
 	"github.com/dhamidi/dmux/internal/control"
+	"github.com/dhamidi/dmux/internal/format"
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/osinfo"
@@ -23,6 +24,8 @@ import (
 	"github.com/dhamidi/dmux/internal/render"
 	"github.com/dhamidi/dmux/internal/session"
 	"github.com/dhamidi/dmux/internal/shell"
+	"github.com/dhamidi/dmux/internal/status"
+	"github.com/dhamidi/dmux/internal/style"
 )
 
 // protoVersion is the wire protocol version this server implements.
@@ -804,11 +807,36 @@ func (s *srv) renderLoop(cc *clientConn) {
 				PaneIndex:         int(id),
 			})
 		}
+
+		// Capture status-related values while holding the lock.
+		statusOn, _ := client.Session.Options.GetString("status")
+		sessionName := client.Session.Name
+		windowName := win.Name
+		sessOpts := client.Session.Options
 		s.mu.Unlock()
 
+		// Build the status line when the status option is "on".
+		var statusLine render.StatusLine
+		statusRows := 0
+		if statusOn == "on" {
+			fmtCtx := format.MapContext{
+				"session_name": sessionName,
+				"window_name":  windowName,
+			}
+			sl := status.New(
+				&formatExpanderAdapter{e: format.New(nil)},
+				fmtCtx,
+				&status.StoreOptions{Store: sessOpts},
+			)
+			statusLine = &renderStatusAdapter{sl: sl}
+			statusRows = 1
+		}
+
 		r := render.New(render.Config{
-			Rows: rows,
-			Cols: cols,
+			Rows:       rows,
+			Cols:       cols,
+			Status:     statusLine,
+			StatusRows: statusRows,
 			Theme: render.Theme{
 				BorderLines:      borderLines,
 				PaneBorderStatus: borderStatus,
@@ -988,4 +1016,102 @@ func (s *srv) controlLoop(cc *clientConn) {
 			return
 		}
 	}
+}
+
+// formatExpanderAdapter adapts *format.Expander to the status.Expander interface.
+// format.Expander.Expand returns (string, error); status.Expander.Expand returns string.
+type formatExpanderAdapter struct {
+	e *format.Expander
+}
+
+func (a *formatExpanderAdapter) Expand(template string, ctx status.Context) string {
+	var fmtCtx format.Context
+	if fc, ok := ctx.(format.Context); ok {
+		fmtCtx = fc
+	} else {
+		fmtCtx = &statusContextWrapper{ctx: ctx}
+	}
+	result, _ := a.e.Expand(template, fmtCtx)
+	return result
+}
+
+// statusContextWrapper adapts a status.Context to format.Context by adding
+// a no-op Children implementation.
+type statusContextWrapper struct {
+	ctx status.Context
+}
+
+func (w *statusContextWrapper) Lookup(key string) (string, bool) {
+	return w.ctx.Lookup(key)
+}
+
+func (w *statusContextWrapper) Children(_ string) []format.Context {
+	return nil
+}
+
+// renderStatusAdapter adapts *status.StatusLine to render.StatusLine,
+// converting status.Cell values (carrying style.Style) to render.Cell values.
+type renderStatusAdapter struct {
+	sl *status.StatusLine
+}
+
+func (a *renderStatusAdapter) Render(width int) []render.Cell {
+	statusCells := a.sl.Render(width)
+	if statusCells == nil {
+		return nil
+	}
+	cells := make([]render.Cell, len(statusCells))
+	for i, sc := range statusCells {
+		cells[i] = render.Cell{
+			Char:  sc.Char,
+			Fg:    sc.Style.Fg,
+			FgR:   sc.Style.FgR,
+			FgG:   sc.Style.FgG,
+			FgB:   sc.Style.FgB,
+			Bg:    sc.Style.Bg,
+			BgR:   sc.Style.BgR,
+			BgG:   sc.Style.BgG,
+			BgB:   sc.Style.BgB,
+			Attrs: statusAttrsToRenderAttrs(sc.Style.Attrs),
+		}
+	}
+	return cells
+}
+
+// statusAttrsToRenderAttrs converts style package attribute bits to render
+// package attribute bits. The two packages define the same attributes but
+// assign them to different bit positions.
+func statusAttrsToRenderAttrs(sAttrs uint16) uint16 {
+	var r uint16
+	if sAttrs&style.AttrBold != 0 {
+		r |= render.AttrBold
+	}
+	if sAttrs&style.AttrItalics != 0 {
+		r |= render.AttrItalics
+	}
+	if sAttrs&style.AttrUnderscore != 0 {
+		r |= render.AttrUnderline
+	}
+	if sAttrs&style.AttrDoubleUnderscore != 0 {
+		r |= render.AttrDoubleUnderline
+	}
+	if sAttrs&style.AttrCurlyUnderscore != 0 {
+		r |= render.AttrCurlyUnderline
+	}
+	if sAttrs&style.AttrOverline != 0 {
+		r |= render.AttrOverline
+	}
+	if sAttrs&style.AttrBlink != 0 {
+		r |= render.AttrBlink
+	}
+	if sAttrs&style.AttrReverse != 0 {
+		r |= render.AttrReverse
+	}
+	if sAttrs&style.AttrDim != 0 {
+		r |= render.AttrDim
+	}
+	if sAttrs&style.AttrStrikethrough != 0 {
+		r |= render.AttrStrikethrough
+	}
+	return r
 }
