@@ -45,6 +45,15 @@ func addWindow(s *session.Session, id, name string) (*session.Window, *session.W
 	return w, wl
 }
 
+// ---------- KeyTables tests ----------
+
+func TestNewServer_KeyTablesInitialised(t *testing.T) {
+	srv := session.NewServer()
+	if srv.KeyTables == nil {
+		t.Fatal("NewServer().KeyTables must not be nil")
+	}
+}
+
 // ---------- Server tests ----------
 
 func TestServer_AddSession(t *testing.T) {

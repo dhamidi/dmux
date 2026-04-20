@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/dhamidi/dmux/internal/format"
+	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/options"
 )
@@ -12,23 +13,25 @@ import (
 // connected client, paste buffer, option, and hook. Server owns no goroutines
 // and performs no I/O; mutations are applied by command handlers (Tier 3).
 type Server struct {
-	Sessions map[SessionID]*Session
-	Clients  map[ClientID]*Client
-	Buffers  *BufferStack
-	Options  *options.Store
-	Env      Environ
-	Hooks    *HookTable
+	Sessions  map[SessionID]*Session
+	Clients   map[ClientID]*Client
+	Buffers   *BufferStack
+	Options   *options.Store
+	Env       Environ
+	Hooks     *HookTable
+	KeyTables *keys.Registry
 }
 
 // NewServer constructs an empty, ready-to-use Server.
 func NewServer() *Server {
 	return &Server{
-		Sessions: make(map[SessionID]*Session),
-		Clients:  make(map[ClientID]*Client),
-		Buffers:  &BufferStack{},
-		Options:  options.New(),
-		Env:      make(Environ),
-		Hooks:    &HookTable{},
+		Sessions:  make(map[SessionID]*Session),
+		Clients:   make(map[ClientID]*Client),
+		Buffers:   &BufferStack{},
+		Options:   options.New(),
+		Env:       make(Environ),
+		Hooks:     &HookTable{},
+		KeyTables: keys.NewRegistry(),
 	}
 }
 
