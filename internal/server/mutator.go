@@ -7,6 +7,8 @@ import (
 
 	"github.com/dhamidi/dmux/internal/command"
 	"github.com/dhamidi/dmux/internal/keys"
+	"github.com/dhamidi/dmux/internal/layout"
+	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/session"
 )
@@ -22,18 +24,29 @@ type serverMutator struct {
 	shutdown      func()
 	getConn       func(session.ClientID) (*clientConn, bool)
 	markDirty     func(*clientConn)
+	// newPane creates a new pane from the given configuration.
+	// Injected from Run (real PTY) or tests (fake).
+	newPane func(cfg pane.Config) (session.Pane, error)
 }
 
 // newServerMutator returns a command.Mutator backed by state.
 // shutdown is called by KillServer to trigger a graceful shutdown.
 // getConn and markDirty provide access to the live connection map for
 // operations that need to write directly to a client's network connection.
-func newServerMutator(state *session.Server, shutdown func(), getConn func(session.ClientID) (*clientConn, bool), markDirty func(*clientConn)) command.Mutator {
+// newPaneFn is the factory used to create new panes; pass a fake in tests.
+func newServerMutator(
+	state *session.Server,
+	shutdown func(),
+	getConn func(session.ClientID) (*clientConn, bool),
+	markDirty func(*clientConn),
+	newPaneFn func(cfg pane.Config) (session.Pane, error),
+) command.Mutator {
 	return &serverMutator{
 		state:     state,
 		shutdown:  shutdown,
 		getConn:   getConn,
 		markDirty: markDirty,
+		newPane:   newPaneFn,
 	}
 }
 
@@ -112,31 +125,172 @@ func (m *serverMutator) SwitchClient(clientID, sessionID string) error {
 }
 
 func (m *serverMutator) NewWindow(sessionID, name string) (command.WindowView, error) {
-	return command.WindowView{}, errStub("new-window")
+	sess, ok := m.state.Sessions[session.SessionID(sessionID)]
+	if !ok {
+		return command.WindowView{}, fmt.Errorf("new-window: session %q not found", sessionID)
+	}
+
+	m.nextWindowID++
+	id := session.WindowID(fmt.Sprintf("w%d", m.nextWindowID))
+	if name == "" {
+		name = fmt.Sprintf("window%d", m.nextWindowID)
+	}
+
+	win := session.NewWindow(id, name, sess.Options)
+
+	// Determine client size: use the first attached client's size, defaulting to 80×24.
+	cols, rows := 80, 24
+	for _, c := range m.state.Clients {
+		if c.Session != nil && c.Session.ID == sess.ID {
+			if c.Size.Cols > 0 {
+				cols = c.Size.Cols
+			}
+			if c.Size.Rows > 0 {
+				rows = c.Size.Rows
+			}
+			break
+		}
+	}
+
+	paneID := session.PaneID(layout.LeafID(1))
+	p, err := m.newPane(pane.Config{ID: paneID})
+	if err != nil {
+		return command.WindowView{}, fmt.Errorf("new-window: creating pane: %w", err)
+	}
+
+	win.AddPane(paneID, p)
+	win.Layout = layout.New(cols, rows, paneID)
+
+	wl := sess.AddWindow(win)
+	return toWindowView(wl), nil
 }
 
 func (m *serverMutator) KillWindow(sessionID, windowID string) error {
-	return errStub("kill-window")
+	sess, ok := m.state.Sessions[session.SessionID(sessionID)]
+	if !ok {
+		return fmt.Errorf("kill-window: session %q not found", sessionID)
+	}
+
+	for i, wl := range sess.Windows {
+		if wl.Window.ID == session.WindowID(windowID) {
+			win := wl.Window
+			for paneID, p := range win.Panes {
+				if err := p.Close(); err != nil {
+					log.Printf("kill-window: closing pane %v: %v", paneID, err)
+				}
+			}
+			sess.RemoveWindow(i)
+			return nil
+		}
+	}
+	return fmt.Errorf("kill-window: window %q not found in session %q", windowID, sessionID)
 }
 
 func (m *serverMutator) RenameWindow(sessionID, windowID, name string) error {
-	return errStub("rename-window")
+	sess, ok := m.state.Sessions[session.SessionID(sessionID)]
+	if !ok {
+		return fmt.Errorf("rename-window: session %q not found", sessionID)
+	}
+	for _, wl := range sess.Windows {
+		if wl.Window.ID == session.WindowID(windowID) {
+			wl.Window.Name = name
+			return nil
+		}
+	}
+	return fmt.Errorf("rename-window: window %q not found in session %q", windowID, sessionID)
 }
 
 func (m *serverMutator) SelectWindow(sessionID, windowID string) error {
-	return errStub("select-window")
+	sess, ok := m.state.Sessions[session.SessionID(sessionID)]
+	if !ok {
+		return fmt.Errorf("select-window: session %q not found", sessionID)
+	}
+	for _, wl := range sess.Windows {
+		if wl.Window.ID == session.WindowID(windowID) {
+			sess.Current = wl
+			return nil
+		}
+	}
+	return fmt.Errorf("select-window: window %q not found in session %q", windowID, sessionID)
 }
 
 func (m *serverMutator) SplitWindow(sessionID, windowID string) (command.PaneView, error) {
-	return command.PaneView{}, errStub("split-window")
+	sess, ok := m.state.Sessions[session.SessionID(sessionID)]
+	if !ok {
+		return command.PaneView{}, fmt.Errorf("split-window: session %q not found", sessionID)
+	}
+
+	var win *session.Window
+	for _, wl := range sess.Windows {
+		if wl.Window.ID == session.WindowID(windowID) {
+			win = wl.Window
+			break
+		}
+	}
+	if win == nil {
+		return command.PaneView{}, fmt.Errorf("split-window: window %q not found in session %q", windowID, sessionID)
+	}
+
+	activePaneID := win.Active
+	newPaneID := win.Layout.Split(activePaneID, layout.Vertical)
+
+	p, err := m.newPane(pane.Config{ID: newPaneID})
+	if err != nil {
+		return command.PaneView{}, fmt.Errorf("split-window: creating pane: %w", err)
+	}
+
+	win.AddPane(newPaneID, p)
+	return command.PaneView{
+		ID:    int(newPaneID),
+		Title: p.Title(),
+	}, nil
 }
 
 func (m *serverMutator) KillPane(paneID int) error {
-	return errStub("kill-pane")
+	targetID := session.PaneID(paneID)
+
+	for _, sess := range m.state.Sessions {
+		for _, wl := range sess.Windows {
+			win := wl.Window
+			p, ok := win.Panes[targetID]
+			if !ok {
+				continue
+			}
+			if err := p.Close(); err != nil {
+				log.Printf("kill-pane: closing pane %v: %v", targetID, err)
+			}
+			win.RemovePane(targetID)
+			win.Layout.Close(targetID)
+			if len(win.Panes) == 0 {
+				return m.KillWindow(string(sess.ID), string(win.ID))
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("kill-pane: pane %d not found", paneID)
 }
 
 func (m *serverMutator) SelectPane(sessionID, windowID string, paneID int) error {
-	return errStub("select-pane")
+	sess, ok := m.state.Sessions[session.SessionID(sessionID)]
+	if !ok {
+		return fmt.Errorf("select-pane: session %q not found", sessionID)
+	}
+	var win *session.Window
+	for _, wl := range sess.Windows {
+		if wl.Window.ID == session.WindowID(windowID) {
+			win = wl.Window
+			break
+		}
+	}
+	if win == nil {
+		return fmt.Errorf("select-pane: window %q not found in session %q", windowID, sessionID)
+	}
+	targetID := session.PaneID(paneID)
+	if _, ok := win.Panes[targetID]; !ok {
+		return fmt.Errorf("select-pane: pane %d not found in window %q", paneID, windowID)
+	}
+	win.Active = targetID
+	return nil
 }
 
 func (m *serverMutator) ResizePane(paneID int, direction string, amount int) error {

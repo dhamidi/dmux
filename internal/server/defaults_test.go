@@ -13,6 +13,7 @@ func TestLoadDefaultBindings(t *testing.T) {
 	mut := newServerMutator(state, func() {},
 		func(session.ClientID) (*clientConn, bool) { return nil, false },
 		func(*clientConn) {},
+		nil,
 	)
 
 	if err := loadDefaultBindings(mut); err != nil {

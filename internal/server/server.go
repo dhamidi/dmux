@@ -14,9 +14,12 @@ import (
 	"github.com/dhamidi/dmux/internal/command"
 	_ "github.com/dhamidi/dmux/internal/command/builtin"
 	"github.com/dhamidi/dmux/internal/keys"
+	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
+	"github.com/dhamidi/dmux/internal/pty"
 	"github.com/dhamidi/dmux/internal/render"
 	"github.com/dhamidi/dmux/internal/session"
+	"github.com/dhamidi/dmux/internal/shell"
 )
 
 // protoVersion is the wire protocol version this server implements.
@@ -131,6 +134,21 @@ func Run(cfg Config) error {
 			return cc, ok
 		},
 		func(cc *clientConn) { s.markDirty(cc) },
+		func(cfg pane.Config) (session.Pane, error) {
+			shellPath := shell.Default(os.LookupEnv, func(p string) bool {
+				_, err := os.Stat(p)
+				return err == nil
+			})
+			ptyDev, err := pty.Open(shellPath, nil, pty.Size{Rows: 24, Cols: 80})
+			if err != nil {
+				return nil, fmt.Errorf("new-pane: open pty: %w", err)
+			}
+			cfg.PTY = ptyDev
+			cfg.Term = &pane.FakeTerminal{}
+			cfg.Keys = &pane.FakeKeyEncoder{}
+			cfg.Mouse = &pane.FakeMouseEncoder{}
+			return pane.New(cfg)
+		},
 	)
 	s.queue = command.NewQueue()
 
