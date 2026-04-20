@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/dhamidi/dmux/internal/format"
 	"github.com/dhamidi/dmux/internal/keys"
@@ -215,12 +216,14 @@ func (wl *Winlink) Children(listKey string) []format.Context {
 // Window holds the pane layout and active-pane tracking for one terminal
 // window. A Window may be referenced by multiple Sessions via Winlinks.
 type Window struct {
-	ID      WindowID
-	Name    string
-	Layout  *layout.Tree
-	Panes   map[PaneID]Pane
-	Active  PaneID
-	Options *options.Store
+	ID               WindowID
+	Name             string
+	Layout           *layout.Tree
+	Panes            map[PaneID]Pane
+	Active           PaneID
+	Options          *options.Store
+	ActivityFlag     bool      // set when activity/bell detected; cleared on SelectWindow
+	LastMonitorCheck time.Time // timestamp of last monitor sweep
 }
 
 // NewWindow creates an empty Window with no panes. Call [Window.AddPane] to
@@ -253,7 +256,8 @@ func (w *Window) RemovePane(id PaneID) {
 }
 
 // Lookup satisfies [format.Context].
-// Recognised keys: "window_id", "window_name", "window_panes".
+// Recognised keys: "window_id", "window_name", "window_panes",
+// "window_activity_flag".
 func (w *Window) Lookup(key string) (string, bool) {
 	switch key {
 	case "window_id":
@@ -262,6 +266,11 @@ func (w *Window) Lookup(key string) (string, bool) {
 		return w.Name, true
 	case "window_panes":
 		return fmt.Sprintf("%d", len(w.Panes)), true
+	case "window_activity_flag":
+		if w.ActivityFlag {
+			return "1", true
+		}
+		return "0", true
 	}
 	return "", false
 }

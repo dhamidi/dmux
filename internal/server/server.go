@@ -592,7 +592,50 @@ func (s *srv) tickLoop() {
 		case <-ticker.C:
 			s.mu.Lock()
 			s.autoRenameWindows()
+			s.monitorWindows()
 			s.mu.Unlock()
+		}
+	}
+}
+
+// monitorWindows checks monitor-activity, monitor-silence, and monitor-bell
+// window options and alerts clients when conditions are met.
+// Must be called with s.mu held.
+func (s *srv) monitorWindows() {
+	now := s.cfg.Now()
+	for _, sess := range s.state.Sessions {
+		for _, wl := range sess.Windows {
+			win := wl.Window
+			for _, p := range win.Panes {
+				if on, _ := win.Options.GetBool("monitor-activity"); on {
+					if p.LastOutputAt().After(win.LastMonitorCheck) {
+						win.ActivityFlag = true
+						s.sendBellToClients(sess)
+					}
+				}
+				silenceSec, _ := win.Options.GetInt("monitor-silence")
+				if silenceSec > 0 && !p.LastOutputAt().IsZero() {
+					if now.Sub(p.LastOutputAt()) > time.Duration(silenceSec)*time.Second {
+						s.sendBellToClients(sess)
+					}
+				}
+				if on, _ := win.Options.GetBool("monitor-bell"); on {
+					if p.ConsumeBell() {
+						win.ActivityFlag = true
+						s.sendBellToClients(sess)
+					}
+				}
+			}
+			win.LastMonitorCheck = now
+		}
+	}
+}
+
+// sendBellToClients sends a BEL character to all clients attached to sess.
+func (s *srv) sendBellToClients(sess *session.Session) {
+	for _, cc := range s.conns {
+		if cc.client.Session != nil && cc.client.Session.ID == sess.ID {
+			_ = proto.WriteMsg(cc.netConn, proto.MsgStdout, []byte("\x07"))
 		}
 	}
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"testing"
+	"time"
 
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/pane"
@@ -24,6 +25,8 @@ func (f *fakePane) CaptureContent(history bool) ([]byte, error) { return nil, ni
 func (f *fakePane) Respawn(shell string) error                 { return nil }
 func (f *fakePane) Close() error                               { f.closed = true; return nil }
 func (f *fakePane) ShellPID() int                              { return 0 }
+func (f *fakePane) LastOutputAt() time.Time                    { return time.Time{} }
+func (f *fakePane) ConsumeBell() bool                          { return false }
 
 // newTestMutatorWithPane creates a serverMutator backed by a fresh session.Server
 // and a fake pane factory that returns fakePane instances.

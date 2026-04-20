@@ -1,6 +1,8 @@
 package session
 
 import (
+	"time"
+
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/pane"
@@ -74,6 +76,12 @@ type Pane interface {
 	// ShellPID returns the PID of the pane's direct child process (the shell).
 	// Returns 0 if the process has exited or the PTY is closed.
 	ShellPID() int
+	// LastOutputAt returns the time of the most recent PTY output written to
+	// the terminal. Returns the zero time if no output has been written yet.
+	LastOutputAt() time.Time
+	// ConsumeBell returns true if a BEL character (\x07) was received since
+	// the last call, and resets the flag.
+	ConsumeBell() bool
 }
 
 // Overlay is the interface that the session package requires of a client

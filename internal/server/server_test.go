@@ -20,6 +20,20 @@ import (
 	"github.com/dhamidi/dmux/internal/session"
 )
 
+// advancingClock returns a Clock that starts at start and advances by step
+// each call.
+func advancingClock(start time.Time, step time.Duration) server.Clock {
+	t := start
+	var mu sync.Mutex
+	return func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		now := t
+		t = t.Add(step)
+		return now
+	}
+}
+
 // pipeListener is a net.Listener backed by pre-connected net.Pipe() pairs.
 // Call dial() to obtain the client-side connection; the server side is queued
 // for the next Accept() call.
@@ -567,6 +581,8 @@ func (f *testFakePaneWithPID) Respawn(shell string) error                  { ret
 func (f *testFakePaneWithPID) SendKey(key keys.Key) error                  { return nil }
 func (f *testFakePaneWithPID) Write(data []byte) error                     { return nil }
 func (f *testFakePaneWithPID) ShellPID() int                               { return f.pid }
+func (f *testFakePaneWithPID) LastOutputAt() time.Time                     { return time.Time{} }
+func (f *testFakePaneWithPID) ConsumeBell() bool                           { return false }
 func (f *testFakePaneWithPID) Snapshot() pane.CellGrid {
 	return pane.CellGrid{Rows: 1, Cols: 1, Cells: []pane.Cell{{Char: 'X'}}}
 }
@@ -583,6 +599,8 @@ func (f *testFakePane) Respawn(shell string) error                  { return nil
 func (f *testFakePane) SendKey(key keys.Key) error                  { return nil }
 func (f *testFakePane) Write(data []byte) error                     { return nil }
 func (f *testFakePane) ShellPID() int                               { return 0 }
+func (f *testFakePane) LastOutputAt() time.Time                     { return time.Time{} }
+func (f *testFakePane) ConsumeBell() bool                           { return false }
 func (f *testFakePane) Snapshot() pane.CellGrid {
 	return pane.CellGrid{
 		Rows: 2, Cols: 3,
@@ -792,6 +810,8 @@ func (p *testCapturingPane) Close() error                                { retur
 func (p *testCapturingPane) CaptureContent(history bool) ([]byte, error) { return nil, nil }
 func (p *testCapturingPane) Respawn(shell string) error                  { return nil }
 func (p *testCapturingPane) SendKey(key keys.Key) error                  { return nil }
+func (p *testCapturingPane) LastOutputAt() time.Time                     { return time.Time{} }
+func (p *testCapturingPane) ConsumeBell() bool                           { return false }
 func (p *testCapturingPane) Write(data []byte) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1277,5 +1297,324 @@ func TestHookAfterNewSession(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}
+
+// testMonitorPane is a fake pane with configurable LastOutputAt and ConsumeBell
+// for testing the monitor-activity, monitor-silence, and monitor-bell features.
+type testMonitorPane struct {
+	lastOutputAt time.Time
+	bellResult   bool
+	mu           sync.Mutex
+}
+
+func (p *testMonitorPane) Title() string                               { return "" }
+func (p *testMonitorPane) Resize(cols, rows int) error                 { return nil }
+func (p *testMonitorPane) Close() error                                { return nil }
+func (p *testMonitorPane) CaptureContent(history bool) ([]byte, error) { return nil, nil }
+func (p *testMonitorPane) Respawn(shell string) error                  { return nil }
+func (p *testMonitorPane) SendKey(key keys.Key) error                  { return nil }
+func (p *testMonitorPane) Write(data []byte) error                     { return nil }
+func (p *testMonitorPane) ShellPID() int                               { return 0 }
+func (p *testMonitorPane) Snapshot() pane.CellGrid {
+	return pane.CellGrid{Rows: 1, Cols: 1, Cells: []pane.Cell{{Char: 'X'}}}
+}
+func (p *testMonitorPane) LastOutputAt() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastOutputAt
+}
+func (p *testMonitorPane) ConsumeBell() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	v := p.bellResult
+	p.bellResult = false
+	return v
+}
+
+// buildMonitorTestState creates a server state with one session, one window,
+// and one testMonitorPane. The monitor options are pre-registered so that
+// tests can call win.Options.Set before Run is called.
+func buildMonitorTestState(t *testing.T, p *testMonitorPane) (
+	state *session.Server,
+	sess *session.Session,
+	win *session.Window,
+) {
+	t.Helper()
+	state = session.NewServer()
+	// Pre-register monitor options so win.Options.Set works before Run().
+	state.Options.Register("monitor-activity", options.Bool, false)
+	state.Options.Register("monitor-bell", options.Bool, false)
+	state.Options.Register("monitor-silence", options.Int, 0)
+
+	sess = session.NewSession(session.SessionID("$1"), "monitor-sess", state.Options)
+	paneID := session.PaneID(1)
+
+	win = session.NewWindow(session.WindowID("@1"), "main", sess.Options)
+	win.AddPane(paneID, p)
+	win.Layout = layout.New(80, 24, paneID)
+
+	sess.AddWindow(win)
+	state.AddSession(sess)
+	return state, sess, win
+}
+
+// drainClientConn reads all messages from conn and signals bellCh when a BEL
+// character is detected in a payload. It stops when the connection is closed.
+func drainClientConn(conn net.Conn, bellCh chan<- struct{}) {
+	for {
+		_, payload, err := proto.ReadMsg(conn)
+		if err != nil {
+			return
+		}
+		if bytes.IndexByte(payload, '\x07') >= 0 {
+			select {
+			case bellCh <- struct{}{}:
+			default:
+			}
+		}
+	}
+}
+
+// TestMonitorActivity verifies that when monitor-activity is on and a pane
+// has output after LastMonitorCheck, the window's ActivityFlag is set and a
+// BEL is sent to the client.
+func TestMonitorActivity(t *testing.T) {
+	epoch := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	outputTime := epoch.Add(time.Hour)
+
+	fp := &testMonitorPane{lastOutputAt: outputTime}
+	state, _, win := buildMonitorTestState(t, fp)
+
+	if err := win.Options.Set("monitor-activity", true); err != nil {
+		t.Fatalf("set monitor-activity: %v", err)
+	}
+
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(epoch.Add(2 * time.Hour)),
+		State:    state,
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+	sendHandshake(t, clientConn)
+	time.Sleep(20 * time.Millisecond)
+
+	bellCh := make(chan struct{}, 4)
+	go drainClientConn(clientConn, bellCh)
+
+	cm := proto.CommandMsg{Argv: []string{"attach-session", "-t", "monitor-sess"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write attach-session: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		if win.ActivityFlag {
+			break
+		}
+	}
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+
+	if !win.ActivityFlag {
+		t.Fatal("expected ActivityFlag to be set after monitor-activity sweep")
+	}
+	select {
+	case <-bellCh:
+	default:
+		t.Fatal("expected BEL to be sent to client after monitor-activity")
+	}
+}
+
+// TestMonitorSilence verifies that when monitor-silence is set and a pane has
+// been silent for longer than the configured duration, a BEL is sent.
+func TestMonitorSilence(t *testing.T) {
+	epoch := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	lastOut := epoch.Add(-10 * time.Second)
+
+	fp := &testMonitorPane{lastOutputAt: lastOut}
+	state, _, win := buildMonitorTestState(t, fp)
+
+	if err := win.Options.Set("monitor-silence", 5); err != nil {
+		t.Fatalf("set monitor-silence: %v", err)
+	}
+
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(epoch),
+		State:    state,
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+	sendHandshake(t, clientConn)
+	time.Sleep(20 * time.Millisecond)
+
+	bellCh := make(chan struct{}, 4)
+	go drainClientConn(clientConn, bellCh)
+
+	cm := proto.CommandMsg{Argv: []string{"attach-session", "-t", "monitor-sess"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write attach-session: %v", err)
+	}
+
+	select {
+	case <-bellCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected BEL to be sent to client after monitor-silence")
+	}
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}
+
+// TestMonitorBell verifies that when monitor-bell is on and a pane has a
+// pending bell, the window's ActivityFlag is set and a BEL is sent to the client.
+func TestMonitorBell(t *testing.T) {
+	epoch := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	fp := &testMonitorPane{bellResult: true}
+	state, _, win := buildMonitorTestState(t, fp)
+
+	if err := win.Options.Set("monitor-bell", true); err != nil {
+		t.Fatalf("set monitor-bell: %v", err)
+	}
+
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(epoch),
+		State:    state,
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+	sendHandshake(t, clientConn)
+	time.Sleep(20 * time.Millisecond)
+
+	bellCh := make(chan struct{}, 4)
+	go drainClientConn(clientConn, bellCh)
+
+	cm := proto.CommandMsg{Argv: []string{"attach-session", "-t", "monitor-sess"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write attach-session: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		if win.ActivityFlag {
+			break
+		}
+	}
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+
+	if !win.ActivityFlag {
+		t.Fatal("expected ActivityFlag to be set after monitor-bell sweep")
+	}
+	select {
+	case <-bellCh:
+	default:
+		t.Fatal("expected BEL to be sent to client after monitor-bell")
+	}
+}
+
+// TestActivityFlagClearedOnSelect verifies that selecting a window clears its
+// ActivityFlag.
+func TestActivityFlagClearedOnSelect(t *testing.T) {
+	state := session.NewServer()
+	sess := session.NewSession(session.SessionID("$1"), "flag-sess", state.Options)
+	paneID := session.PaneID(1)
+	win := session.NewWindow(session.WindowID("@1"), "main", sess.Options)
+	win.AddPane(paneID, &testFakePane{})
+	win.Layout = layout.New(80, 24, paneID)
+	win.ActivityFlag = true
+	sess.AddWindow(win)
+	state.AddSession(sess)
+
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		State:    state,
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+	sendHandshake(t, clientConn)
+	time.Sleep(20 * time.Millisecond)
+
+	go func() {
+		for {
+			if _, _, err := proto.ReadMsg(clientConn); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Target "flag-sess:main" resolves by session name and window name.
+	cm := proto.CommandMsg{Argv: []string{"select-window", "-t", "flag-sess:main"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write select-window: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+
+	if win.ActivityFlag {
+		t.Fatal("expected ActivityFlag to be cleared after select-window")
 	}
 }

@@ -3,6 +3,7 @@ package server
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/pane"
@@ -25,6 +26,8 @@ func (r *recordingPane) CaptureContent(history bool) ([]byte, error) { return ni
 func (r *recordingPane) Respawn(shell string) error                  { return nil }
 func (r *recordingPane) Close() error                                { return nil }
 func (r *recordingPane) ShellPID() int                               { return 0 }
+func (r *recordingPane) LastOutputAt() time.Time                     { return time.Time{} }
+func (r *recordingPane) ConsumeBell() bool                           { return false }
 
 // newTestMutatorWithRecordingPane creates a serverMutator with a session
 // containing a window backed by a recordingPane.

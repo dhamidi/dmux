@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
@@ -126,6 +127,12 @@ type Pane interface {
 	// ShellPID returns the PID of the pane's direct child process (the shell).
 	// Returns 0 if the process has exited or the PTY is closed.
 	ShellPID() int
+	// LastOutputAt returns the time of the most recent PTY output written to
+	// the terminal. Returns the zero time if no output has been written yet.
+	LastOutputAt() time.Time
+	// ConsumeBell returns true if a BEL character (\x07) was received since
+	// the last call, and resets the flag.
+	ConsumeBell() bool
 }
 
 // Config holds the parameters for creating a new Pane.
@@ -159,10 +166,12 @@ type pane struct {
 	keyEnc   KeyEncoder
 	mouseEnc MouseEncoder
 
-	mu         sync.Mutex
-	ptyField   pty.PTY
-	cols, rows int
-	ptyFactory func(shell string, cols, rows int) (pty.PTY, error)
+	mu           sync.Mutex
+	ptyField     pty.PTY
+	cols, rows   int
+	ptyFactory   func(shell string, cols, rows int) (pty.PTY, error)
+	lastOutputAt time.Time // updated each time the PTY reader writes to the terminal
+	bellPending  bool      // set when \x07 (BEL) is detected in output
 
 	// done is closed by copyOutput when it exits.
 	done chan struct{}
@@ -198,11 +207,34 @@ func (p *pane) copyOutput() {
 		n, err := currentPTY.Read(buf)
 		if n > 0 {
 			p.term.Write(buf[:n]) //nolint:errcheck
+			p.mu.Lock()
+			p.lastOutputAt = time.Now()
+			if bytes.IndexByte(buf[:n], '\x07') >= 0 {
+				p.bellPending = true
+			}
+			p.mu.Unlock()
 		}
 		if err != nil {
 			return
 		}
 	}
+}
+
+// LastOutputAt returns the time of the most recent write to the terminal.
+func (p *pane) LastOutputAt() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastOutputAt
+}
+
+// ConsumeBell returns true if a BEL character was received since the last call,
+// and resets the flag.
+func (p *pane) ConsumeBell() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	v := p.bellPending
+	p.bellPending = false
+	return v
 }
 
 func (p *pane) ID() PaneID { return p.id }

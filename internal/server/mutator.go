@@ -237,6 +237,7 @@ func (m *serverMutator) SelectWindow(sessionID, windowID string) error {
 	for _, wl := range sess.Windows {
 		if wl.Window.ID == session.WindowID(windowID) {
 			sess.Current = wl
+			wl.Window.ActivityFlag = false
 			m.RunHook("after-select-window")
 			return nil
 		}
