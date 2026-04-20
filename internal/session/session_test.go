@@ -3,6 +3,8 @@ package session_test
 import (
 	"testing"
 
+	"github.com/dhamidi/dmux/internal/keys"
+	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/session"
 )
 
@@ -20,6 +22,9 @@ func (p *mockPane) Resize(c, r int) error                     { p.cols = c; p.ro
 func (p *mockPane) Close() error                               { return nil }
 func (p *mockPane) CaptureContent(_ bool) ([]byte, error)     { return nil, nil }
 func (p *mockPane) Respawn(_ string) error                     { return nil }
+func (p *mockPane) SendKey(_ keys.Key) error                   { return nil }
+func (p *mockPane) Write(_ []byte) error                       { return nil }
+func (p *mockPane) Snapshot() pane.CellGrid                   { return pane.CellGrid{} }
 
 // mockOverlay satisfies session.Overlay.
 type mockOverlay struct{ name string }

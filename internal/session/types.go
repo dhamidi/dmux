@@ -1,6 +1,10 @@
 package session
 
-import "github.com/dhamidi/dmux/internal/layout"
+import (
+	"github.com/dhamidi/dmux/internal/keys"
+	"github.com/dhamidi/dmux/internal/layout"
+	"github.com/dhamidi/dmux/internal/pane"
+)
 
 // SessionID uniquely identifies a session within a Server.
 type SessionID string
@@ -61,6 +65,12 @@ type Pane interface {
 	// Respawn kills the current child process and starts a fresh one using
 	// the given shell (falls back to $SHELL or /bin/sh if empty).
 	Respawn(shell string) error
+	// SendKey encodes and writes the given key event to the child process.
+	SendKey(key keys.Key) error
+	// Write sends raw bytes directly to the child process's PTY.
+	Write(data []byte) error
+	// Snapshot returns an immutable snapshot of the current visible terminal state.
+	Snapshot() pane.CellGrid
 }
 
 // Overlay is the interface that the session package requires of a client
