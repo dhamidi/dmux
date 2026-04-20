@@ -17,6 +17,26 @@ Each command handler receives a `*command.Ctx` and interacts with the server
 exclusively through its `Server` (read) and `Mutator` (write) interfaces — no
 builtin file imports any other internal package.
 
+`cmd/dmux` is now a functional entry point. Running `dmux` auto-starts the
+server on first use and attaches as a client. Run `dmux <command> [args]` to
+issue a specific command (e.g. `dmux new-session`). The binary contains both
+roles; `dmux start-server` runs in server mode explicitly.
+
+## Usage
+
+```
+dmux                        # attach (auto-starts server if needed)
+dmux new-session            # create a new session
+dmux list-sessions          # list sessions
+dmux start-server           # run server in foreground
+```
+
+The server socket path is resolved in priority order:
+
+1. `$DMUX_SOCKET` (if set)
+2. `$XDG_RUNTIME_DIR/dmux.sock` (if `$XDG_RUNTIME_DIR` is set)
+3. `$(os.UserCacheDir)/dmux/dmux.sock` (fallback)
+
 ## Design
 
 The architecture is laid out in tiers. Nothing in a lower tier may import
