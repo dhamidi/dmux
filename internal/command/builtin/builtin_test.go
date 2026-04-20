@@ -101,6 +101,22 @@ type testBackend struct {
 	serverMessages  []string
 	lockServerCalled bool
 	signaledChannels []string
+
+	// Mode entry recording.
+	copyModeCalls   []struct{ clientID string; scrollback bool }
+	chooseTreeCalls []struct{ clientID, sessionID, windowID string }
+	clockModeCalls  []struct{ clientID string; paneID int }
+	displayPopupCalls []struct {
+		clientID, command, title string
+		cols, rows               int
+	}
+	displayMenuCalls  []struct {
+		clientID string
+		items    []command.MenuEntry
+	}
+	displayPanesCalls []string
+	commandPromptCalls []struct{ clientID, prompt, initial string }
+	confirmBeforeCalls []struct{ clientID, prompt, command string }
 }
 
 // ─── command.Server (read) implementation ────────────────────────────────────
@@ -428,6 +444,58 @@ func (b *testBackend) WaitFor(channel string) error {
 
 func (b *testBackend) SignalChannel(channel string) {
 	b.signaledChannels = append(b.signaledChannels, channel)
+}
+
+func (b *testBackend) EnterCopyMode(clientID string, scrollback bool) error {
+	b.copyModeCalls = append(b.copyModeCalls, struct {
+		clientID   string
+		scrollback bool
+	}{clientID, scrollback})
+	return nil
+}
+
+func (b *testBackend) EnterChooseTree(clientID, sessionID, windowID string) error {
+	b.chooseTreeCalls = append(b.chooseTreeCalls, struct{ clientID, sessionID, windowID string }{clientID, sessionID, windowID})
+	return nil
+}
+
+func (b *testBackend) EnterClockMode(clientID string, paneID int) error {
+	b.clockModeCalls = append(b.clockModeCalls, struct {
+		clientID string
+		paneID   int
+	}{clientID, paneID})
+	return nil
+}
+
+func (b *testBackend) DisplayPopup(clientID, cmd, title string, cols, rows int) error {
+	b.displayPopupCalls = append(b.displayPopupCalls, struct {
+		clientID, command, title string
+		cols, rows               int
+	}{clientID, cmd, title, cols, rows})
+	return nil
+}
+
+func (b *testBackend) DisplayMenu(clientID string, items []command.MenuEntry) error {
+	b.displayMenuCalls = append(b.displayMenuCalls, struct {
+		clientID string
+		items    []command.MenuEntry
+	}{clientID, items})
+	return nil
+}
+
+func (b *testBackend) DisplayPanes(clientID string) error {
+	b.displayPanesCalls = append(b.displayPanesCalls, clientID)
+	return nil
+}
+
+func (b *testBackend) CommandPrompt(clientID, prompt, initial string) error {
+	b.commandPromptCalls = append(b.commandPromptCalls, struct{ clientID, prompt, initial string }{clientID, prompt, initial})
+	return nil
+}
+
+func (b *testBackend) ConfirmBefore(clientID, prompt, cmd string) error {
+	b.confirmBeforeCalls = append(b.confirmBeforeCalls, struct{ clientID, prompt, command string }{clientID, prompt, cmd})
+	return nil
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -927,5 +995,107 @@ func TestStartServer_ReturnsOK(t *testing.T) {
 	res := dispatch("start-server", nil, b)
 	if res.Err != nil {
 		t.Fatalf("start-server returned error: %v", res.Err)
+	}
+}
+
+// ─── Mode entry command tests ─────────────────────────────────────────────────
+
+func TestCopyMode_CallsMutator(t *testing.T) {
+	b := newBackend()
+	res := dispatch("copy-mode", nil, b)
+	if res.Err != nil {
+		t.Fatalf("copy-mode returned error: %v", res.Err)
+	}
+	if len(b.copyModeCalls) != 1 {
+		t.Fatalf("expected 1 EnterCopyMode call, got %d", len(b.copyModeCalls))
+	}
+	if b.copyModeCalls[0].clientID != "c1" {
+		t.Errorf("EnterCopyMode clientID = %q, want %q", b.copyModeCalls[0].clientID, "c1")
+	}
+	if b.copyModeCalls[0].scrollback {
+		t.Error("EnterCopyMode scrollback should be false when -H is not passed")
+	}
+}
+
+func TestCopyMode_WithHistory(t *testing.T) {
+	b := newBackend()
+	res := dispatch("copy-mode", []string{"-H"}, b)
+	if res.Err != nil {
+		t.Fatalf("copy-mode -H returned error: %v", res.Err)
+	}
+	if len(b.copyModeCalls) != 1 || !b.copyModeCalls[0].scrollback {
+		t.Errorf("EnterCopyMode scrollback should be true when -H is passed: %v", b.copyModeCalls)
+	}
+}
+
+func TestChooseTree_CallsMutator(t *testing.T) {
+	b := newBackend()
+	res := dispatch("choose-tree", nil, b)
+	if res.Err != nil {
+		t.Fatalf("choose-tree returned error: %v", res.Err)
+	}
+	if len(b.chooseTreeCalls) != 1 {
+		t.Fatalf("expected 1 EnterChooseTree call, got %d", len(b.chooseTreeCalls))
+	}
+	if b.chooseTreeCalls[0].clientID != "c1" {
+		t.Errorf("EnterChooseTree clientID = %q, want %q", b.chooseTreeCalls[0].clientID, "c1")
+	}
+}
+
+func TestClockMode_CallsMutator(t *testing.T) {
+	b := newBackend()
+	res := dispatch("clock-mode", nil, b)
+	if res.Err != nil {
+		t.Fatalf("clock-mode returned error: %v", res.Err)
+	}
+	if len(b.clockModeCalls) != 1 {
+		t.Fatalf("expected 1 EnterClockMode call, got %d", len(b.clockModeCalls))
+	}
+	if b.clockModeCalls[0].paneID != 1 {
+		t.Errorf("EnterClockMode paneID = %d, want 1", b.clockModeCalls[0].paneID)
+	}
+}
+
+func TestDisplayMenu_ParsesTriples(t *testing.T) {
+	b := newBackend()
+	res := dispatch("display-menu", []string{"exit", "q", "kill-server"}, b)
+	if res.Err != nil {
+		t.Fatalf("display-menu returned error: %v", res.Err)
+	}
+	if len(b.displayMenuCalls) != 1 {
+		t.Fatalf("expected 1 DisplayMenu call, got %d", len(b.displayMenuCalls))
+	}
+	items := b.displayMenuCalls[0].items
+	if len(items) != 1 {
+		t.Fatalf("expected 1 menu item, got %d", len(items))
+	}
+	if items[0].Label != "exit" || items[0].Key != "q" || items[0].Command != "kill-server" {
+		t.Errorf("menu item = %+v, want {Label:exit Key:q Command:kill-server}", items[0])
+	}
+}
+
+func TestDisplayMenu_RejectsNonTriple(t *testing.T) {
+	b := newBackend()
+	res := dispatch("display-menu", []string{"exit", "q"}, b) // only 2 args, not multiple of 3
+	if res.Err == nil {
+		t.Error("expected error for non-triple args, got nil")
+	}
+}
+
+func TestConfirmBefore_ForwardsPromptAndCommand(t *testing.T) {
+	b := newBackend()
+	res := dispatch("confirm-before", []string{"-p", "Kill server?", "kill-server"}, b)
+	if res.Err != nil {
+		t.Fatalf("confirm-before returned error: %v", res.Err)
+	}
+	if len(b.confirmBeforeCalls) != 1 {
+		t.Fatalf("expected 1 ConfirmBefore call, got %d", len(b.confirmBeforeCalls))
+	}
+	got := b.confirmBeforeCalls[0]
+	if got.prompt != "Kill server?" {
+		t.Errorf("ConfirmBefore prompt = %q, want %q", got.prompt, "Kill server?")
+	}
+	if got.command != "kill-server" {
+		t.Errorf("ConfirmBefore command = %q, want %q", got.command, "kill-server")
 	}
 }

@@ -150,6 +150,13 @@ type EnvironEntry struct {
 	Removed bool
 }
 
+// MenuEntry is one item in a display-menu popup.
+type MenuEntry struct {
+	Label   string
+	Key     string
+	Command string
+}
+
 // Mutator is the write interface that command handlers use to modify server
 // state. It is a separate interface from Server so that command tests can
 // stub only the write-side methods they exercise.
@@ -223,6 +230,16 @@ type Mutator interface {
 	LockServer() error
 	WaitFor(channel string) error
 	SignalChannel(channel string)
+
+	// Mode entry mutations.
+	EnterCopyMode(clientID string, scrollback bool) error
+	EnterChooseTree(clientID, sessionID, windowID string) error
+	EnterClockMode(clientID string, paneID int) error
+	DisplayPopup(clientID, command, title string, cols, rows int) error
+	DisplayMenu(clientID string, items []MenuEntry) error
+	DisplayPanes(clientID string) error
+	CommandPrompt(clientID, prompt, initialValue string) error
+	ConfirmBefore(clientID, prompt, command string) error
 }
 
 // ─── Argument types ───────────────────────────────────────────────────────────

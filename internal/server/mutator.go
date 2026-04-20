@@ -644,3 +644,37 @@ func (m *serverMutator) WaitFor(channel string) error {
 func (m *serverMutator) SignalChannel(channel string) {
 	m.state.Channels.Signal(channel)
 }
+
+// ─── Mode entry mutations ─────────────────────────────────────────────────────
+
+func (m *serverMutator) EnterCopyMode(clientID string, scrollback bool) error {
+	return errStub("copy-mode")
+}
+
+func (m *serverMutator) EnterChooseTree(clientID, sessionID, windowID string) error {
+	return errStub("choose-tree")
+}
+
+func (m *serverMutator) EnterClockMode(clientID string, paneID int) error {
+	return errStub("clock-mode")
+}
+
+func (m *serverMutator) DisplayPopup(clientID, cmd, title string, cols, rows int) error {
+	return errStub("display-popup")
+}
+
+func (m *serverMutator) DisplayMenu(clientID string, items []command.MenuEntry) error {
+	return errStub("display-menu")
+}
+
+func (m *serverMutator) DisplayPanes(clientID string) error {
+	return errStub("display-panes")
+}
+
+func (m *serverMutator) CommandPrompt(clientID, prompt, initialValue string) error {
+	return errStub("command-prompt")
+}
+
+func (m *serverMutator) ConfirmBefore(clientID, prompt, cmd string) error {
+	return errStub("confirm-before")
+}
