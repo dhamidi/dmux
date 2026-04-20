@@ -394,6 +394,91 @@ func TestAutoCreateInitialSession(t *testing.T) {
 	}
 }
 
+// TestMsgStdinKeyBinding verifies that a bound key received via MsgStdin is
+// dispatched through the key table and triggers the corresponding command.
+// It binds 'q' in the root table to new-session, sends 'q' as stdin input,
+// and then confirms a new session was created by listing sessions.
+func TestMsgStdinKeyBinding(t *testing.T) {
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	dirtyIDs := make(chan session.ClientID, 8)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		OnDirty: func(id session.ClientID) {
+			select {
+			case dirtyIDs <- id:
+			default:
+			}
+		},
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+
+	sendHandshake(t, clientConn)
+	// Wait for the identify sequence to complete and the auto-session to be created.
+	time.Sleep(20 * time.Millisecond)
+
+	// Bind 'q' in the root table to new-session.
+	bindCmd := proto.CommandMsg{Argv: []string{"bind-key", "-T", "root", "q", "new-session"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, bindCmd.Encode()); err != nil {
+		t.Fatalf("write bind-key: %v", err)
+	}
+
+	// Send MsgStdin with 'q' (0x71) to trigger the bound command.
+	stdinMsg := proto.StdinMsg{Data: []byte("q")}
+	if err := proto.WriteMsg(clientConn, proto.MsgStdin, stdinMsg.Encode()); err != nil {
+		t.Fatalf("write MsgStdin: %v", err)
+	}
+
+	// Wait for OnDirty to fire (signals the MsgStdin was processed).
+	select {
+	case <-dirtyIDs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnDirty was not called after MsgStdin within timeout")
+	}
+
+	// Confirm the bound command ran by verifying a second session was created.
+	listCmd := proto.CommandMsg{Argv: []string{"list-sessions"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, listCmd.Encode()); err != nil {
+		t.Fatalf("write list-sessions: %v", err)
+	}
+	if err := clientConn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	msgType, payload, err := proto.ReadMsg(clientConn)
+	if err != nil {
+		t.Fatalf("read list-sessions response: %v", err)
+	}
+	if msgType != proto.MsgStdout {
+		t.Fatalf("expected MsgStdout, got %s", msgType)
+	}
+	var outMsg proto.StdoutMsg
+	if err := outMsg.Decode(payload); err != nil {
+		t.Fatalf("decode StdoutMsg: %v", err)
+	}
+	// The auto-created session is "0"; new-session creates "1".
+	if !strings.Contains(string(outMsg.Data), "1:") {
+		t.Fatalf("expected session '1' in list-sessions output, got: %q", outMsg.Data)
+	}
+	clientConn.SetDeadline(time.Time{}) //nolint:errcheck
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}
+
 // TestClientShutdownRequest verifies that a client sending MsgShutdown
 // triggers server shutdown without an external signal.
 func TestClientShutdownRequest(t *testing.T) {

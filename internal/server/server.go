@@ -1,16 +1,19 @@
 package server
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/dhamidi/dmux/internal/command"
 	_ "github.com/dhamidi/dmux/internal/command/builtin"
+	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/session"
 )
@@ -50,20 +53,33 @@ type Config struct {
 	OnDirty func(id session.ClientID)
 }
 
+// clientDecoder bundles a write-side buffer with the keys.Decoder that reads
+// from it. Writing raw bytes to buf makes them available to dec.Next().
+type clientDecoder struct {
+	buf *bytes.Buffer
+	dec *keys.Decoder
+}
+
+func newClientDecoder() *clientDecoder {
+	buf := &bytes.Buffer{}
+	return &clientDecoder{buf: buf, dec: keys.NewDecoder(buf)}
+}
+
 // srv is the running server state.
 type srv struct {
-	cfg     Config
-	state   *session.Server
-	store   command.Server
-	mutator command.Mutator
-	queue   *command.Queue
-	log     *log.Logger
-	mu      sync.Mutex
-	conns   map[session.ClientID]*clientConn
-	nextID  uint64
-	done    chan struct{}
-	once    sync.Once // ensures done is closed at most once
-	wg      sync.WaitGroup
+	cfg      Config
+	state    *session.Server
+	store    command.Server
+	mutator  command.Mutator
+	queue    *command.Queue
+	log      *log.Logger
+	mu       sync.Mutex
+	conns    map[session.ClientID]*clientConn
+	decoders map[session.ClientID]*clientDecoder
+	nextID   uint64
+	done     chan struct{}
+	once     sync.Once // ensures done is closed at most once
+	wg       sync.WaitGroup
 }
 
 // clientConn is the server-side view of one connected client.
@@ -87,11 +103,12 @@ func Run(cfg Config) error {
 	}
 
 	s := &srv{
-		cfg:   cfg,
-		state: session.NewServer(),
-		log:   log.New(cfg.Log, "server: ", 0),
-		conns: make(map[session.ClientID]*clientConn),
-		done:  make(chan struct{}),
+		cfg:      cfg,
+		state:    session.NewServer(),
+		log:      log.New(cfg.Log, "server: ", 0),
+		conns:    make(map[session.ClientID]*clientConn),
+		decoders: make(map[session.ClientID]*clientDecoder),
+		done:     make(chan struct{}),
 	}
 	s.store = newServerStore(s.state)
 	s.mutator = newServerMutator(s.state)
@@ -208,6 +225,7 @@ func (s *srv) serveConn(nc net.Conn) {
 	s.mu.Lock()
 	s.state.Clients[client.ID] = client
 	s.conns[client.ID] = cc
+	s.decoders[client.ID] = newClientDecoder()
 	s.mu.Unlock()
 
 	s.log.Printf("client %s attached (tty=%s term=%s)", client.ID, client.TTY, client.Term)
@@ -228,6 +246,7 @@ func (s *srv) serveConn(nc net.Conn) {
 	defer func() {
 		s.mu.Lock()
 		delete(s.conns, client.ID)
+		delete(s.decoders, client.ID)
 		s.state.DetachClient(client.ID)
 		s.mu.Unlock()
 		s.log.Printf("client %s detached", client.ID)
@@ -357,8 +376,72 @@ func (s *srv) clientLoop(cc *clientConn) {
 			s.markDirty(cc)
 
 		case proto.MsgStdin:
-			// Key input will be decoded through keys.Decoder and dispatched
-			// through the client's key table in a future iteration.
+			var sm proto.StdinMsg
+			if err := sm.Decode(payload); err != nil {
+				continue
+			}
+			rawBytes := sm.Data
+			if len(rawBytes) == 0 {
+				continue
+			}
+
+			s.mu.Lock()
+			cd := s.decoders[cc.client.ID]
+			if cd != nil {
+				cd.buf.Write(rawBytes) //nolint:errcheck // bytes.Buffer.Write never fails
+			}
+			s.mu.Unlock()
+
+			if cd == nil {
+				continue
+			}
+
+			for {
+				k, err := cd.dec.Next()
+				if err != nil {
+					break // io.EOF or decode error: no more keys in this payload
+				}
+
+				s.mu.Lock()
+				tableName := cc.client.KeyTable
+				if tableName == "" {
+					tableName = "root"
+				}
+				table, hasTable := s.state.KeyTables.Get(tableName)
+				var (
+					boundCmd string
+					isBound  bool
+				)
+				if hasTable {
+					if rawCmd, found := table.Lookup(k); found {
+						if cmdStr, isStr := rawCmd.(string); isStr && cmdStr != "" {
+							boundCmd = cmdStr
+							isBound = true
+						}
+					}
+				}
+				var activePane session.Pane
+				if !isBound && cc.client.Session != nil && cc.client.Session.Current != nil {
+					win := cc.client.Session.Current.Window
+					if pane, ok := win.Panes[win.Active]; ok {
+						activePane = pane
+					}
+				}
+				clientView, _ := s.store.GetClient(string(cc.client.ID))
+				s.mu.Unlock()
+
+				if isBound {
+					argv := strings.Fields(boundCmd)
+					if len(argv) > 0 {
+						command.Dispatch(argv[0], argv[1:], s.store, clientView, s.queue, s.mutator)
+					}
+				} else if activePane != nil {
+					_ = activePane.Write(rawBytes)
+				}
+			}
+
+			s.queue.Drain()
+			s.markDirty(cc)
 
 		case proto.MsgShutdown:
 			s.log.Printf("client %s requested shutdown", cc.id)
