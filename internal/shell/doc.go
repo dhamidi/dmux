@@ -2,13 +2,24 @@
 //
 // # Boundary
 //
-// Default() string returns the shell executable path to use when the
-// user hasn't specified one. Split out of package pane because the
-// logic differs per platform and because command.Default-shell-option
-// also needs to know the fallback.
+// Default(env, exists) string returns the shell executable path to use when
+// the user hasn't specified one. Split out of package pane because the logic
+// differs per platform and because command.Default-shell-option also needs to
+// know the fallback.
 //
-//   - Unix: $SHELL, then /etc/passwd pw_shell, then /bin/sh.
-//   - Windows: %COMSPEC%, then PowerShell, then cmd.exe.
+// All OS access is explicit: callers must supply two I/O functions:
+//
+//   - env: func(key string) (string, bool) — looks up an environment variable.
+//   - exists: func(path string) bool — reports whether a path is executable.
+//
+// Typical callers pass os.LookupEnv and a thin wrapper around os.Stat.
+// Tests pass stubs so the package can be exercised without touching the real
+// environment or filesystem.
+//
+// # Platform behaviour
+//
+//   - Unix: $SHELL → /bin/sh → "sh".
+//   - Windows: %COMSPEC% → PowerShell paths → cmd.exe.
 //
 // # Non-goals
 //
