@@ -24,6 +24,7 @@ func (r *recordingPane) Snapshot() pane.CellGrid                     { return pa
 func (r *recordingPane) CaptureContent(history bool) ([]byte, error) { return nil, nil }
 func (r *recordingPane) Respawn(shell string) error                  { return nil }
 func (r *recordingPane) Close() error                                { return nil }
+func (r *recordingPane) ShellPID() int                               { return 0 }
 
 // newTestMutatorWithRecordingPane creates a serverMutator with a session
 // containing a window backed by a recordingPane.

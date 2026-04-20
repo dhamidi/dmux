@@ -71,6 +71,9 @@ type Pane interface {
 	Write(data []byte) error
 	// Snapshot returns an immutable snapshot of the current visible terminal state.
 	Snapshot() pane.CellGrid
+	// ShellPID returns the PID of the pane's direct child process (the shell).
+	// Returns 0 if the process has exited or the PTY is closed.
+	ShellPID() int
 }
 
 // Overlay is the interface that the session package requires of a client

@@ -88,6 +88,15 @@ func (p *posixPTY) Resize(rows, cols int) error {
 	return unix.IoctlSetWinsize(int(p.master.Fd()), unix.TIOCSWINSZ, &ws)
 }
 
+// Pid returns the PID of the child process started inside the PTY.
+// Returns 0 if the process has not started or has exited.
+func (p *posixPTY) Pid() int {
+	if p.cmd.Process == nil {
+		return 0
+	}
+	return p.cmd.Process.Pid
+}
+
 // Close kills the child process and releases the master PTY file descriptor.
 func (p *posixPTY) Close() error {
 	if p.cmd.Process != nil {

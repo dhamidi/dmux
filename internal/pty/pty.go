@@ -21,6 +21,9 @@ type PTY interface {
 	Resize(rows, cols int) error
 	// Close kills the child process and releases all OS resources.
 	Close() error
+	// Pid returns the PID of the direct child process started inside the PTY.
+	// Returns 0 if the process has not started or has already exited.
+	Pid() int
 }
 
 // Open starts cmd with args inside a new pseudo-terminal sized to size.

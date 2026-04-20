@@ -123,6 +123,9 @@ type Pane interface {
 	// Close shuts down the child process and releases all resources.
 	// It blocks until the output-copy goroutine has exited.
 	Close() error
+	// ShellPID returns the PID of the pane's direct child process (the shell).
+	// Returns 0 if the process has exited or the PTY is closed.
+	ShellPID() int
 }
 
 // Config holds the parameters for creating a new Pane.
@@ -260,6 +263,17 @@ func (p *pane) Resize(cols, rows int) error {
 
 func (p *pane) Snapshot() CellGrid {
 	return p.term.Snapshot()
+}
+
+// ShellPID returns the PID of the direct child process running inside the PTY.
+// Returns 0 if the PTY is nil or the process has exited.
+func (p *pane) ShellPID() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ptyField == nil {
+		return 0
+	}
+	return p.ptyField.Pid()
 }
 
 // CaptureContent renders the visible terminal grid as plain text.

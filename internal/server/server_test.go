@@ -552,6 +552,23 @@ func TestConfigFileAutoLoad(t *testing.T) {
 	}
 }
 
+// testFakePaneWithPID is like testFakePane but returns a configurable ShellPID.
+type testFakePaneWithPID struct {
+	pid int
+}
+
+func (f *testFakePaneWithPID) Title() string                               { return "" }
+func (f *testFakePaneWithPID) Resize(cols, rows int) error                 { return nil }
+func (f *testFakePaneWithPID) Close() error                                { return nil }
+func (f *testFakePaneWithPID) CaptureContent(history bool) ([]byte, error) { return nil, nil }
+func (f *testFakePaneWithPID) Respawn(shell string) error                  { return nil }
+func (f *testFakePaneWithPID) SendKey(key keys.Key) error                  { return nil }
+func (f *testFakePaneWithPID) Write(data []byte) error                     { return nil }
+func (f *testFakePaneWithPID) ShellPID() int                               { return f.pid }
+func (f *testFakePaneWithPID) Snapshot() pane.CellGrid {
+	return pane.CellGrid{Rows: 1, Cols: 1, Cells: []pane.Cell{{Char: 'X'}}}
+}
+
 // testFakePane is a minimal session.Pane for use in TestRenderLoop.
 // Snapshot returns a fixed 3×2 grid with distinct characters.
 type testFakePane struct{}
@@ -563,6 +580,7 @@ func (f *testFakePane) CaptureContent(history bool) ([]byte, error) { return nil
 func (f *testFakePane) Respawn(shell string) error                  { return nil }
 func (f *testFakePane) SendKey(key keys.Key) error                  { return nil }
 func (f *testFakePane) Write(data []byte) error                     { return nil }
+func (f *testFakePane) ShellPID() int                               { return 0 }
 func (f *testFakePane) Snapshot() pane.CellGrid {
 	return pane.CellGrid{
 		Rows: 2, Cols: 3,
@@ -677,5 +695,77 @@ func TestClientShutdownRequest(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run() did not return within timeout after MsgShutdown")
+	}
+}
+
+// TestAutoRename verifies that when the automatic-rename window option is on
+// and the active pane has a non-zero ShellPID, the tick loop updates the
+// window name to the value returned by ForegroundCommand.
+func TestAutoRename(t *testing.T) {
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	const fakePID = 12345
+	const expectedName = "vim"
+
+	// Build initial server state: one session with a window and a pane that
+	// has a non-zero ShellPID.
+	state := session.NewServer()
+	sess := session.NewSession(session.SessionID("$1"), "test-sess", state.Options)
+	paneID := session.PaneID(1)
+	win := session.NewWindow(session.WindowID("@1"), "bash", sess.Options)
+	win.AddPane(paneID, &testFakePaneWithPID{pid: fakePID})
+	win.Layout = layout.New(80, 24, paneID)
+	sess.AddWindow(win)
+	state.AddSession(sess)
+
+	dirtyIDs := make(chan session.ClientID, 8)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		State:    state,
+		ForegroundCommand: func(pid int) string {
+			if pid == fakePID {
+				return expectedName
+			}
+			return ""
+		},
+		OnDirty: func(id session.ClientID) {
+			select {
+			case dirtyIDs <- id:
+			default:
+			}
+		},
+	})
+
+	// Wait for the tick loop to fire (ticker fires every second).
+	// We allow up to 3 seconds for the rename to happen.
+	deadline := time.Now().Add(3 * time.Second)
+	renamed := false
+	for time.Now().Before(deadline) {
+		// Check the window name directly on the shared state.
+		// The server lock is internal, so we poll briefly.
+		time.Sleep(50 * time.Millisecond)
+		if win.Name == expectedName {
+			renamed = true
+			break
+		}
+	}
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+
+	if !renamed {
+		t.Fatalf("expected window name %q after auto-rename tick, got %q", expectedName, win.Name)
 	}
 }

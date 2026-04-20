@@ -23,6 +23,7 @@ func (f *fakePane) Snapshot() pane.CellGrid                   { return pane.Cell
 func (f *fakePane) CaptureContent(history bool) ([]byte, error) { return nil, nil }
 func (f *fakePane) Respawn(shell string) error                 { return nil }
 func (f *fakePane) Close() error                               { f.closed = true; return nil }
+func (f *fakePane) ShellPID() int                              { return 0 }
 
 // newTestMutatorWithPane creates a serverMutator backed by a fresh session.Server
 // and a fake pane factory that returns fakePane instances.

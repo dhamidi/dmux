@@ -19,6 +19,7 @@ func (p *mockPane) Respawn(_ string) error                { return nil }
 func (p *mockPane) SendKey(_ keys.Key) error              { return nil }
 func (p *mockPane) Write(_ []byte) error                  { return nil }
 func (p *mockPane) Snapshot() pane.CellGrid               { return pane.CellGrid{} }
+func (p *mockPane) ShellPID() int                         { return 0 }
 
 // helpers
 

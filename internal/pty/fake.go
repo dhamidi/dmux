@@ -23,6 +23,9 @@ type FakePTY struct {
 
 	// Resizes records each Resize call in the order it was received.
 	Resizes []Size
+
+	// FakePID is returned by Pid(). Set this to simulate a running process.
+	FakePID int
 }
 
 // InjectOutput queues data to be returned by subsequent Read calls,
@@ -74,6 +77,13 @@ func (f *FakePTY) Close() error {
 	defer f.mu.Unlock()
 	f.closed = true
 	return nil
+}
+
+// Pid returns the fake PID configured via FakePID.
+func (f *FakePTY) Pid() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.FakePID
 }
 
 // Input returns a copy of all bytes passed to Write so far.

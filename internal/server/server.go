@@ -14,6 +14,7 @@ import (
 	"github.com/dhamidi/dmux/internal/command"
 	_ "github.com/dhamidi/dmux/internal/command/builtin"
 	"github.com/dhamidi/dmux/internal/keys"
+	"github.com/dhamidi/dmux/internal/osinfo"
 	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/pty"
@@ -65,6 +66,12 @@ type Config struct {
 	// creating a new empty Server. Primarily useful in tests that need
 	// to pre-populate sessions, windows, or panes.
 	State *session.Server
+
+	// ForegroundCommand, if non-nil, is called on each status tick to resolve
+	// the name of the foreground process for a given shell PID. It is used by
+	// the automatic-rename feature. Defaults to osinfo.Default().ForegroundCommand
+	// (ignoring errors) when nil. Tests may inject a stub.
+	ForegroundCommand func(pid int) string
 }
 
 // clientDecoder bundles a write-side buffer with the keys.Decoder that reads
@@ -115,6 +122,13 @@ func Run(cfg Config) error {
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
+	}
+	if cfg.ForegroundCommand == nil {
+		osinfoClient := osinfo.Default()
+		cfg.ForegroundCommand = func(pid int) string {
+			name, _ := osinfoClient.ForegroundCommand(pid)
+			return name
+		}
 	}
 
 	s := &srv{
@@ -169,6 +183,9 @@ func Run(cfg Config) error {
 			s.store, nilClientView, s.queue, s.mutator)
 		s.queue.Drain()
 	}
+
+	s.wg.Add(1)
+	go s.tickLoop()
 
 	s.wg.Add(1)
 	go s.acceptLoop()
@@ -516,6 +533,59 @@ func (s *srv) markDirty(cc *clientConn) {
 	}
 	if s.cfg.OnDirty != nil {
 		s.cfg.OnDirty(cc.id)
+	}
+}
+
+// markAllDirty schedules a redraw for every connected client.
+func (s *srv) markAllDirty() {
+	for _, cc := range s.conns {
+		s.markDirty(cc)
+	}
+}
+
+// tickLoop fires once per second to perform periodic tasks such as
+// automatic window renaming. It exits when s.done is closed.
+func (s *srv) tickLoop() {
+	defer s.wg.Done()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			s.autoRenameWindows()
+			s.mu.Unlock()
+		}
+	}
+}
+
+// autoRenameWindows updates window names based on the foreground process of
+// the active pane when the automatic-rename window option is on.
+// Must be called with s.mu held.
+func (s *srv) autoRenameWindows() {
+	for _, sess := range s.state.Sessions {
+		for _, wl := range sess.Windows {
+			win := wl.Window
+			enabled, _ := win.Options.GetBool("automatic-rename")
+			if !enabled {
+				continue
+			}
+			activePane, ok := win.Panes[win.Active]
+			if !ok {
+				continue
+			}
+			pid := activePane.ShellPID()
+			if pid == 0 {
+				continue
+			}
+			name := s.cfg.ForegroundCommand(pid)
+			if name != "" && name != win.Name {
+				win.Name = name
+				s.markAllDirty()
+			}
+		}
 	}
 }
 
