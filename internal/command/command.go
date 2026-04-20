@@ -8,6 +8,9 @@ type Result struct {
 	Err error
 	// Output is any text the command produces (e.g. for list-* commands).
 	Output string
+	// ControlMode, when true, signals that the client should be switched to
+	// control mode. Set by attach-session -C and new-session -C.
+	ControlMode bool
 }
 
 // OK returns a successful Result with no output.

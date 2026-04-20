@@ -111,3 +111,77 @@ type EndEvent struct {
 }
 
 func (EndEvent) eventKind() string { return "end" }
+
+// SessionRenamedEvent signals that a session was renamed.
+// It maps to the %session-renamed protocol line.
+type SessionRenamedEvent struct {
+	SessionID string
+	Name      string
+}
+
+func (SessionRenamedEvent) eventKind() string { return "session-renamed" }
+
+// SessionsChangedEvent signals that the set of sessions changed (created or destroyed).
+// It maps to the %sessions-changed protocol line.
+type SessionsChangedEvent struct{}
+
+func (SessionsChangedEvent) eventKind() string { return "sessions-changed" }
+
+// WindowRenamedEvent signals that a window was renamed.
+// It maps to the %window-renamed protocol line.
+type WindowRenamedEvent struct {
+	WindowID string
+	Name     string
+}
+
+func (WindowRenamedEvent) eventKind() string { return "window-renamed" }
+
+// PaneModeChangedEvent signals that a pane entered or exited a mode.
+// It maps to the %pane-mode-changed protocol line.
+type PaneModeChangedEvent struct {
+	PaneID string
+}
+
+func (PaneModeChangedEvent) eventKind() string { return "pane-mode-changed" }
+
+// ClientDetachedEvent signals that a client detached.
+// It maps to the %client-detached protocol line.
+type ClientDetachedEvent struct {
+	Name string
+}
+
+func (ClientDetachedEvent) eventKind() string { return "client-detached" }
+
+// UnlinkedWindowAddEvent signals that a window was added outside the current session.
+// It maps to the %unlinked-window-add protocol line.
+type UnlinkedWindowAddEvent struct {
+	WindowID string
+}
+
+func (UnlinkedWindowAddEvent) eventKind() string { return "unlinked-window-add" }
+
+// ContinueEvent signals that pane output has resumed.
+// It maps to the %continue protocol line.
+type ContinueEvent struct {
+	PaneID string
+}
+
+func (ContinueEvent) eventKind() string { return "continue" }
+
+// PauseEvent signals that pane output has been paused (backpressure).
+// It maps to the %pause protocol line.
+type PauseEvent struct {
+	PaneID string
+}
+
+func (PauseEvent) eventKind() string { return "pause" }
+
+// ErrorEvent marks the end of a failed command-output block.
+// It maps to the %error protocol line.
+type ErrorEvent struct {
+	Time   int64
+	Number int
+	Flags  int
+}
+
+func (ErrorEvent) eventKind() string { return "error" }

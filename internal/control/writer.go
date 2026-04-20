@@ -66,5 +66,23 @@ func (cw *Writer) handle(e Event) {
 		fmt.Fprintf(cw.w, "%%begin %d %d %d\n", ev.Time, ev.Number, ev.Flags)
 	case EndEvent:
 		fmt.Fprintf(cw.w, "%%end %d %d %d\n", ev.Time, ev.Number, ev.Flags)
+	case SessionRenamedEvent:
+		fmt.Fprintf(cw.w, "%%session-renamed %s %s\n", ev.SessionID, ev.Name)
+	case SessionsChangedEvent:
+		fmt.Fprintf(cw.w, "%%sessions-changed\n")
+	case WindowRenamedEvent:
+		fmt.Fprintf(cw.w, "%%window-renamed %s %s\n", ev.WindowID, ev.Name)
+	case PaneModeChangedEvent:
+		fmt.Fprintf(cw.w, "%%pane-mode-changed %s\n", ev.PaneID)
+	case ClientDetachedEvent:
+		fmt.Fprintf(cw.w, "%%client-detached %s\n", ev.Name)
+	case UnlinkedWindowAddEvent:
+		fmt.Fprintf(cw.w, "%%unlinked-window-add %s\n", ev.WindowID)
+	case ContinueEvent:
+		fmt.Fprintf(cw.w, "%%continue %s\n", ev.PaneID)
+	case PauseEvent:
+		fmt.Fprintf(cw.w, "%%pause %s\n", ev.PaneID)
+	case ErrorEvent:
+		fmt.Fprintf(cw.w, "%%error %d %d %d\n", ev.Time, ev.Number, ev.Flags)
 	}
 }

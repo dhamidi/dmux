@@ -8,7 +8,7 @@ func init() {
 	command.Register(command.Spec{
 		Name:  "attach-session",
 		Alias: []string{"attach", "a"},
-		Args:  command.ArgSpec{Flags: []string{"d", "r", "x"}},
+		Args:  command.ArgSpec{Flags: []string{"C", "d", "r", "x"}},
 		Target: command.TargetSpec{
 			Kind:     command.TargetSession,
 			Optional: true,
@@ -23,6 +23,9 @@ func runAttachSession(ctx *command.Ctx) command.Result {
 	}
 	if err := ctx.Mutator.AttachClient(ctx.Client.ID, ctx.Target.Session.ID); err != nil {
 		return command.Errorf("attach-session: %v", err)
+	}
+	if ctx.Args.Flag("C") {
+		return command.Result{ControlMode: true}
 	}
 	return command.OK()
 }

@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/dhamidi/dmux/internal/command"
+	"github.com/dhamidi/dmux/internal/control"
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/options"
@@ -39,6 +40,9 @@ type serverMutator struct {
 	// watchPane, if non-nil, is called after each new pane is created.
 	// It starts a goroutine that fires pane-died when the process exits.
 	watchPane func(paneID int)
+	// events is the server-wide event bus for publishing state-change events
+	// to control-mode clients. May be nil if no event bus is configured.
+	events *control.EventBus
 }
 
 // newServerMutator returns a command.Mutator backed by state.
@@ -55,8 +59,9 @@ func newServerMutator(
 	markDirty func(*clientConn),
 	newPaneFn func(cfg pane.Config) (session.Pane, error),
 	watchPaneFn func(paneID int),
+	eventBus ...*control.EventBus,
 ) command.Mutator {
-	return &serverMutator{
+	m := &serverMutator{
 		state:     state,
 		store:     store,
 		queue:     queue,
@@ -65,6 +70,17 @@ func newServerMutator(
 		markDirty: markDirty,
 		newPane:   newPaneFn,
 		watchPane: watchPaneFn,
+	}
+	if len(eventBus) > 0 {
+		m.events = eventBus[0]
+	}
+	return m
+}
+
+// notifyAll publishes e to the server event bus if one is configured.
+func (m *serverMutator) notifyAll(e control.Event) {
+	if m.events != nil {
+		m.events.Publish(e)
 	}
 }
 
@@ -86,6 +102,7 @@ func (m *serverMutator) NewSession(name string) (command.SessionView, error) {
 		Windows: []command.WindowView{},
 		Current: -1,
 	}
+	m.notifyAll(control.SessionsChangedEvent{})
 	m.RunHook("after-new-session")
 	return v, nil
 }
@@ -103,6 +120,7 @@ func (m *serverMutator) KillSession(id string) error {
 		}
 	}
 	m.state.RemoveSession(session.SessionID(id))
+	m.notifyAll(control.SessionsChangedEvent{})
 	m.RunHook("after-kill-session")
 	return nil
 }
@@ -113,6 +131,7 @@ func (m *serverMutator) RenameSession(id, name string) error {
 		return fmt.Errorf("rename-session: session %q not found", id)
 	}
 	sess.Name = name
+	m.notifyAll(control.SessionRenamedEvent{SessionID: id, Name: name})
 	return nil
 }
 
@@ -123,6 +142,9 @@ func (m *serverMutator) AttachClient(clientID, sessionID string) error {
 	}
 	if err := m.state.AttachClient(c, session.SessionID(sessionID)); err != nil {
 		return err
+	}
+	if sess, ok := m.state.Sessions[session.SessionID(sessionID)]; ok {
+		m.notifyAll(control.SessionChangedEvent{SessionID: sessionID, Name: sess.Name})
 	}
 	m.RunHook("client-attached")
 	return nil
@@ -190,6 +212,7 @@ func (m *serverMutator) NewWindow(sessionID, name string) (command.WindowView, e
 	if m.watchPane != nil {
 		m.watchPane(int(paneID))
 	}
+	m.notifyAll(control.WindowAddEvent{WindowID: string(id)})
 	m.RunHook("after-new-window")
 	return toWindowView(wl), nil
 }
@@ -209,6 +232,7 @@ func (m *serverMutator) KillWindow(sessionID, windowID string) error {
 				}
 			}
 			sess.RemoveWindow(i)
+			m.notifyAll(control.WindowCloseEvent{WindowID: windowID})
 			m.RunHook("after-kill-window")
 			return nil
 		}
@@ -224,6 +248,7 @@ func (m *serverMutator) RenameWindow(sessionID, windowID, name string) error {
 	for _, wl := range sess.Windows {
 		if wl.Window.ID == session.WindowID(windowID) {
 			wl.Window.Name = name
+			m.notifyAll(control.WindowRenamedEvent{WindowID: windowID, Name: name})
 			return nil
 		}
 	}

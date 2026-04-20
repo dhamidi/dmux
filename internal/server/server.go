@@ -13,6 +13,7 @@ import (
 
 	"github.com/dhamidi/dmux/internal/command"
 	_ "github.com/dhamidi/dmux/internal/command/builtin"
+	"github.com/dhamidi/dmux/internal/control"
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/osinfo"
@@ -89,29 +90,32 @@ func newClientDecoder() *clientDecoder {
 
 // srv is the running server state.
 type srv struct {
-	cfg        Config
-	state      *session.Server
-	store      command.Server
-	mutator    command.Mutator
-	queue      *command.Queue
-	log        *log.Logger
-	mu         sync.Mutex
-	conns      map[session.ClientID]*clientConn
-	decoders   map[session.ClientID]*clientDecoder
-	prevFrames map[session.ClientID]render.CellGrid
-	nextID     uint64
-	done       chan struct{}
-	once       sync.Once // ensures done is closed at most once
-	wg         sync.WaitGroup
+	cfg             Config
+	state           *session.Server
+	store           command.Server
+	mutator         command.Mutator
+	queue           *command.Queue
+	log             *log.Logger
+	mu              sync.Mutex
+	conns           map[session.ClientID]*clientConn
+	decoders        map[session.ClientID]*clientDecoder
+	prevFrames      map[session.ClientID]render.CellGrid
+	nextID          uint64
+	done            chan struct{}
+	once            sync.Once // ensures done is closed at most once
+	wg              sync.WaitGroup
+	events          *control.EventBus
+	controlSessions map[session.ClientID]*control.ControlSession
 }
 
 // clientConn is the server-side view of one connected client.
 type clientConn struct {
-	id         session.ClientID
-	netConn    net.Conn
-	client     *session.Client
-	dirty      chan struct{}      // buffered(1); written to when a redraw is needed
-	dragBorder *layout.BorderID  // non-nil while a border drag is in progress
+	id          session.ClientID
+	netConn     net.Conn
+	client      *session.Client
+	dirty       chan struct{}     // buffered(1); written to when a redraw is needed
+	dragBorder  *layout.BorderID // non-nil while a border drag is in progress
+	controlMode bool             // set when attach-session -C or new-session -C runs
 }
 
 // Run starts the dmux server and blocks until shutdown.
@@ -134,12 +138,14 @@ func Run(cfg Config) error {
 	}
 
 	s := &srv{
-		cfg:        cfg,
-		log:        log.New(cfg.Log, "server: ", 0),
-		conns:      make(map[session.ClientID]*clientConn),
-		decoders:   make(map[session.ClientID]*clientDecoder),
-		prevFrames: make(map[session.ClientID]render.CellGrid),
-		done:       make(chan struct{}),
+		cfg:             cfg,
+		log:             log.New(cfg.Log, "server: ", 0),
+		conns:           make(map[session.ClientID]*clientConn),
+		decoders:        make(map[session.ClientID]*clientDecoder),
+		prevFrames:      make(map[session.ClientID]render.CellGrid),
+		done:            make(chan struct{}),
+		events:          control.NewEventBus(),
+		controlSessions: make(map[session.ClientID]*control.ControlSession),
 	}
 	if cfg.State != nil {
 		s.state = cfg.State
@@ -172,6 +178,7 @@ func Run(cfg Config) error {
 			return pane.New(cfg)
 		},
 		func(paneID int) { s.startPaneWatcher(paneID) },
+		s.events,
 	)
 
 	loadDefaultOptions(s)
@@ -344,6 +351,11 @@ func (s *srv) serveConn(nc net.Conn) {
 	go s.renderLoop(cc)
 
 	s.clientLoop(cc)
+
+	// If the client requested control mode, run the control mode loop.
+	if cc.controlMode {
+		s.controlLoop(cc)
+	}
 }
 
 // readIdentify reads IDENTIFY_* messages until IDENTIFY_DONE and returns
@@ -455,6 +467,10 @@ func (s *srv) clientLoop(cc *clientConn) {
 			s.mu.Unlock()
 			result := command.Dispatch(cm.Argv[0], cm.Argv[1:], s.store, clientView, s.queue, s.mutator)
 			s.queue.Drain()
+			if result.ControlMode {
+				cc.controlMode = true
+				return
+			}
 			if result.Err != nil {
 				msg := proto.StdoutMsg{Data: []byte(result.Err.Error() + "\r\n")}
 				_ = proto.WriteMsg(cc.netConn, proto.MsgStdout, msg.Encode())
@@ -877,6 +893,88 @@ func (s *srv) handleMouseEvent(cc *clientConn, m keys.MouseEvent) {
 		// Wheel scroll: forward raw bytes to the active pane.
 		if p, ok := win.Panes[win.Active]; ok {
 			_ = p.Write(mouseEventRaw(m))
+		}
+	}
+}
+
+// controlWriter wraps a clientConn and sends MsgStdout frames.
+type controlWriter struct {
+	cc *clientConn
+}
+
+func (cw *controlWriter) Write(p []byte) (int, error) {
+	msg := proto.StdoutMsg{Data: p}
+	if err := proto.WriteMsg(cw.cc.netConn, proto.MsgStdout, msg.Encode()); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// controlLoop runs the tmux control-mode protocol for a client that requested
+// control mode via attach-session -C or new-session -C.
+func (s *srv) controlLoop(cc *clientConn) {
+	s.mu.Lock()
+	clientView, _ := s.store.GetClient(string(cc.client.ID))
+	s.mu.Unlock()
+
+	cs := control.NewControlSession(
+		&controlWriter{cc: cc},
+		s.store,
+		s.mutator,
+		s.queue,
+		clientView,
+	)
+	defer cs.Close()
+
+	// Subscribe to the server's global event bus and forward events to the
+	// per-session bus so the Writer serialises them to the client.
+	unsub := s.events.Subscribe(func(e control.Event) {
+		cs.Bus().Publish(e)
+	})
+	defer unsub()
+
+	// Register in the server's control session map.
+	s.mu.Lock()
+	s.controlSessions[cc.id] = cs
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.controlSessions, cc.id)
+		s.mu.Unlock()
+	}()
+
+	for {
+		msgType, payload, err := proto.ReadMsg(cc.netConn)
+		if err != nil {
+			return
+		}
+		switch msgType {
+		case proto.MsgDetach:
+			return
+		case proto.MsgResize:
+			var m proto.ResizeMsg
+			if err := m.Decode(payload); err == nil {
+				cs.ResizeClient(int(m.Width), int(m.Height))
+				s.mu.Lock()
+				cc.client.Size = session.Size{Cols: int(m.Width), Rows: int(m.Height)}
+				s.mu.Unlock()
+			}
+		case proto.MsgCommand:
+			var cm proto.CommandMsg
+			if err := cm.Decode(payload); err != nil {
+				continue
+			}
+			if len(cm.Argv) == 0 {
+				continue
+			}
+			s.mu.Lock()
+			clientView, _ = s.store.GetClient(string(cc.client.ID))
+			s.mu.Unlock()
+			cs.UpdateClient(clientView)
+			cs.HandleCommand(cm.Argv)
+		case proto.MsgShutdown:
+			s.triggerDone()
+			return
 		}
 	}
 }

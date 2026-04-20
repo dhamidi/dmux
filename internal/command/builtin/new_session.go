@@ -9,7 +9,7 @@ func init() {
 		Name:  "new-session",
 		Alias: []string{"new-s"},
 		Args: command.ArgSpec{
-			Flags:   []string{"d", "P"},
+			Flags:   []string{"C", "d", "P"},
 			Options: []string{"n", "s", "x", "y"},
 			MaxArgs: 0,
 		},
@@ -25,6 +25,9 @@ func runNewSession(ctx *command.Ctx) command.Result {
 	_, err := ctx.Mutator.NewSession(name)
 	if err != nil {
 		return command.Errorf("new-session: %v", err)
+	}
+	if ctx.Args.Flag("C") {
+		return command.Result{ControlMode: true}
 	}
 	return command.OK()
 }
