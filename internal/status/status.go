@@ -3,6 +3,8 @@ package status
 import (
 	"strings"
 	"unicode/utf8"
+
+	"github.com/dhamidi/dmux/internal/style"
 )
 
 // Context provides variable resolution for format string expansion.
@@ -43,8 +45,11 @@ type Options interface {
 }
 
 // Cell is a single display cell in a status line.
+// Style carries the parsed #[...] attributes that were in effect at this
+// cell position; callers may use it to drive ANSI rendering.
 type Cell struct {
-	Char rune // displayed character; 0 is treated as space by callers
+	Char  rune        // displayed character; 0 is treated as space by callers
+	Style style.Style // active style at this cell position
 }
 
 // Line is a horizontal slice of cells representing one row of the status
@@ -112,45 +117,54 @@ func (s *StatusLine) Lines(width int) []Line {
 }
 
 // renderLine converts an expanded string into a []Cell of exactly width cells.
-// Style markers of the form #[...] are stripped. Cells beyond the length of
-// the visible text are filled with spaces.
+// Style markers of the form #[...] are parsed; the resulting style is stored
+// on each Cell so that callers can drive colour/attribute rendering.
+// Cells beyond the length of the visible text are filled with spaces using
+// the style that was in effect at end-of-text.
 func renderLine(s string, width int) []Cell {
-	s = stripStyleMarkers(s)
 	cells := make([]Cell, width)
 	col := 0
-	for _, r := range s {
-		if col >= width {
-			break
-		}
-		cells[col] = Cell{Char: r}
-		col++
-	}
-	for ; col < width; col++ {
-		cells[col] = Cell{Char: ' '}
-	}
-	return cells
-}
+	var current style.Style
+	var stack []style.Style
 
-// stripStyleMarkers removes tmux-style #[attr,attr,...] sequences from s.
-// Unmatched #[ sequences (no closing ]) are left in place.
-func stripStyleMarkers(s string) string {
-	if !strings.Contains(s, "#[") {
-		return s
-	}
-	var b strings.Builder
-	b.Grow(len(s))
 	i := 0
 	for i < len(s) {
+		// Detect #[ style markers.
 		if i+1 < len(s) && s[i] == '#' && s[i+1] == '[' {
 			end := strings.IndexByte(s[i+2:], ']')
 			if end >= 0 {
+				marker := s[i+2 : i+2+end]
+				delta := style.Parse(marker)
+				switch {
+				case delta.Push:
+					stack = append(stack, current)
+				case delta.Pop:
+					if len(stack) > 0 {
+						current = stack[len(stack)-1]
+						stack = stack[:len(stack)-1]
+					}
+				default:
+					current = style.Apply(current, delta)
+				}
 				i = i + 2 + end + 1
 				continue
 			}
 		}
+		if col >= width {
+			// Consume remaining input to handle trailing markers.
+			r, size := utf8.DecodeRuneInString(s[i:])
+			_ = r
+			i += size
+			continue
+		}
 		r, size := utf8.DecodeRuneInString(s[i:])
-		b.WriteRune(r)
+		cells[col] = Cell{Char: r, Style: current}
+		col++
 		i += size
 	}
-	return b.String()
+	// Fill remaining cells with spaces using the last active style.
+	for ; col < width; col++ {
+		cells[col] = Cell{Char: ' ', Style: current}
+	}
+	return cells
 }

@@ -103,6 +103,22 @@ func (e *Expander) expand(s string, ctx Context) (string, error) {
 			cmd := rest[:end]
 			out.WriteString(e.runShellCommand(cmd))
 			i = i + 2 + end + 1
+		case '[':
+			// #[...] style marker — re-emit verbatim so that callers
+			// (e.g. status.renderLine) can parse it for colour/attribute
+			// information.  An unmatched #[ (no closing ]) is left in
+			// place unchanged.
+			rest := s[i+2:]
+			end := strings.IndexByte(rest, ']')
+			if end < 0 {
+				// No closing bracket; emit the '#' and advance past it.
+				out.WriteByte(s[i])
+				i++
+			} else {
+				// Re-emit the complete #[...] sentinel.
+				out.WriteString(s[i : i+2+end+1])
+				i = i + 2 + end + 1
+			}
 		default:
 			out.WriteByte(s[i])
 			i++
