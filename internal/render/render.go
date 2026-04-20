@@ -2,6 +2,7 @@ package render
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/dhamidi/dmux/internal/format"
 	"github.com/dhamidi/dmux/internal/layout"
@@ -113,6 +114,16 @@ type Theme struct {
 	// PaneBorderFormat is the format string expanded for each pane's border
 	// label. Defaults to "#{pane_index}" when empty.
 	PaneBorderFormat string
+
+	// WindowStyle is the tmux window-style option value (e.g. "fg=colour8,bg=colour0").
+	// It supplies default fg/bg colours for inactive panes: cells whose colour
+	// is ColorDefault are filled with the resolved value during compositing.
+	WindowStyle string
+
+	// WindowActiveStyle is the tmux window-active-style option value.
+	// It is applied to the active pane (identified by Config.ActivePaneID)
+	// instead of WindowStyle.
+	WindowActiveStyle string
 }
 
 // Config holds all dependencies for a [Renderer].
@@ -130,6 +141,11 @@ type Config struct {
 
 	// Theme controls border and inactive-pane rendering.
 	Theme Theme
+
+	// ActivePaneID is the PaneIndex of the currently active pane.
+	// Used to select between Theme.WindowActiveStyle and Theme.WindowStyle
+	// when blending default cell colours during compositing.
+	ActivePaneID int
 }
 
 // Renderer composes pane snapshots and overlays into a single [CellGrid].
@@ -156,6 +172,122 @@ func New(cfg Config) Renderer {
 	return &renderer{cfg: cfg}
 }
 
+// BlendStyle returns cell with ColorDefault fg and/or bg replaced by the
+// supplied defaults. If defaultFg or defaultBg is ColorDefault itself, that
+// component is left unchanged. Non-default colours in the cell are never
+// modified.
+//
+// fgR/fgG/fgB and bgR/bgG/bgB are the RGB components used when defaultFg or
+// defaultBg equals ColorRGB; they are ignored for indexed colours.
+func BlendStyle(cell Cell, defaultFg, defaultBg Color, fgR, fgG, fgB, bgR, bgG, bgB uint8) Cell {
+	if cell.Fg == ColorDefault && defaultFg != ColorDefault {
+		cell.Fg = defaultFg
+		cell.FgR, cell.FgG, cell.FgB = fgR, fgG, fgB
+	}
+	if cell.Bg == ColorDefault && defaultBg != ColorDefault {
+		cell.Bg = defaultBg
+		cell.BgR, cell.BgG, cell.BgB = bgR, bgG, bgB
+	}
+	return cell
+}
+
+// parseWindowStyle parses a tmux window-style string (e.g. "fg=colour8,bg=colour0")
+// and returns the resolved fg/bg colour values. Only fg= and bg= tokens are
+// recognised; all other attributes are silently ignored.
+//
+// This is an intentionally minimal parser that avoids importing the style
+// package to prevent an import cycle (style already imports render for the
+// Color type alias).
+func parseWindowStyle(s string) (hasFg bool, fg Color, fgR, fgG, fgB uint8, hasBg bool, bg Color, bgR, bgG, bgB uint8) {
+	for _, tok := range strings.Split(s, ",") {
+		tok = strings.TrimSpace(tok)
+		eq := strings.IndexByte(tok, '=')
+		if eq < 0 {
+			continue
+		}
+		key := tok[:eq]
+		val := tok[eq+1:]
+		switch key {
+		case "fg":
+			c, r, g, b, ok := parseTermColour(val)
+			if ok {
+				hasFg = true
+				fg, fgR, fgG, fgB = c, r, g, b
+			}
+		case "bg":
+			c, r, g, b, ok := parseTermColour(val)
+			if ok {
+				hasBg = true
+				bg, bgR, bgG, bgB = c, r, g, b
+			}
+		}
+	}
+	return
+}
+
+// parseTermColour parses a single terminal colour value.  It supports the same
+// formats as style.ParseColour (named ANSI colours, bright variants, colourN
+// indexed, and #rrggbb hex) so that window-style strings behave identically
+// whether resolved here or via the style package.
+func parseTermColour(s string) (c Color, r, g, b uint8, ok bool) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "default":
+		return ColorDefault, 0, 0, 0, true
+	case "black":
+		return ColorIndexed | 0, 0, 0, 0, true
+	case "red":
+		return ColorIndexed | 1, 0, 0, 0, true
+	case "green":
+		return ColorIndexed | 2, 0, 0, 0, true
+	case "yellow":
+		return ColorIndexed | 3, 0, 0, 0, true
+	case "blue":
+		return ColorIndexed | 4, 0, 0, 0, true
+	case "magenta":
+		return ColorIndexed | 5, 0, 0, 0, true
+	case "cyan":
+		return ColorIndexed | 6, 0, 0, 0, true
+	case "white":
+		return ColorIndexed | 7, 0, 0, 0, true
+	case "brightblack":
+		return ColorIndexed | 8, 0, 0, 0, true
+	case "brightred":
+		return ColorIndexed | 9, 0, 0, 0, true
+	case "brightgreen":
+		return ColorIndexed | 10, 0, 0, 0, true
+	case "brightyellow":
+		return ColorIndexed | 11, 0, 0, 0, true
+	case "brightblue":
+		return ColorIndexed | 12, 0, 0, 0, true
+	case "brightmagenta":
+		return ColorIndexed | 13, 0, 0, 0, true
+	case "brightcyan":
+		return ColorIndexed | 14, 0, 0, 0, true
+	case "brightwhite":
+		return ColorIndexed | 15, 0, 0, 0, true
+	}
+	// colourN or colorN (0–255)
+	for _, prefix := range []string{"colour", "color"} {
+		if strings.HasPrefix(s, prefix) {
+			n, err := strconv.Atoi(s[len(prefix):])
+			if err == nil && n >= 0 && n <= 255 {
+				return ColorIndexed | Color(n), 0, 0, 0, true
+			}
+		}
+	}
+	// #rrggbb
+	if len(s) == 7 && s[0] == '#' {
+		rr, e1 := strconv.ParseUint(s[1:3], 16, 8)
+		gg, e2 := strconv.ParseUint(s[3:5], 16, 8)
+		bb, e3 := strconv.ParseUint(s[5:7], 16, 8)
+		if e1 == nil && e2 == nil && e3 == nil {
+			return ColorRGB, uint8(rr), uint8(gg), uint8(bb), true
+		}
+	}
+	return 0, 0, 0, 0, false
+}
+
 // Compose implements [Renderer].
 func (r *renderer) Compose(panes []PanePlacement, overlays []Overlay) CellGrid {
 	rows := r.cfg.Rows
@@ -180,10 +312,39 @@ func (r *renderer) Compose(panes []PanePlacement, overlays []Overlay) CellGrid {
 		statusRow = paneRows
 	}
 
+	// Parse window styles once before the compositing loop.
+	wsHasFg, wsFg, wsFgR, wsFgG, wsFgB,
+		wsHasBg, wsBg, wsBgR, wsBgG, wsBgB := parseWindowStyle(r.cfg.Theme.WindowStyle)
+	wasHasFg, wasFg, wasFgR, wasFgG, wasFgB,
+		wasHasBg, wasBg, wasBgR, wasBgG, wasBgB := parseWindowStyle(r.cfg.Theme.WindowActiveStyle)
+
 	// Blit each pane snapshot into the grid.
 	for _, pp := range panes {
 		snap := pp.Pane.Snapshot()
 		rect := pp.Rect
+
+		// Select the default fg/bg for this pane based on whether it is active.
+		var defFg, defBg Color
+		var defFgR, defFgG, defFgB, defBgR, defBgG, defBgB uint8
+		if pp.PaneIndex == r.cfg.ActivePaneID {
+			if wasHasFg {
+				defFg = wasFg
+				defFgR, defFgG, defFgB = wasFgR, wasFgG, wasFgB
+			}
+			if wasHasBg {
+				defBg = wasBg
+				defBgR, defBgG, defBgB = wasBgR, wasBgG, wasBgB
+			}
+		} else {
+			if wsHasFg {
+				defFg = wsFg
+				defFgR, defFgG, defFgB = wsFgR, wsFgG, wsFgB
+			}
+			if wsHasBg {
+				defBg = wsBg
+				defBgR, defBgG, defBgB = wsBgR, wsBgG, wsBgB
+			}
+		}
 
 		for row := 0; row < rect.Height && row < snap.Rows; row++ {
 			dstRow := rect.Y + row
@@ -199,6 +360,7 @@ func (r *renderer) Compose(panes []PanePlacement, overlays []Overlay) CellGrid {
 				if cell.Char == 0 {
 					cell.Char = ' '
 				}
+				cell = BlendStyle(cell, defFg, defBg, defFgR, defFgG, defFgB, defBgR, defBgG, defBgB)
 				grid.Cells[dstRow*cols+dstCol] = cell
 			}
 		}

@@ -516,6 +516,187 @@ func TestCompose_PaneBorderStatus_Truncate(t *testing.T) {
 	}
 }
 
+// TestBlendStyle_DefaultColorsReplaced verifies that ColorDefault fg and bg
+// are replaced by the supplied defaults.
+func TestBlendStyle_DefaultColorsReplaced(t *testing.T) {
+	cell := render.Cell{Char: 'A', Fg: render.ColorDefault, Bg: render.ColorDefault}
+	wantFg := render.ColorIndexed | 1 // red
+	wantBg := render.ColorIndexed | 4 // blue
+
+	got := render.BlendStyle(cell, wantFg, wantBg, 0, 0, 0, 0, 0, 0)
+
+	if got.Fg != wantFg {
+		t.Errorf("Fg = %v, want %v", got.Fg, wantFg)
+	}
+	if got.Bg != wantBg {
+		t.Errorf("Bg = %v, want %v", got.Bg, wantBg)
+	}
+	if got.Char != 'A' {
+		t.Errorf("Char = %q, want 'A'", got.Char)
+	}
+}
+
+// TestBlendStyle_NonDefaultNotOverridden verifies that cells with explicit
+// (non-default) colours are not changed by BlendStyle.
+func TestBlendStyle_NonDefaultNotOverridden(t *testing.T) {
+	origFg := render.ColorIndexed | 2 // green
+	origBg := render.ColorIndexed | 5 // magenta
+	cell := render.Cell{Char: 'B', Fg: origFg, Bg: origBg}
+
+	got := render.BlendStyle(cell, render.ColorIndexed|1, render.ColorIndexed|4, 0, 0, 0, 0, 0, 0)
+
+	if got.Fg != origFg {
+		t.Errorf("Fg = %v, want original %v", got.Fg, origFg)
+	}
+	if got.Bg != origBg {
+		t.Errorf("Bg = %v, want original %v", got.Bg, origBg)
+	}
+}
+
+// TestBlendStyle_DefaultDefaultUnchanged verifies that when the supplied
+// defaults are themselves ColorDefault, no change is made.
+func TestBlendStyle_DefaultDefaultUnchanged(t *testing.T) {
+	cell := render.Cell{Char: 'C', Fg: render.ColorDefault, Bg: render.ColorDefault}
+
+	got := render.BlendStyle(cell, render.ColorDefault, render.ColorDefault, 0, 0, 0, 0, 0, 0)
+
+	if got.Fg != render.ColorDefault {
+		t.Errorf("Fg = %v, want ColorDefault", got.Fg)
+	}
+	if got.Bg != render.ColorDefault {
+		t.Errorf("Bg = %v, want ColorDefault", got.Bg)
+	}
+}
+
+// TestCompose_WindowStyle_InactivePaneColored verifies that cells with
+// ColorDefault fg/bg in an inactive pane receive the window-style colours.
+func TestCompose_WindowStyle_InactivePaneColored(t *testing.T) {
+	r := render.New(render.Config{
+		Rows: 2,
+		Cols: 4,
+		Theme: render.Theme{
+			WindowStyle:       "fg=red,bg=blue",
+			WindowActiveStyle: "fg=green,bg=yellow",
+		},
+		ActivePaneID: 1, // pane 1 is active; pane 0 is inactive
+	})
+
+	// Pane 0 is inactive — should get window-style colours.
+	cells := []render.Cell{
+		{Char: 'A', Fg: render.ColorDefault, Bg: render.ColorDefault},
+		{Char: 'B', Fg: render.ColorDefault, Bg: render.ColorDefault},
+		{Char: 'C', Fg: render.ColorDefault, Bg: render.ColorDefault},
+		{Char: 'D', Fg: render.ColorDefault, Bg: render.ColorDefault},
+	}
+	pane := &fakePane{
+		bounds: render.Rect{X: 0, Y: 0, Width: 2, Height: 2},
+		grid:   render.CellGrid{Rows: 2, Cols: 2, Cells: cells},
+	}
+
+	grid := r.Compose([]render.PanePlacement{{Pane: pane, Rect: pane.bounds, PaneIndex: 0}}, nil)
+
+	wantFg := render.ColorIndexed | 1 // red
+	wantBg := render.ColorIndexed | 4 // blue
+
+	for row := 0; row < 2; row++ {
+		for col := 0; col < 2; col++ {
+			c := cellAt(grid, row, col)
+			if c.Fg != wantFg {
+				t.Errorf("cell(%d,%d).Fg = %v, want %v (window-style fg)", row, col, c.Fg, wantFg)
+			}
+			if c.Bg != wantBg {
+				t.Errorf("cell(%d,%d).Bg = %v, want %v (window-style bg)", row, col, c.Bg, wantBg)
+			}
+		}
+	}
+}
+
+// TestCompose_WindowActiveStyle_ActivePaneColored verifies that cells with
+// ColorDefault fg/bg in the active pane receive window-active-style colours.
+func TestCompose_WindowActiveStyle_ActivePaneColored(t *testing.T) {
+	r := render.New(render.Config{
+		Rows: 2,
+		Cols: 2,
+		Theme: render.Theme{
+			WindowStyle:       "fg=red,bg=blue",
+			WindowActiveStyle: "fg=green,bg=yellow",
+		},
+		ActivePaneID: 0, // pane 0 is active
+	})
+
+	cells := []render.Cell{
+		{Char: 'A', Fg: render.ColorDefault, Bg: render.ColorDefault},
+		{Char: 'B', Fg: render.ColorDefault, Bg: render.ColorDefault},
+		{Char: 'C', Fg: render.ColorDefault, Bg: render.ColorDefault},
+		{Char: 'D', Fg: render.ColorDefault, Bg: render.ColorDefault},
+	}
+	pane := &fakePane{
+		bounds: render.Rect{X: 0, Y: 0, Width: 2, Height: 2},
+		grid:   render.CellGrid{Rows: 2, Cols: 2, Cells: cells},
+	}
+
+	grid := r.Compose([]render.PanePlacement{{Pane: pane, Rect: pane.bounds, PaneIndex: 0}}, nil)
+
+	wantFg := render.ColorIndexed | 2 // green
+	wantBg := render.ColorIndexed | 3 // yellow
+
+	for row := 0; row < 2; row++ {
+		for col := 0; col < 2; col++ {
+			c := cellAt(grid, row, col)
+			if c.Fg != wantFg {
+				t.Errorf("cell(%d,%d).Fg = %v, want %v (window-active-style fg)", row, col, c.Fg, wantFg)
+			}
+			if c.Bg != wantBg {
+				t.Errorf("cell(%d,%d).Bg = %v, want %v (window-active-style bg)", row, col, c.Bg, wantBg)
+			}
+		}
+	}
+}
+
+// TestCompose_WindowStyle_NonDefaultPreserved verifies that cells with
+// explicit (non-default) colours are not overridden by window-style.
+func TestCompose_WindowStyle_NonDefaultPreserved(t *testing.T) {
+	r := render.New(render.Config{
+		Rows: 1,
+		Cols: 2,
+		Theme: render.Theme{
+			WindowStyle: "fg=red,bg=blue",
+		},
+		ActivePaneID: 1, // pane 0 is inactive
+	})
+
+	explicitFg := render.ColorIndexed | 7 // white — explicit, must not be overridden
+	explicitBg := render.ColorIndexed | 0 // black — explicit, must not be overridden
+	cells := []render.Cell{
+		{Char: 'X', Fg: explicitFg, Bg: explicitBg},
+		{Char: 'Y', Fg: render.ColorDefault, Bg: render.ColorDefault},
+	}
+	pane := &fakePane{
+		bounds: render.Rect{X: 0, Y: 0, Width: 2, Height: 1},
+		grid:   render.CellGrid{Rows: 1, Cols: 2, Cells: cells},
+	}
+
+	grid := r.Compose([]render.PanePlacement{{Pane: pane, Rect: pane.bounds, PaneIndex: 0}}, nil)
+
+	// Cell 0: explicit colours must be preserved.
+	c0 := cellAt(grid, 0, 0)
+	if c0.Fg != explicitFg {
+		t.Errorf("cell(0,0).Fg = %v, want %v (explicit fg must not be overridden)", c0.Fg, explicitFg)
+	}
+	if c0.Bg != explicitBg {
+		t.Errorf("cell(0,0).Bg = %v, want %v (explicit bg must not be overridden)", c0.Bg, explicitBg)
+	}
+
+	// Cell 1: default colours should be replaced by window-style.
+	c1 := cellAt(grid, 0, 1)
+	if c1.Fg != render.ColorIndexed|1 {
+		t.Errorf("cell(0,1).Fg = %v, want red (%v)", c1.Fg, render.ColorIndexed|1)
+	}
+	if c1.Bg != render.ColorIndexed|4 {
+		t.Errorf("cell(0,1).Bg = %v, want blue (%v)", c1.Bg, render.ColorIndexed|4)
+	}
+}
+
 // TestCompose_NilStatusNoReservedRow verifies that when Status is nil,
 // all rows are available for panes.
 func TestCompose_NilStatusNoReservedRow(t *testing.T) {

@@ -34,6 +34,14 @@ Pane borders are drawn using the `pane-border-lines` window option (`single`,
 The label text is controlled by `pane-border-format` (default `#{pane_index}`)
 and is expanded using the same `#{...}` format-string syntax used elsewhere.
 
+The `window-style` and `window-active-style` window options supply default
+foreground and background colours for panes. `window-style` is applied to
+inactive panes and `window-active-style` to the active pane. Cells that already
+carry an explicit colour are not affected; only cells with the terminal-default
+colour inherit the window style value. Both options accept the standard tmux
+colour syntax (`fg=<colour>,bg=<colour>`) with named ANSI colours, `colourN`
+indexed colours, and `#rrggbb` hex values.
+
 ## Usage
 
 ```
