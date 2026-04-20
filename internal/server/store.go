@@ -69,10 +69,11 @@ func toSessionView(s *session.Session) command.SessionView {
 		}
 	}
 	return command.SessionView{
-		ID:      string(s.ID),
-		Name:    s.Name,
-		Windows: windows,
-		Current: current,
+		ID:           string(s.ID),
+		Name:         s.Name,
+		Windows:      windows,
+		Current:      current,
+		LastWindowID: string(s.LastWindowID),
 	}
 }
 
@@ -87,11 +88,13 @@ func toWindowView(wl *session.Winlink) command.WindowView {
 		})
 	}
 	return command.WindowView{
-		ID:     string(w.ID),
-		Name:   w.Name,
-		Index:  wl.Index,
-		Panes:  panes,
-		Active: int(w.Active),
+		ID:           string(w.ID),
+		Name:         w.Name,
+		Index:        wl.Index,
+		Panes:        panes,
+		Active:       int(w.Active),
+		LastPaneID:   int(w.LastPaneID),
+		ActivityFlag: w.ActivityFlag,
 	}
 }
 

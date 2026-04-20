@@ -34,6 +34,8 @@ type SessionView struct {
 	Windows []WindowView
 	// Current is the index into Windows of the active window (-1 if none).
 	Current int
+	// LastWindowID is the ID of the window that was active before the current one.
+	LastWindowID string
 }
 
 // CurrentWindow returns the active window, or a zero WindowView if none.
@@ -52,6 +54,10 @@ type WindowView struct {
 	Panes []PaneView
 	// Active is the ID of the active pane (0 if none).
 	Active int
+	// LastPaneID is the ID of the pane that was active before the current one (0 if none).
+	LastPaneID int
+	// ActivityFlag is true when unread activity or a bell has been detected.
+	ActivityFlag bool
 }
 
 // ActivePane returns the active pane, or a zero PaneView if none.

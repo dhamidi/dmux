@@ -236,6 +236,9 @@ func (m *serverMutator) SelectWindow(sessionID, windowID string) error {
 	}
 	for _, wl := range sess.Windows {
 		if wl.Window.ID == session.WindowID(windowID) {
+			if sess.Current != nil && sess.Current.Window.ID != session.WindowID(windowID) {
+				sess.LastWindowID = sess.Current.Window.ID
+			}
 			sess.Current = wl
 			wl.Window.ActivityFlag = false
 			m.RunHook("after-select-window")
@@ -324,6 +327,9 @@ func (m *serverMutator) SelectPane(sessionID, windowID string, paneID int) error
 	targetID := session.PaneID(paneID)
 	if _, ok := win.Panes[targetID]; !ok {
 		return fmt.Errorf("select-pane: pane %d not found in window %q", paneID, windowID)
+	}
+	if win.Active != 0 && win.Active != targetID {
+		win.LastPaneID = win.Active
 	}
 	win.Active = targetID
 	return nil

@@ -1193,3 +1193,148 @@ func TestRunHook_NoHooksRegistered(t *testing.T) {
 		t.Fatalf("run-hook for unknown event returned error: %v", res.Err)
 	}
 }
+
+// ─── Window navigation tests ──────────────────────────────────────────────────
+
+func TestNextWindow_AdvancesWindowIndex(t *testing.T) {
+	b := newBackendTwoWindows()
+	// Current is window 0 (w1); next should select w2.
+	res := dispatch("next-window", nil, b)
+	if res.Err != nil {
+		t.Fatalf("next-window returned error: %v", res.Err)
+	}
+	if len(b.selectedWindows) != 1 {
+		t.Fatalf("expected 1 SelectWindow call, got %d", len(b.selectedWindows))
+	}
+	if b.selectedWindows[0][1] != "w2" {
+		t.Errorf("next-window selected %q, want %q", b.selectedWindows[0][1], "w2")
+	}
+}
+
+func TestNextWindow_WrapsAround(t *testing.T) {
+	b := newBackendTwoWindows()
+	// Set current to the last window (index 1) so next wraps to index 0.
+	s := b.sessions[0]
+	s.Current = 1
+	b.sessions[0] = s
+	res := dispatch("next-window", nil, b)
+	if res.Err != nil {
+		t.Fatalf("next-window wrap returned error: %v", res.Err)
+	}
+	if len(b.selectedWindows) != 1 || b.selectedWindows[0][1] != "w1" {
+		t.Errorf("next-window wrap: selected %v, want w1", b.selectedWindows)
+	}
+}
+
+func TestPreviousWindow_DecrementsWindowIndex(t *testing.T) {
+	b := newBackendTwoWindows()
+	// Set current to index 1 so previous goes to index 0 (w1).
+	s := b.sessions[0]
+	s.Current = 1
+	b.sessions[0] = s
+	res := dispatch("previous-window", nil, b)
+	if res.Err != nil {
+		t.Fatalf("previous-window returned error: %v", res.Err)
+	}
+	if len(b.selectedWindows) != 1 || b.selectedWindows[0][1] != "w1" {
+		t.Errorf("previous-window selected %v, want w1", b.selectedWindows)
+	}
+}
+
+func TestPreviousWindow_WrapsAround(t *testing.T) {
+	b := newBackendTwoWindows()
+	// Current is index 0; previous wraps to last window (w2).
+	res := dispatch("previous-window", nil, b)
+	if res.Err != nil {
+		t.Fatalf("previous-window wrap returned error: %v", res.Err)
+	}
+	if len(b.selectedWindows) != 1 || b.selectedWindows[0][1] != "w2" {
+		t.Errorf("previous-window wrap: selected %v, want w2", b.selectedWindows)
+	}
+}
+
+func TestLastWindow_SelectsPreviousWindow(t *testing.T) {
+	b := newBackendTwoWindows()
+	// Set LastWindowID to w2.
+	s := b.sessions[0]
+	s.LastWindowID = "w2"
+	b.sessions[0] = s
+	res := dispatch("last-window", nil, b)
+	if res.Err != nil {
+		t.Fatalf("last-window returned error: %v", res.Err)
+	}
+	if len(b.selectedWindows) != 1 || b.selectedWindows[0][1] != "w2" {
+		t.Errorf("last-window selected %v, want w2", b.selectedWindows)
+	}
+}
+
+func TestLastWindow_ErrorWhenNoPreviousWindow(t *testing.T) {
+	b := newBackend()
+	res := dispatch("last-window", nil, b)
+	if res.Err == nil {
+		t.Error("last-window should return error when no last window is set")
+	}
+}
+
+func TestLastPane_SelectsPreviousPane(t *testing.T) {
+	b := newBackend()
+	// Add a second pane and set LastPaneID.
+	s := b.sessions[0]
+	pane2 := command.PaneView{ID: 2, Title: "sh"}
+	s.Windows[0].Panes = append(s.Windows[0].Panes, pane2)
+	s.Windows[0].LastPaneID = 2
+	b.sessions[0] = s
+	res := dispatch("last-pane", nil, b)
+	if res.Err != nil {
+		t.Fatalf("last-pane returned error: %v", res.Err)
+	}
+	if len(b.selectedPanes) != 1 || b.selectedPanes[0].pane != 2 {
+		t.Errorf("last-pane selected pane %v, want pane 2", b.selectedPanes)
+	}
+}
+
+func TestLastPane_ErrorWhenNoPreviousPane(t *testing.T) {
+	b := newBackend()
+	res := dispatch("last-pane", nil, b)
+	if res.Err == nil {
+		t.Error("last-pane should return error when no last pane is set")
+	}
+}
+
+func TestSendPrefix_InjectsPrefixKey(t *testing.T) {
+	b := newBackend()
+	b.optionEntries = []command.OptionEntry{{Name: "prefix", Value: "C-b"}}
+	res := dispatch("send-prefix", nil, b)
+	if res.Err != nil {
+		t.Fatalf("send-prefix returned error: %v", res.Err)
+	}
+	if len(b.sentKeys) != 1 {
+		t.Fatalf("expected 1 SendKeys call, got %d", len(b.sentKeys))
+	}
+	if len(b.sentKeys[0].keys) != 1 || b.sentKeys[0].keys[0] != "C-b" {
+		t.Errorf("send-prefix sent keys %v, want [C-b]", b.sentKeys[0].keys)
+	}
+}
+
+func TestSendPrefix_SecondaryFlag(t *testing.T) {
+	b := newBackend()
+	b.optionEntries = []command.OptionEntry{
+		{Name: "prefix", Value: "C-b"},
+		{Name: "prefix2", Value: "C-a"},
+	}
+	res := dispatch("send-prefix", []string{"-2"}, b)
+	if res.Err != nil {
+		t.Fatalf("send-prefix -2 returned error: %v", res.Err)
+	}
+	if len(b.sentKeys) != 1 || b.sentKeys[0].keys[0] != "C-a" {
+		t.Errorf("send-prefix -2 sent keys %v, want [C-a]", b.sentKeys)
+	}
+}
+
+func TestSendPrefix_ErrorWhenNotSet(t *testing.T) {
+	b := newBackend()
+	res := dispatch("send-prefix", nil, b)
+	if res.Err == nil {
+		t.Error("send-prefix should return error when prefix option is not set")
+	}
+}

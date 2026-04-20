@@ -105,12 +105,13 @@ func (srv *Server) Children(listKey string) []format.Context {
 // and switch between them. Multiple Winlinks may reference the same *Window
 // (the session-group feature).
 type Session struct {
-	ID      SessionID
-	Name    string
-	Windows []*Winlink     // ordered; duplicate Window pointers allowed
-	Options *options.Store // parent = Server.Options
-	Env     Environ
-	Current *Winlink
+	ID           SessionID
+	Name         string
+	Windows      []*Winlink     // ordered; duplicate Window pointers allowed
+	Options      *options.Store // parent = Server.Options
+	Env          Environ
+	Current      *Winlink
+	LastWindowID WindowID // ID of the window that was active before the current one
 }
 
 // NewSession creates a Session with the given id and name. The options store
@@ -221,6 +222,7 @@ type Window struct {
 	Layout           *layout.Tree
 	Panes            map[PaneID]Pane
 	Active           PaneID
+	LastPaneID       PaneID    // ID of the pane that was active before the current one
 	Options          *options.Store
 	ActivityFlag     bool      // set when activity/bell detected; cleared on SelectWindow
 	LastMonitorCheck time.Time // timestamp of last monitor sweep
