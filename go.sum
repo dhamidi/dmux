@@ -1,2 +1,4 @@
+github.com/mitchellh/go-libghostty v0.0.0-20260418143201-51ae300f1e63 h1:CMFAsQAmRaVeXCsSySWGhBegeTjatvv8e/Zv8D3rJQo=
+github.com/mitchellh/go-libghostty v0.0.0-20260418143201-51ae300f1e63/go.mod h1:Nv3wmz6Z6odRJzZpzGtnIFL0ycbNH5Ax3B9mn8kZo0c=
 golang.org/x/sys v0.28.0 h1:Fksou7UEQUWlKvIdsqzJmUmCX3cZuD2+P3XyyzwMhlA=
 golang.org/x/sys v0.28.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
