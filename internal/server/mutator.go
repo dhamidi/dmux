@@ -979,6 +979,11 @@ func (m *serverMutator) LockServer() error {
 	return nil
 }
 
+func (m *serverMutator) LockClient(clientID string) error {
+	// No real screen-lock mechanism in this implementation.
+	return nil
+}
+
 func (m *serverMutator) WaitFor(channel string) error {
 	return m.state.Channels.Wait(channel)
 }

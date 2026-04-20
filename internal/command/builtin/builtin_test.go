@@ -99,8 +99,9 @@ type testBackend struct {
 
 	// Environment recording.
 	environ         map[string]map[string]string // scope -> name -> value
-	serverMessages  []string
+	serverMessages   []string
 	lockServerCalled bool
+	lockedClients    []string
 	signaledChannels []string
 
 	// Mode entry recording.
@@ -498,6 +499,11 @@ func (b *testBackend) ShowMessages() []string {
 
 func (b *testBackend) LockServer() error {
 	b.lockServerCalled = true
+	return nil
+}
+
+func (b *testBackend) LockClient(clientID string) error {
+	b.lockedClients = append(b.lockedClients, clientID)
 	return nil
 }
 

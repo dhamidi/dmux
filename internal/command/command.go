@@ -283,6 +283,7 @@ type Mutator interface {
 	// Server management.
 	ShowMessages() []string
 	LockServer() error
+	LockClient(clientID string) error
 	WaitFor(channel string) error
 	SignalChannel(channel string)
 
