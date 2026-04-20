@@ -367,7 +367,64 @@ func (m *serverMutator) SelectPane(sessionID, windowID string, paneID int) error
 }
 
 func (m *serverMutator) ResizePane(paneID int, direction string, amount int) error {
-	return errStub("resize-pane")
+	sess, win, _, err := m.findPane(paneID)
+	if err != nil {
+		return fmt.Errorf("resize-pane: %w", err)
+	}
+	if win.Layout == nil {
+		return fmt.Errorf("resize-pane: window has no layout")
+	}
+
+	targetID := session.PaneID(paneID)
+
+	// Z toggles zoom; no border movement needed.
+	if direction == "Z" {
+		// Zoom is not yet implemented in the layout package; treat as no-op.
+		return nil
+	}
+
+	// Map direction string to the layout edge to move.
+	var edge layout.Edge
+	switch direction {
+	case "U":
+		edge = layout.EdgeTop
+	case "D":
+		edge = layout.EdgeBottom
+	case "L":
+		edge = layout.EdgeLeft
+	case "R":
+		edge = layout.EdgeRight
+	default:
+		return fmt.Errorf("resize-pane: unknown direction %q", direction)
+	}
+
+	win.Layout.MoveBorder(targetID, edge, amount)
+
+	// Resize every pane's PTY to match the updated layout rectangle.
+	for id, p := range win.Panes {
+		r := win.Layout.Rect(id)
+		if r.Width > 0 && r.Height > 0 {
+			_ = p.Resize(r.Width, r.Height) // best-effort
+		}
+	}
+
+	// Trigger a redraw for all clients attached to the session.
+	m.markSessionDirty(sess)
+	return nil
+}
+
+// markSessionDirty marks all clients attached to sess as needing a redraw.
+func (m *serverMutator) markSessionDirty(sess *session.Session) {
+	if m.markDirty == nil || m.getConn == nil {
+		return
+	}
+	for _, c := range m.state.Clients {
+		if c.Session == sess {
+			if conn, ok := m.getConn(c.ID); ok {
+				m.markDirty(conn)
+			}
+		}
+	}
 }
 
 func (m *serverMutator) CapturePane(paneID int, history bool) (string, error) {
