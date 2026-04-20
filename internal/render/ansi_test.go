@@ -93,3 +93,58 @@ func TestEncodeANSI_TrailingReset(t *testing.T) {
 		t.Errorf("output does not end with attribute reset; got %q", s)
 	}
 }
+
+func TestEncodeANSI_ItalicsAttr(t *testing.T) {
+	grid := CellGrid{
+		Rows: 1, Cols: 1,
+		Cells: []Cell{{Char: 'X', Attrs: AttrItalics}},
+	}
+	s := string(EncodeANSI(grid))
+	if !strings.Contains(s, "\x1b[3m") {
+		t.Errorf("missing italics SGR \\x1b[3m; got %q", s)
+	}
+}
+
+func TestEncodeANSI_StrikethroughAttr(t *testing.T) {
+	grid := CellGrid{
+		Rows: 1, Cols: 1,
+		Cells: []Cell{{Char: 'X', Attrs: AttrStrikethrough}},
+	}
+	s := string(EncodeANSI(grid))
+	if !strings.Contains(s, "\x1b[9m") {
+		t.Errorf("missing strikethrough SGR \\x1b[9m; got %q", s)
+	}
+}
+
+func TestEncodeANSI_DoubleUnderlineAttr(t *testing.T) {
+	grid := CellGrid{
+		Rows: 1, Cols: 1,
+		Cells: []Cell{{Char: 'X', Attrs: AttrDoubleUnderline}},
+	}
+	s := string(EncodeANSI(grid))
+	if !strings.Contains(s, "\x1b[21m") {
+		t.Errorf("missing double-underline SGR \\x1b[21m; got %q", s)
+	}
+}
+
+func TestEncodeANSI_OverlineAttr(t *testing.T) {
+	grid := CellGrid{
+		Rows: 1, Cols: 1,
+		Cells: []Cell{{Char: 'X', Attrs: AttrOverline}},
+	}
+	s := string(EncodeANSI(grid))
+	if !strings.Contains(s, "\x1b[53m") {
+		t.Errorf("missing overline SGR \\x1b[53m; got %q", s)
+	}
+}
+
+func TestEncodeANSI_CurlyUnderlineAttr(t *testing.T) {
+	grid := CellGrid{
+		Rows: 1, Cols: 1,
+		Cells: []Cell{{Char: 'X', Attrs: AttrCurlyUnderline}},
+	}
+	s := string(EncodeANSI(grid))
+	if !strings.Contains(s, "\x1b[4:3m") {
+		t.Errorf("missing curly-underline SGR \\x1b[4:3m; got %q", s)
+	}
+}

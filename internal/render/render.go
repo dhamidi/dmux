@@ -4,11 +4,16 @@ import "github.com/dhamidi/dmux/internal/layout"
 
 // SGR attribute flags for Cell.Attrs.
 const (
-	AttrBold      uint8 = 1 << 0
-	AttrReverse   uint8 = 1 << 1
-	AttrUnderline uint8 = 1 << 2
-	AttrBlink     uint8 = 1 << 3
-	AttrDim       uint8 = 1 << 4
+	AttrBold            uint16 = 1 << 0
+	AttrReverse         uint16 = 1 << 1
+	AttrUnderline       uint16 = 1 << 2
+	AttrBlink           uint16 = 1 << 3
+	AttrDim             uint16 = 1 << 4
+	AttrItalics         uint16 = 1 << 5
+	AttrOverline        uint16 = 1 << 6
+	AttrStrikethrough   uint16 = 1 << 7
+	AttrDoubleUnderline uint16 = 1 << 8
+	AttrCurlyUnderline  uint16 = 1 << 9
 )
 
 // Color is an 8-bit terminal color index (0–255) or one of the sentinel
@@ -26,7 +31,7 @@ type Cell struct {
 	Char  rune  // displayed character; 0 means empty (treated as space)
 	Fg    Color // foreground color; ColorDefault means inherit
 	Bg    Color // background color; ColorDefault means inherit
-	Attrs uint8 // bitmask of Attr* constants
+	Attrs uint16 // bitmask of Attr* constants
 	// FgR, FgG, FgB are meaningful only when Fg == ColorRGB.
 	FgR, FgG, FgB uint8
 	// BgR, BgG, BgB are meaningful only when Bg == ColorRGB.

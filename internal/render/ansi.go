@@ -28,6 +28,9 @@ func EncodeANSI(grid CellGrid) []byte {
 				if cell.Attrs&AttrDim != 0 {
 					buf.WriteString("\x1b[2m")
 				}
+				if cell.Attrs&AttrItalics != 0 {
+					buf.WriteString("\x1b[3m")
+				}
 				if cell.Attrs&AttrUnderline != 0 {
 					buf.WriteString("\x1b[4m")
 				}
@@ -36,6 +39,18 @@ func EncodeANSI(grid CellGrid) []byte {
 				}
 				if cell.Attrs&AttrReverse != 0 {
 					buf.WriteString("\x1b[7m")
+				}
+				if cell.Attrs&AttrStrikethrough != 0 {
+					buf.WriteString("\x1b[9m")
+				}
+				if cell.Attrs&AttrDoubleUnderline != 0 {
+					buf.WriteString("\x1b[21m")
+				}
+				if cell.Attrs&AttrOverline != 0 {
+					buf.WriteString("\x1b[53m")
+				}
+				if cell.Attrs&AttrCurlyUnderline != 0 {
+					buf.WriteString("\x1b[4:3m")
 				}
 
 				switch cell.Fg & 0xFF00 {

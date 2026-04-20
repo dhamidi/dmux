@@ -64,13 +64,19 @@ func PaletteColor(i uint8) Color { return Color{mode: colorPalette, index: i} }
 func RGBColor(r, g, b uint8) Color { return Color{mode: colorRGB, r: r, g: g, b: b} }
 
 // Attr holds text display attributes for a terminal cell.
-type Attr uint8
+type Attr uint16
 
 const (
-	AttrBold      Attr = 1 << iota // bold / increased intensity (SGR 1)
-	AttrUnderline                  // single underline (SGR 4)
-	AttrBlink                      // blinking text (SGR 5)
-	AttrReverse                    // swap foreground and background (SGR 7)
+	AttrBold            Attr = 1 << iota // bold / increased intensity (SGR 1)
+	AttrUnderline                        // single underline (SGR 4)
+	AttrBlink                            // blinking text (SGR 5)
+	AttrReverse                          // swap foreground and background (SGR 7)
+	AttrDim                              // dim / decreased intensity (SGR 2)
+	AttrItalics                          // italic (SGR 3)
+	AttrOverline                         // overline (SGR 53)
+	AttrStrikethrough                    // strikethrough (SGR 9)
+	AttrDoubleUnderline                  // double underline (SGR 21)
+	AttrCurlyUnderline                   // curly underline (SGR 4:3)
 )
 
 // Cell is a single terminal cell: a rune plus styling.
@@ -249,6 +255,12 @@ func writeCell(buf *bytes.Buffer, cell Cell) {
 	if cell.Attr&AttrBold != 0 {
 		params = append(params, "1")
 	}
+	if cell.Attr&AttrDim != 0 {
+		params = append(params, "2")
+	}
+	if cell.Attr&AttrItalics != 0 {
+		params = append(params, "3")
+	}
 	if cell.Attr&AttrUnderline != 0 {
 		params = append(params, "4")
 	}
@@ -257,6 +269,15 @@ func writeCell(buf *bytes.Buffer, cell Cell) {
 	}
 	if cell.Attr&AttrReverse != 0 {
 		params = append(params, "7")
+	}
+	if cell.Attr&AttrStrikethrough != 0 {
+		params = append(params, "9")
+	}
+	if cell.Attr&AttrDoubleUnderline != 0 {
+		params = append(params, "21")
+	}
+	if cell.Attr&AttrOverline != 0 {
+		params = append(params, "53")
 	}
 
 	switch cell.FG.mode {
@@ -274,6 +295,10 @@ func writeCell(buf *bytes.Buffer, cell Cell) {
 	}
 
 	fmt.Fprintf(buf, "\x1b[%sm", strings.Join(params, ";"))
+
+	if cell.Attr&AttrCurlyUnderline != 0 {
+		buf.WriteString("\x1b[4:3m")
+	}
 
 	r := cell.Rune
 	if r == 0 {
