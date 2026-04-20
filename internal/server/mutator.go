@@ -497,6 +497,152 @@ func (m *serverMutator) findPane(paneID int) (sess *session.Session, win *sessio
 	return nil, nil, nil, fmt.Errorf("pane %d not found", paneID)
 }
 
+// findWindow scans all sessions for the window with the given IDs.
+func (m *serverMutator) findWindow(sessionID, windowID string) (*session.Window, error) {
+	sess, ok := m.state.Sessions[session.SessionID(sessionID)]
+	if !ok {
+		return nil, fmt.Errorf("session %q not found", sessionID)
+	}
+	for _, wl := range sess.Windows {
+		if wl.Window.ID == session.WindowID(windowID) {
+			return wl.Window, nil
+		}
+	}
+	return nil, fmt.Errorf("window %q not found in session %q", windowID, sessionID)
+}
+
+// presetCycle is the ordered list of layout presets used by select-layout -n/-p.
+var presetCycle = []string{
+	"even-horizontal",
+	"even-vertical",
+	"main-horizontal",
+	"main-vertical",
+	"tiled",
+}
+
+func (m *serverMutator) ApplyLayout(sessionID, windowID, layoutSpec string) error {
+	win, err := m.findWindow(sessionID, windowID)
+	if err != nil {
+		return fmt.Errorf("select-layout: %w", err)
+	}
+	if win.Layout == nil {
+		return fmt.Errorf("select-layout: window %q has no layout", windowID)
+	}
+
+	// Save current layout for undo.
+	prev := win.Layout.Marshal()
+
+	switch layoutSpec {
+	case "undo":
+		if win.LastLayout == "" {
+			return fmt.Errorf("select-layout: no previous layout to restore")
+		}
+		t, err := layout.Unmarshal(win.LastLayout)
+		if err != nil {
+			return fmt.Errorf("select-layout: %w", err)
+		}
+		win.LastLayout = prev
+		win.Layout = t
+		return nil
+	case "next", "prev":
+		cur := win.CurrentPreset
+		idx := -1
+		for i, p := range presetCycle {
+			if p == cur {
+				idx = i
+				break
+			}
+		}
+		n := len(presetCycle)
+		var next int
+		if layoutSpec == "next" {
+			next = (idx + 1 + n) % n
+		} else {
+			next = (idx - 1 + n) % n
+		}
+		layoutSpec = presetCycle[next]
+		// fall through to apply the resolved preset name
+		fallthrough
+	case "even-horizontal", "even-vertical", "main-horizontal", "main-vertical", "tiled", "even":
+		win.LastLayout = prev
+		switch layoutSpec {
+		case "even-horizontal":
+			win.Layout.ApplyPreset(layout.PresetEvenHorizontal)
+			win.CurrentPreset = "even-horizontal"
+		case "even-vertical":
+			win.Layout.ApplyPreset(layout.PresetEvenVertical)
+			win.CurrentPreset = "even-vertical"
+		case "main-horizontal":
+			mainHeight := 0
+			if opt, ok := win.Options.Get("main-pane-height"); ok && opt.Kind == options.Int {
+				mainHeight = opt.Integer
+			}
+			win.Layout.ApplyPresetSized(layout.PresetMainHorizontal, mainHeight)
+			win.CurrentPreset = "main-horizontal"
+		case "main-vertical":
+			mainWidth := 0
+			if opt, ok := win.Options.Get("main-pane-width"); ok && opt.Kind == options.Int {
+				mainWidth = opt.Integer
+			}
+			win.Layout.ApplyPresetSized(layout.PresetMainVertical, mainWidth)
+			win.CurrentPreset = "main-vertical"
+		case "tiled":
+			win.Layout.ApplyPreset(layout.PresetTiled)
+			win.CurrentPreset = "tiled"
+		case "even":
+			if win.Layout.Cols() >= win.Layout.Rows() {
+				win.Layout.ApplyPreset(layout.PresetEvenHorizontal)
+				win.CurrentPreset = "even-horizontal"
+			} else {
+				win.Layout.ApplyPreset(layout.PresetEvenVertical)
+				win.CurrentPreset = "even-vertical"
+			}
+		}
+		return nil
+	default:
+		// Try to parse as a serialised layout string.
+		t, err := layout.Unmarshal(layoutSpec)
+		if err != nil {
+			return fmt.Errorf("select-layout: unknown layout %q: %w", layoutSpec, err)
+		}
+		win.LastLayout = prev
+		win.Layout = t
+		win.CurrentPreset = ""
+		return nil
+	}
+}
+
+func (m *serverMutator) RotateWindow(sessionID, windowID string, forward bool) error {
+	win, err := m.findWindow(sessionID, windowID)
+	if err != nil {
+		return fmt.Errorf("rotate-window: %w", err)
+	}
+	if win.Layout == nil {
+		return fmt.Errorf("rotate-window: window %q has no layout", windowID)
+	}
+	win.Layout.RotateLeaves(forward)
+	return nil
+}
+
+func (m *serverMutator) ResizeWindow(sessionID, windowID string, cols, rows int) error {
+	win, err := m.findWindow(sessionID, windowID)
+	if err != nil {
+		return fmt.Errorf("resize-window: %w", err)
+	}
+	if win.Layout == nil {
+		return fmt.Errorf("resize-window: window %q has no layout", windowID)
+	}
+	win.Layout.Resize(cols, rows)
+	// Resize each pane's PTY to its new bounds.
+	for id, p := range win.Panes {
+		r := win.Layout.Rect(id)
+		if r.Width > 0 && r.Height > 0 {
+			_ = p.Resize(r.Width, r.Height) // best-effort
+		}
+	}
+	return nil
+}
+
 func (m *serverMutator) SendKeys(paneID int, keyStrs []string) error {
 	_, _, p, err := m.findPane(paneID)
 	if err != nil {

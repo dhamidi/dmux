@@ -119,6 +119,19 @@ type testBackend struct {
 	commandPromptCalls []struct{ clientID, prompt, initial string }
 	confirmBeforeCalls []struct{ clientID, prompt, command string }
 
+	// Layout mutation recording.
+	appliedLayouts []struct {
+		sessionID, windowID, spec string
+	}
+	rotatedWindows []struct {
+		sessionID, windowID string
+		forward             bool
+	}
+	resizedWindows []struct {
+		sessionID, windowID string
+		cols, rows          int
+	}
+
 	// Hook state.
 	hookFns map[string]func()
 }
@@ -499,6 +512,29 @@ func (b *testBackend) CommandPrompt(clientID, prompt, initial string) error {
 
 func (b *testBackend) ConfirmBefore(clientID, prompt, cmd string) error {
 	b.confirmBeforeCalls = append(b.confirmBeforeCalls, struct{ clientID, prompt, command string }{clientID, prompt, cmd})
+	return nil
+}
+
+func (b *testBackend) ApplyLayout(sessionID, windowID, spec string) error {
+	b.appliedLayouts = append(b.appliedLayouts, struct {
+		sessionID, windowID, spec string
+	}{sessionID, windowID, spec})
+	return nil
+}
+
+func (b *testBackend) RotateWindow(sessionID, windowID string, forward bool) error {
+	b.rotatedWindows = append(b.rotatedWindows, struct {
+		sessionID, windowID string
+		forward             bool
+	}{sessionID, windowID, forward})
+	return nil
+}
+
+func (b *testBackend) ResizeWindow(sessionID, windowID string, cols, rows int) error {
+	b.resizedWindows = append(b.resizedWindows, struct {
+		sessionID, windowID string
+		cols, rows          int
+	}{sessionID, windowID, cols, rows})
 	return nil
 }
 

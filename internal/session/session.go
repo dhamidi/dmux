@@ -226,6 +226,13 @@ type Window struct {
 	Options          *options.Store
 	ActivityFlag     bool      // set when activity/bell detected; cleared on SelectWindow
 	LastMonitorCheck time.Time // timestamp of last monitor sweep
+	// LastLayout holds the marshalled layout string before the last layout
+	// change, enabling select-layout -o (undo).
+	LastLayout string
+	// CurrentPreset is the name of the last preset applied to this window
+	// (e.g. "even-horizontal"). Used to determine the next/previous preset
+	// when cycling with select-layout -n/-p.
+	CurrentPreset string
 }
 
 // NewWindow creates an empty Window with no panes. Call [Window.AddPane] to

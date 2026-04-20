@@ -394,8 +394,60 @@ func (t *Tree) Unzoom() {
 	t.zoomActive = false
 }
 
+// Cols returns the width of the window in character cells.
+func (t *Tree) Cols() int { return t.cols }
+
+// Rows returns the height of the window in character cells.
+func (t *Tree) Rows() int { return t.rows }
+
+// RotateLeaves rotates the leaf IDs within the tree without changing the
+// split structure or sizes. If forward is true, pane 0 moves to the position
+// of pane 1, pane 1 to position 2, etc.; the last pane wraps to position 0.
+// If forward is false, the rotation is reversed.
+func (t *Tree) RotateLeaves(forward bool) {
+	ids := collectLeaves(t.root)
+	n := len(ids)
+	if n <= 1 {
+		return
+	}
+	rotated := make([]LeafID, n)
+	if forward {
+		// pane 0 → pos 1, pane n-1 → pos 0
+		copy(rotated[1:], ids[:n-1])
+		rotated[0] = ids[n-1]
+	} else {
+		// pane 1 → pos 0, pane 0 → pos n-1
+		copy(rotated[:n-1], ids[1:])
+		rotated[n-1] = ids[0]
+	}
+	pos := 0
+	assignLeavesInNode(t.root, rotated, &pos)
+}
+
+// assignLeavesInNode replaces leaf IDs in DFS order from ids.
+func assignLeavesInNode(n *node, ids []LeafID, pos *int) {
+	if n.leaf != nil {
+		n.leaf.id = ids[*pos]
+		*pos++
+		return
+	}
+	if n.split != nil {
+		for _, child := range n.split.children {
+			assignLeavesInNode(child, ids, pos)
+		}
+	}
+}
+
 // ApplyPreset rearranges the tree according to preset p.
 func (t *Tree) ApplyPreset(p Preset) {
+	t.ApplyPresetSized(p, 0)
+}
+
+// ApplyPresetSized is like ApplyPreset but accepts an explicit mainSize for
+// PresetMainHorizontal (height in rows) and PresetMainVertical (width in
+// columns). For other presets mainSize is ignored. A mainSize of 0 falls back
+// to an even 50/50 split.
+func (t *Tree) ApplyPresetSized(p Preset, mainSize int) {
 	leaves := collectLeaves(t.root)
 	if len(leaves) == 0 {
 		return
@@ -406,9 +458,9 @@ func (t *Tree) ApplyPreset(p Preset) {
 	case PresetEvenVertical:
 		t.root = buildFlat(leaves, Vertical)
 	case PresetMainHorizontal:
-		t.root = buildMain(leaves, Vertical)
+		t.root = buildMainSized(leaves, Vertical, mainSize, t.rows)
 	case PresetMainVertical:
-		t.root = buildMain(leaves, Horizontal)
+		t.root = buildMainSized(leaves, Horizontal, mainSize, t.cols)
 	case PresetTiled:
 		t.root = buildTiled(leaves)
 	}
@@ -442,16 +494,25 @@ func buildFlat(leaves []LeafID, dir Direction) *node {
 }
 
 func buildMain(leaves []LeafID, mainDir Direction) *node {
+	return buildMainSized(leaves, mainDir, 0, 0)
+}
+
+func buildMainSized(leaves []LeafID, mainDir Direction, mainSize, total int) *node {
 	if len(leaves) == 1 {
 		return &node{leaf: &leafNode{id: leaves[0]}}
 	}
 	main := &node{leaf: &leafNode{id: leaves[0]}}
 	rest := buildFlat(leaves[1:], otherDir(mainDir))
+	mainFrac, restFrac := 0.5, 0.5
+	if mainSize > 0 && total > mainSize {
+		mainFrac = float64(mainSize)
+		restFrac = float64(total - mainSize)
+	}
 	return &node{
 		split: &splitNode{
 			dir:      mainDir,
 			children: []*node{main, rest},
-			sizes:    []float64{0.5, 0.5},
+			sizes:    []float64{mainFrac, restFrac},
 		},
 	}
 }

@@ -58,6 +58,14 @@ type WindowView struct {
 	LastPaneID int
 	// ActivityFlag is true when unread activity or a bell has been detected.
 	ActivityFlag bool
+	// Cols and Rows are the dimensions of the window in character cells.
+	Cols int
+	Rows int
+	// LastLayout is the marshalled layout string saved before the last layout
+	// change; used by select-layout -o to undo.
+	LastLayout string
+	// CurrentPreset is the name of the last preset applied to this window.
+	CurrentPreset string
 }
 
 // ActivePane returns the active pane, or a zero PaneView if none.
@@ -216,6 +224,19 @@ type Mutator interface {
 	SaveBuffer(name, path string) error
 	PasteBuffer(name string, paneID int) error
 	ListBuffers() []BufferEntry
+
+	// Layout mutations.
+	// ApplyLayout applies a named preset ("even-horizontal", "even-vertical",
+	// "main-horizontal", "main-vertical", "tiled"), the special names "next",
+	// "prev", "even" (auto-select horizontal or vertical), or "undo" to
+	// revert the last layout change, or a tmux-serialised layout string.
+	ApplyLayout(sessionID, windowID, layoutSpec string) error
+	// RotateWindow rotates pane positions in the window. forward=true shifts
+	// pane 0 to position 1, etc.; the last pane wraps to position 0.
+	RotateWindow(sessionID, windowID string, forward bool) error
+	// ResizeWindow updates the window dimensions and re-applies the current
+	// layout at the new size.
+	ResizeWindow(sessionID, windowID string, cols, rows int) error
 
 	// Window movement.
 	MoveWindow(sessionID, windowID string, newIndex int) error

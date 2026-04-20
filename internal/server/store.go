@@ -87,14 +87,23 @@ func toWindowView(wl *session.Winlink) command.WindowView {
 			Title: pane.Title(),
 		})
 	}
+	cols, rows := 0, 0
+	if w.Layout != nil {
+		cols = w.Layout.Cols()
+		rows = w.Layout.Rows()
+	}
 	return command.WindowView{
-		ID:           string(w.ID),
-		Name:         w.Name,
-		Index:        wl.Index,
-		Panes:        panes,
-		Active:       int(w.Active),
-		LastPaneID:   int(w.LastPaneID),
-		ActivityFlag: w.ActivityFlag,
+		ID:            string(w.ID),
+		Name:          w.Name,
+		Index:         wl.Index,
+		Panes:         panes,
+		Active:        int(w.Active),
+		LastPaneID:    int(w.LastPaneID),
+		ActivityFlag:  w.ActivityFlag,
+		Cols:          cols,
+		Rows:          rows,
+		LastLayout:    w.LastLayout,
+		CurrentPreset: w.CurrentPreset,
 	}
 }
 
