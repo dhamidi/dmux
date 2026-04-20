@@ -25,7 +25,7 @@
 //	// The concrete type lives in internal/pane.
 //	type Pane interface {
 //	    Title() string
-//	    Resize(cols, rows int)
+//	    Resize(cols, rows int) error
 //	    Close() error
 //	}
 //

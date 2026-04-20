@@ -51,7 +51,8 @@ type Pane interface {
 	// Title returns the pane's current window title (from OSC 2 or similar).
 	Title() string
 	// Resize updates the pane's visible dimensions.
-	Resize(cols, rows int)
+	// It returns an error if the underlying PTY or terminal cannot be resized.
+	Resize(cols, rows int) error
 	// Close shuts down the pane's child process and frees its resources.
 	Close() error
 }

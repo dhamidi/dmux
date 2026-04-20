@@ -1,4 +1,4 @@
-// Package pane is a single PTY paired with a libghostty-vt Terminal.
+// Package pane is a single PTY paired with a terminal emulator.
 //
 // This is the fundamental unit of terminal emulation in dmux. Every
 // shell running under dmux is one Pane.
@@ -7,45 +7,102 @@
 //
 // A Pane owns:
 //
-//   - one pty.PTY (child process + byte pipe)
-//   - one libghostty.Terminal (escape-sequence parser, grid, scrollback,
-//     modes)
-//   - one libghostty.KeyEncoder and libghostty.MouseEncoder
+//   - one [pty.PTY] (child process + byte pipe) — held via the [pty.PTY]
+//     interface, never a concrete type
+//   - one [Terminal] (escape-sequence parser, cell grid, scrollback,
+//     modes) — held via the local [Terminal] interface; the concrete
+//     implementation is a go-libghostty adapter constructed outside
+//     this package
+//   - one [KeyEncoder] (encode [keys.Key] → escape bytes for the PTY)
+//   - one [MouseEncoder] (encode [keys.MouseEvent] → escape bytes for the PTY)
 //   - a goroutine that copies PTY output into the Terminal
-//   - the current PaneMode, if any (see package modes)
 //
-// Public surface:
+// All four dependencies are accepted via [Config] and accessed only
+// through their interfaces, so tests can pass fakes ([FakeTerminal],
+// [FakeKeyEncoder], [FakeMouseEncoder], [pty.FakePTY]) with no OS
+// resources required.
 //
-//	New(cfg Config) (*Pane, error)
-//	(*Pane).SendKey(key Key)               encode + write to PTY
-//	(*Pane).SendMouse(ev MouseEvent)       encode + write to PTY
-//	(*Pane).Resize(cols, rows)             update both PTY and Terminal
-//	(*Pane).Snapshot(rs *RenderState)      populate a render state
-//	(*Pane).SetMode(m PaneMode)            enter copy-mode, tree, etc.
-//	(*Pane).Title() string
-//	(*Pane).Close() error
+// # Pane interface
 //
-// The libghostty Terminal's write_pty effect is wired to a callback
-// inside this package that writes the bytes back to the PTY. That's
-// how device-attribute queries, DSR, XTWINOPS, etc. get answered.
+// The public surface of a running pane is the [Pane] interface:
 //
-// # Mode dispatch
+//	type Pane interface {
+//	    ID() PaneID
+//	    Title() string
+//	    Write(data []byte) error
+//	    SendKey(key keys.Key) error
+//	    SendMouse(ev keys.MouseEvent) error
+//	    Resize(cols, rows int) error
+//	    Snapshot() CellGrid
+//	    Close() error
+//	}
 //
-// If CurrentMode is nil, SendKey encodes the key and writes it to the
-// PTY. If CurrentMode is non-nil, SendKey calls the mode's Key handler
-// instead and the mode decides what happens — nothing is sent to the
-// shell. Either way, the shell continues running and output continues
-// being parsed into the Terminal in the background.
+// [New] returns a [Pane]; the concrete struct is unexported.
 //
-// # In isolation
+// # Terminal interface
 //
-// A small example opens one pane running $SHELL, feeds keystrokes
-// from os.Stdin, and prints rendered cells to os.Stdout every 100ms.
-// A single-pane toy terminal in ~100 lines.
+// [Terminal] exposes only what this package needs from a VT terminal
+// emulator:
+//
+//	type Terminal interface {
+//	    Write(p []byte) (int, error)     // feed raw PTY output
+//	    Resize(cols, rows int) error     // update grid dimensions
+//	    Title() (string, error)          // current OSC-2 title
+//	    Snapshot() CellGrid             // immutable viewport snapshot
+//	    Close()
+//	}
+//
+// The concrete go-libghostty adapter is constructed by the caller and
+// passed in via [Config.Term].
+//
+// # KeyEncoder and MouseEncoder interfaces
+//
+// [KeyEncoder] and [MouseEncoder] encode user-visible event types from
+// [internal/keys] into the byte sequences expected by the child process:
+//
+//	type KeyEncoder interface {
+//	    Encode(key keys.Key) ([]byte, error)
+//	    Close()
+//	}
+//
+//	type MouseEncoder interface {
+//	    Encode(ev keys.MouseEvent) ([]byte, error)
+//	    Close()
+//	}
+//
+// Concrete adapters over go-libghostty are constructed outside this
+// package and injected via [Config].
+//
+// # Key routing
+//
+// [Pane.SendKey] encodes the key via [KeyEncoder] and writes the result
+// to the PTY. [Pane.SendMouse] does the same for mouse events. Pane
+// modes (copy-mode, tree-mode, etc.) are owned by their callers, not by
+// this package — callers decide whether to deliver events to the pane or
+// to a mode overlay.
+//
+// # Output copying
+//
+// A background goroutine reads bytes from the PTY and feeds them to
+// [Terminal.Write]. The goroutine exits when [pty.PTY.Read] returns
+// a non-nil error (typically [io.EOF] after [Pane.Close]).
+//
+// # Cell grid
+//
+// [CellGrid] is a row-major snapshot of the visible viewport:
+//
+//	type CellGrid struct {
+//	    Rows  int
+//	    Cols  int
+//	    Cells []Cell   // Cells[row*Cols+col]
+//	}
+//
+// [Pane.Snapshot] delegates to [Terminal.Snapshot] and returns an
+// immutable grid for compositing by the render layer.
 //
 // # Non-goals
 //
 // Knows nothing about other panes, windows, layouts, sessions, or
 // clients. Does not render itself to the real terminal — it produces
-// render state; package render composes it with others and draws.
+// a [CellGrid]; package render composes it with other panes.
 package pane
