@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"log"
 	"os"
 
 	"github.com/dhamidi/dmux/internal/command"
@@ -14,12 +15,16 @@ import (
 // their respective implementation layers; buffer mutations are fully
 // wired to srv.Buffers.
 type serverMutator struct {
-	state *session.Server
+	state         *session.Server
+	nextSessionID uint64
+	nextWindowID  uint64
+	shutdown      func()
 }
 
 // newServerMutator returns a command.Mutator backed by state.
-func newServerMutator(state *session.Server) command.Mutator {
-	return &serverMutator{state: state}
+// shutdown is called by KillServer to trigger a graceful shutdown.
+func newServerMutator(state *session.Server, shutdown func()) command.Mutator {
+	return &serverMutator{state: state, shutdown: shutdown}
 }
 
 func errStub(method string) error {
@@ -27,24 +32,44 @@ func errStub(method string) error {
 }
 
 func (m *serverMutator) NewSession(name string) (command.SessionView, error) {
+	m.nextSessionID++
+	id := session.SessionID(fmt.Sprintf("s%d", m.nextSessionID))
 	if name == "" {
-		name = fmt.Sprintf("%d", len(m.state.Sessions))
+		name = fmt.Sprintf("session%d", m.nextSessionID)
 	}
-	id := session.SessionID(fmt.Sprintf("$%d", len(m.state.Sessions)+1))
 	sess := session.NewSession(id, name, m.state.Options)
 	m.state.AddSession(sess)
 	return command.SessionView{
-		ID:   string(id),
-		Name: name,
+		ID:      string(id),
+		Name:    name,
+		Windows: []command.WindowView{},
+		Current: -1,
 	}, nil
 }
 
 func (m *serverMutator) KillSession(id string) error {
-	return errStub("kill-session")
+	sess, ok := m.state.Sessions[session.SessionID(id)]
+	if !ok {
+		return fmt.Errorf("kill-session: session %q not found", id)
+	}
+	for _, wl := range sess.Windows {
+		for paneID, pane := range wl.Window.Panes {
+			if err := pane.Close(); err != nil {
+				log.Printf("kill-session: closing pane %v: %v", paneID, err)
+			}
+		}
+	}
+	m.state.RemoveSession(session.SessionID(id))
+	return nil
 }
 
 func (m *serverMutator) RenameSession(id, name string) error {
-	return errStub("rename-session")
+	sess, ok := m.state.Sessions[session.SessionID(id)]
+	if !ok {
+		return fmt.Errorf("rename-session: session %q not found", id)
+	}
+	sess.Name = name
+	return nil
 }
 
 func (m *serverMutator) AttachClient(clientID, sessionID string) error {
@@ -138,7 +163,8 @@ func (m *serverMutator) ListOptions(scope string) []command.OptionEntry {
 }
 
 func (m *serverMutator) KillServer() error {
-	return errStub("kill-server")
+	m.shutdown()
+	return nil
 }
 
 func (m *serverMutator) DisplayMessage(clientID, msg string) error {

@@ -380,9 +380,9 @@ func TestAutoCreateInitialSession(t *testing.T) {
 	if err := sm.Decode(payload); err != nil {
 		t.Fatalf("decode StdoutMsg: %v", err)
 	}
-	// The auto-created session is named "0".
-	if !strings.Contains(string(sm.Data), "0:") {
-		t.Fatalf("expected auto-created session '0' in list-sessions output, got: %q", sm.Data)
+	// The auto-created session is named "session1".
+	if !strings.Contains(string(sm.Data), "session1:") {
+		t.Fatalf("expected auto-created session 'session1' in list-sessions output, got: %q", sm.Data)
 	}
 	clientConn.SetDeadline(time.Time{}) //nolint:errcheck
 
@@ -466,9 +466,9 @@ func TestMsgStdinKeyBinding(t *testing.T) {
 	if err := outMsg.Decode(payload); err != nil {
 		t.Fatalf("decode StdoutMsg: %v", err)
 	}
-	// The auto-created session is "0"; new-session creates "1".
-	if !strings.Contains(string(outMsg.Data), "1:") {
-		t.Fatalf("expected session '1' in list-sessions output, got: %q", outMsg.Data)
+	// The auto-created session is "session1"; new-session creates "session2".
+	if !strings.Contains(string(outMsg.Data), "session2:") {
+		t.Fatalf("expected session 'session2' in list-sessions output, got: %q", outMsg.Data)
 	}
 	clientConn.SetDeadline(time.Time{}) //nolint:errcheck
 
