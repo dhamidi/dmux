@@ -64,8 +64,12 @@
 //     Cells outside the pane's Rect are not touched.
 //     Zero-rune cells in a snapshot are normalised to ' '.
 //     Pane output is restricted to rows [0, Rows−StatusRows).
-//  3. Status line cells written into the reserved bottom rows.
-//  4. Overlays applied in order; each overlay's Rect determines its region.
+//  3. Synchronized-panes border markers: for each PanePlacement with
+//     SynchronizedPanes set, '*' characters with a distinct colour (yellow,
+//     256-colour index 3) are written at the right and bottom edges of the
+//     pane's Rect to indicate that input synchronization is active.
+//  4. Status line cells written into the reserved bottom rows.
+//  5. Overlays applied in order; each overlay's Rect determines its region.
 //
 // # Dirty tracking
 //

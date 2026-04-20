@@ -67,6 +67,14 @@
 //  4. Handles the file-RPC messages (READ_*, WRITE_*) initiated
 //     by server-side commands like `load-buffer -`
 //
+// # Synchronized panes
+//
+// When the "synchronize-panes" window option is on, every STDIN byte
+// sequence that is not consumed by a key binding is forwarded to all
+// panes in the active window, not just the active pane. The rendered
+// frame for a synchronized window also shows a visual indicator ('*'
+// markers at the right and bottom edges of each pane).
+//
 // # Redraw cadence
 //
 // Never faster than the configured refresh interval. Per-client

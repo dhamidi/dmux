@@ -80,6 +80,9 @@ type Overlay interface {
 type PanePlacement struct {
 	Pane Pane
 	Rect Rect
+	// SynchronizedPanes, when true, causes the pane border to be rendered
+	// with a distinct marker (*) to indicate that synchronize-panes is active.
+	SynchronizedPanes bool
 }
 
 // Theme configures visual aspects of the composed frame.
@@ -174,6 +177,30 @@ func (r *renderer) Compose(panes []PanePlacement, overlays []Overlay) CellGrid {
 					cell.Char = ' '
 				}
 				grid.Cells[dstRow*cols+dstCol] = cell
+			}
+		}
+	}
+
+	// Draw synchronize-panes border markers (*) at the right and bottom edges
+	// of each pane that has SynchronizedPanes set, using a yellow colour.
+	syncBorderCell := Cell{Char: '*', Fg: ColorIndexed | 3}
+	for _, pp := range panes {
+		if !pp.SynchronizedPanes {
+			continue
+		}
+		rect := pp.Rect
+		// Right edge column.
+		for row := rect.Y; row < rect.Y+rect.Height && row < paneRows; row++ {
+			col := rect.X + rect.Width - 1
+			if col >= 0 && col < cols {
+				grid.Cells[row*cols+col] = syncBorderCell
+			}
+		}
+		// Bottom edge row.
+		row := rect.Y + rect.Height - 1
+		if row >= 0 && row < paneRows {
+			for col := rect.X; col < rect.X+rect.Width && col < cols; col++ {
+				grid.Cells[row*cols+col] = syncBorderCell
 			}
 		}
 	}

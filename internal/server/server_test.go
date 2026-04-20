@@ -12,6 +12,7 @@ import (
 
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
+	"github.com/dhamidi/dmux/internal/options"
 	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/server"
@@ -768,4 +769,171 @@ func TestAutoRename(t *testing.T) {
 	if !renamed {
 		t.Fatalf("expected window name %q after auto-rename tick, got %q", expectedName, win.Name)
 	}
+}
+
+// testCapturingPane is a session.Pane that records bytes written to it via Write.
+type testCapturingPane struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (p *testCapturingPane) Written() []byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]byte, len(p.buf))
+	copy(out, p.buf)
+	return out
+}
+
+func (p *testCapturingPane) Title() string                               { return "" }
+func (p *testCapturingPane) Resize(cols, rows int) error                 { return nil }
+func (p *testCapturingPane) Close() error                                { return nil }
+func (p *testCapturingPane) CaptureContent(history bool) ([]byte, error) { return nil, nil }
+func (p *testCapturingPane) Respawn(shell string) error                  { return nil }
+func (p *testCapturingPane) SendKey(key keys.Key) error                  { return nil }
+func (p *testCapturingPane) Write(data []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.buf = append(p.buf, data...)
+	return nil
+}
+func (p *testCapturingPane) ShellPID() int { return 0 }
+func (p *testCapturingPane) Snapshot() pane.CellGrid {
+	return pane.CellGrid{Rows: 1, Cols: 1, Cells: []pane.Cell{{Char: 'X'}}}
+}
+
+// buildSyncTestState creates a server state with one session, one window, and
+// two capturing panes. If syncOn is true, synchronize-panes is enabled on the
+// window so that input to the active pane is fanned out to the other pane.
+func buildSyncTestState(t *testing.T, syncOn bool) (
+	state *session.Server,
+	active *testCapturingPane,
+	other *testCapturingPane,
+) {
+	t.Helper()
+	state = session.NewServer()
+	// Pre-register synchronize-panes so we can set it before Run() is called.
+	// loadDefaultOptions (called inside Run) will see it already registered
+	// (idempotent) and reset the root to false; our window-local override wins.
+	state.Options.Register("synchronize-panes", options.Bool, false)
+
+	sess := session.NewSession(session.SessionID("$1"), "sync-sess", state.Options)
+	paneID1 := session.PaneID(1)
+	paneID2 := session.PaneID(2)
+	active = &testCapturingPane{}
+	other = &testCapturingPane{}
+
+	win := session.NewWindow(session.WindowID("@1"), "main", sess.Options)
+	win.AddPane(paneID1, active) // paneID1 becomes Active
+	win.AddPane(paneID2, other)
+	win.Layout = layout.New(80, 24, paneID1)
+
+	if syncOn {
+		if err := win.Options.Set("synchronize-panes", true); err != nil {
+			t.Fatalf("set synchronize-panes: %v", err)
+		}
+	}
+
+	sess.AddWindow(win)
+	state.AddSession(sess)
+	return state, active, other
+}
+
+// TestSynchronizePanes verifies that when synchronize-panes is on, every
+// keystroke written to the active pane is also forwarded to all other panes in
+// the window, and that when it is off only the active pane receives input.
+func TestSynchronizePanes(t *testing.T) {
+	runCase := func(t *testing.T, syncOn bool) (*testCapturingPane, *testCapturingPane) {
+		t.Helper()
+		state, active, other := buildSyncTestState(t, syncOn)
+
+		pl := newPipeListener()
+		sigs := make(chan os.Signal, 1)
+		dirtyIDs := make(chan session.ClientID, 16)
+
+		done := startServer(server.Config{
+			Listener: pl,
+			Log:      io.Discard,
+			Signals:  sigs,
+			Now:      fixedClock(time.Time{}),
+			State:    state,
+			OnDirty: func(id session.ClientID) {
+				select {
+				case dirtyIDs <- id:
+				default:
+				}
+			},
+		})
+
+		clientConn := pl.dial()
+		defer clientConn.Close()
+		sendHandshake(t, clientConn)
+		time.Sleep(20 * time.Millisecond)
+
+		// Drain all server output so renderLoop goroutine never blocks.
+		go func() {
+			for {
+				if _, _, err := proto.ReadMsg(clientConn); err != nil {
+					return
+				}
+			}
+		}()
+
+		// Attach the client to the pre-configured session.
+		cm := proto.CommandMsg{Argv: []string{"attach-session", "-t", "sync-sess"}}
+		if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+			t.Fatalf("write attach-session: %v", err)
+		}
+		// Wait for the attach dirty event before proceeding.
+		select {
+		case <-dirtyIDs:
+		case <-time.After(2 * time.Second):
+			t.Fatal("OnDirty not called after attach-session")
+		}
+
+		// Send a raw keystroke.
+		input := []byte("x")
+		stdinMsg := proto.StdinMsg{Data: input}
+		if err := proto.WriteMsg(clientConn, proto.MsgStdin, stdinMsg.Encode()); err != nil {
+			t.Fatalf("write MsgStdin: %v", err)
+		}
+		// Wait for the dirty event that marks MsgStdin processing complete.
+		select {
+		case <-dirtyIDs:
+		case <-time.After(2 * time.Second):
+			t.Fatal("OnDirty not called after MsgStdin")
+		}
+
+		sigs <- fakeSignal("SIGTERM")
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("Run() returned error: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Run() did not return within timeout after SIGTERM")
+		}
+
+		return active, other
+	}
+
+	t.Run("on_both_panes_receive_input", func(t *testing.T) {
+		active, other := runCase(t, true)
+		if !bytes.Equal(active.Written(), []byte("x")) {
+			t.Errorf("active pane: want %q, got %q", "x", active.Written())
+		}
+		if !bytes.Equal(other.Written(), []byte("x")) {
+			t.Errorf("non-active pane: want %q with synchronize-panes on, got %q", "x", other.Written())
+		}
+	})
+
+	t.Run("off_only_active_pane_receives_input", func(t *testing.T) {
+		active, other := runCase(t, false)
+		if !bytes.Equal(active.Written(), []byte("x")) {
+			t.Errorf("active pane: want %q, got %q", "x", active.Written())
+		}
+		if len(other.Written()) != 0 {
+			t.Errorf("non-active pane: want no input with synchronize-panes off, got %q", other.Written())
+		}
+	})
 }

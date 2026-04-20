@@ -494,10 +494,21 @@ func (s *srv) clientLoop(cc *clientConn) {
 					}
 				}
 				var activePane session.Pane
+				var syncPanes []session.Pane
 				if !isBound && cc.client.Session != nil && cc.client.Session.Current != nil {
 					win := cc.client.Session.Current.Window
 					if pane, ok := win.Panes[win.Active]; ok {
 						activePane = pane
+					}
+					if activePane != nil {
+						if on, _ := win.Options.GetBool("synchronize-panes"); on {
+							for pid, p := range win.Panes {
+								if pid == win.Active {
+									continue
+								}
+								syncPanes = append(syncPanes, p)
+							}
+						}
 					}
 				}
 				clientView, _ := s.store.GetClient(string(cc.client.ID))
@@ -510,6 +521,9 @@ func (s *srv) clientLoop(cc *clientConn) {
 					}
 				} else if activePane != nil {
 					_ = activePane.Write(rawBytes)
+					for _, p := range syncPanes {
+						_ = p.Write(rawBytes)
+					}
 				}
 			}
 
@@ -634,6 +648,7 @@ func (s *srv) renderLoop(cc *clientConn) {
 			rows = 24
 		}
 
+		syncPanes, _ := win.Options.GetBool("synchronize-panes")
 		placements := make([]render.PanePlacement, 0, len(win.Panes))
 		for id, p := range win.Panes {
 			rect := win.Layout.Rect(id)
@@ -641,8 +656,9 @@ func (s *srv) renderLoop(cc *clientConn) {
 				continue
 			}
 			placements = append(placements, render.PanePlacement{
-				Pane: &renderPaneAdapter{p: p, rect: rect},
-				Rect: rect,
+				Pane:              &renderPaneAdapter{p: p, rect: rect},
+				Rect:              rect,
+				SynchronizedPanes: syncPanes,
 			})
 		}
 		s.mu.Unlock()
