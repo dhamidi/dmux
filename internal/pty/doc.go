@@ -1,10 +1,30 @@
 // Package pty opens pseudo-terminals and runs processes inside them.
 //
+// # Interface
+//
+// The central type is the PTY interface:
+//
+//	type PTY interface {
+//	    Read(p []byte) (int, error)
+//	    Write(p []byte) (int, error)
+//	    Resize(rows, cols int) error
+//	    Close() error
+//	}
+//
+// Callers receive a PTY through the package-level constructor:
+//
+//	p, err := pty.Open(cmd, args, pty.Size{Rows: 24, Cols: 80})
+//
+// Open starts cmd with args inside a new pseudo-terminal and returns
+// the PTY interface. Read returns output from the child; Write sends
+// input to it. Resize notifies the child of a window-size change.
+// Close kills the child and releases OS resources.
+//
 // # Boundary
 //
-// The abstraction is a PTY handle with Read, Write, Resize, Start(cmd),
-// Wait, and Close. Knows nothing about VT sequences, terminal state, or
-// panes — it's a byte pipe to a child process with a size attribute.
+// A PTY is a byte pipe to a child process with a size attribute.
+// It knows nothing about VT sequences, terminal state, or panes —
+// that belongs to the libghostty-vt Terminal owned by package pane.
 //
 // # Platforms
 //
@@ -18,6 +38,18 @@
 //
 // The build-tagged implementations live in pty_unix.go and pty_windows.go.
 // The shared Go interface and any OS-agnostic helpers live in pty.go.
+//
+// # Testing
+//
+// Package pty exports FakePTY, an in-memory implementation of the PTY
+// interface that requires no OS resources. Tests that depend on a PTY
+// should accept a pty.PTY and use FakePTY for isolation:
+//
+//	f := &pty.FakePTY{}
+//	f.InjectOutput([]byte("$ "))  // simulate child output
+//	f.Write([]byte("ls\n"))       // simulate keyboard input
+//	data := f.Input()             // verify what was written
+//	sizes := f.Resizes            // verify resize history
 //
 // # In isolation
 //
