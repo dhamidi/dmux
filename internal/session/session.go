@@ -25,19 +25,28 @@ type Server struct {
 	Channels  *ChannelTable
 	// Messages holds recent server log lines for show-messages.
 	Messages []string
+	// ACL is the access control list for server connections.
+	// Maps Unix username to allowed (true) or denied (false).
+	ACL map[string]bool
+	// ACLWriteAccess maps usernames that have been granted write access.
+	ACLWriteAccess map[string]bool
+	// ACLDenyAll blocks all new connections when true.
+	ACLDenyAll bool
 }
 
 // NewServer constructs an empty, ready-to-use Server.
 func NewServer() *Server {
 	return &Server{
-		Sessions:  make(map[SessionID]*Session),
-		Clients:   make(map[ClientID]*Client),
-		Buffers:   &BufferStack{},
-		Options:   options.New(),
-		Env:       make(Environ),
-		Hooks:     &HookTable{},
-		KeyTables: keys.NewRegistry(),
-		Channels:  &ChannelTable{},
+		Sessions:       make(map[SessionID]*Session),
+		Clients:        make(map[ClientID]*Client),
+		Buffers:        &BufferStack{},
+		Options:        options.New(),
+		Env:            make(Environ),
+		Hooks:          &HookTable{},
+		KeyTables:      keys.NewRegistry(),
+		Channels:       &ChannelTable{},
+		ACL:            make(map[string]bool),
+		ACLWriteAccess: make(map[string]bool),
 	}
 }
 
@@ -344,6 +353,9 @@ type Client struct {
 	Overlays []Overlay
 	Env      Environ    // environment captured at attach time
 	Cwd      string
+	// PID is the OS process ID of the dmux client process. Used by
+	// suspend-client to send SIGTSTP to the client.
+	PID int
 }
 
 // NewClient creates a Client with sensible defaults. The Session field is nil

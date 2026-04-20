@@ -11,11 +11,16 @@ VT parser, and a Go codebase instead of C.
 Skeleton. The directory layout, package boundaries, and design notes are in
 place. Implementation is progressing.
 
-`internal/command/builtin` now contains ~36 built-in commands covering session,
+`internal/command/builtin` now contains ~40 built-in commands covering session,
 window, pane, client, key-binding, option, scripting, and UI categories.
 New pane-level commands added: `move-pane` (`movep`), `pipe-pane` (`pipep`),
 `slice-pane`, `respawn-window` (`respawnw`), `clear-history` (`clearhist`),
 and `clear-pane` (`clearp`).
+New session/client utility commands:
+- `has-session` (`has`): exit code 0 if the named session (`-t`) exists, 1 otherwise — useful in shell scripts.
+- `refresh-client` (`refresh`): force a client to redraw (`-d` detach, `-s WxH` resize, `-c pane` select pane, `-D/-U/-L/-R` scroll viewport).
+- `suspend-client` (`suspendc`): send SIGTSTP to the dmux client process, returning control to the calling shell.
+- `server-access`: manage the server-level access control list (`-a user` allow, `-d user` deny, `-n` deny all new connections, `-w` grant write access).
 Interactive picker commands `choose-buffer` (`choosebuffer`) and
 `choose-client` (`chooseclient`) open a navigable list of paste buffers or
 connected clients respectively. Both support `-N` (no preview), `-r` (reverse

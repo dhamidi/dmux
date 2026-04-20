@@ -96,6 +96,8 @@ type ClientView struct {
 	Rows      int
 	TTY       string
 	KeyTable  string
+	// PID is the OS process ID of the dmux client process.
+	PID int
 }
 
 // IsAttached reports whether the client is attached to a session.
@@ -306,6 +308,21 @@ type Mutator interface {
 	SetHook(event, cmd string) error
 	// RunHook fires all registered hooks for event synchronously.
 	RunHook(event string)
+
+	// Client display mutations.
+	// RefreshClient triggers a full redraw for the client identified by clientID.
+	RefreshClient(clientID string) error
+	// ResizeClient updates the dimensions of the client identified by clientID.
+	ResizeClient(clientID string, cols, rows int) error
+	// SuspendClient sends SIGTSTP to the client process identified by clientID.
+	SuspendClient(clientID string) error
+
+	// Server access control.
+	// SetServerAccess adds or updates an ACL entry: allow/deny username with
+	// optional write access. Pass allow=false to deny the user.
+	SetServerAccess(username string, allow, write bool) error
+	// DenyAllClients sets the server to refuse all new connections.
+	DenyAllClients() error
 
 	// Pane pipe mutations.
 	// PipePane connects the output of a pane to a shell command.

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/dhamidi/dmux/internal/command"
 	"github.com/dhamidi/dmux/internal/keys"
@@ -1071,4 +1072,81 @@ func (m *serverMutator) SetHook(event, cmd string) error {
 // RunHook fires all registered hooks for event synchronously.
 func (m *serverMutator) RunHook(event string) {
 	m.state.Hooks.Run(event)
+}
+
+// ─── Client display mutations ─────────────────────────────────────────────────
+
+// RefreshClient triggers a full redraw for the named client. In this
+// implementation the client is marked dirty so the render loop repaints it.
+func (m *serverMutator) RefreshClient(clientID string) error {
+	c, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("refresh-client: client %q not found", clientID)
+	}
+	if conn, ok := m.getConn(c.ID); ok {
+		m.markDirty(conn)
+	}
+	return nil
+}
+
+// ResizeClient updates the terminal dimensions of the named client.
+func (m *serverMutator) ResizeClient(clientID string, cols, rows int) error {
+	c, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("resize-client: client %q not found", clientID)
+	}
+	c.Size.Cols = cols
+	c.Size.Rows = rows
+	if conn, ok := m.getConn(c.ID); ok {
+		m.markDirty(conn)
+	}
+	return nil
+}
+
+// SuspendClient sends SIGTSTP to the client process, returning it to the shell
+// that launched dmux. On resume (SIGCONT) the client should redraw.
+func (m *serverMutator) SuspendClient(clientID string) error {
+	c, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("suspend-client: client %q not found", clientID)
+	}
+	if c.PID == 0 {
+		return fmt.Errorf("suspend-client: client %q has no PID", clientID)
+	}
+	proc, err := os.FindProcess(c.PID)
+	if err != nil {
+		return fmt.Errorf("suspend-client: %v", err)
+	}
+	return proc.Signal(syscall.SIGTSTP)
+}
+
+// ─── Server access control ────────────────────────────────────────────────────
+
+// SetServerAccess records an ACL entry for username on the server.
+// allow=true grants access; allow=false denies it. write=true additionally
+// grants write access.
+//
+// TODO: enforce this ACL in the connection-accept loop (server.Run) by
+// looking up the connecting user's Unix username in m.state.ACL before
+// accepting the connection.
+func (m *serverMutator) SetServerAccess(username string, allow, write bool) error {
+	if username == "" {
+		return fmt.Errorf("server-access: username must not be empty")
+	}
+	m.state.ACL[username] = allow
+	if write {
+		m.state.ACLWriteAccess[username] = true
+	} else {
+		delete(m.state.ACLWriteAccess, username)
+	}
+	return nil
+}
+
+// DenyAllClients sets a flag that causes the server to reject all new
+// incoming connections.
+//
+// TODO: enforce m.state.ACLDenyAll in the connection-accept loop (server.Run).
+func (m *serverMutator) DenyAllClients() error {
+	m.state.ACLDenyAll = true
+	return nil
 }

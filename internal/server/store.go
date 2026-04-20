@@ -125,5 +125,6 @@ func toClientView(c *session.Client) command.ClientView {
 		Rows:      c.Size.Rows,
 		TTY:       c.TTY,
 		KeyTable:  c.KeyTable,
+		PID:       c.PID,
 	}
 }

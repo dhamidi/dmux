@@ -182,6 +182,21 @@ type testBackend struct {
 		sessionID, windowID string
 		kill                bool
 	}
+
+	// Client display recording.
+	refreshedClients []string
+	resizedClients   []struct {
+		clientID   string
+		cols, rows int
+	}
+	suspendedClients []string
+
+	// Server access control recording.
+	serverACLEntries []struct {
+		username     string
+		allow, write bool
+	}
+	denyAllClientsCalled bool
 }
 
 // ─── command.Server (read) implementation ────────────────────────────────────
@@ -703,6 +718,37 @@ func (b *testBackend) UnlinkWindow(sessionID, windowID string, kill bool) error 
 		sessionID, windowID string
 		kill                bool
 	}{sessionID, windowID, kill})
+	return nil
+}
+
+func (b *testBackend) RefreshClient(clientID string) error {
+	b.refreshedClients = append(b.refreshedClients, clientID)
+	return nil
+}
+
+func (b *testBackend) ResizeClient(clientID string, cols, rows int) error {
+	b.resizedClients = append(b.resizedClients, struct {
+		clientID   string
+		cols, rows int
+	}{clientID, cols, rows})
+	return nil
+}
+
+func (b *testBackend) SuspendClient(clientID string) error {
+	b.suspendedClients = append(b.suspendedClients, clientID)
+	return nil
+}
+
+func (b *testBackend) SetServerAccess(username string, allow, write bool) error {
+	b.serverACLEntries = append(b.serverACLEntries, struct {
+		username     string
+		allow, write bool
+	}{username, allow, write})
+	return nil
+}
+
+func (b *testBackend) DenyAllClients() error {
+	b.denyAllClientsCalled = true
 	return nil
 }
 
