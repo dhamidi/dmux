@@ -61,6 +61,53 @@ Pane borders are drawn using the `pane-border-lines` window option (`single`,
 The label text is controlled by `pane-border-format` (default `#{pane_index}`)
 and is expanded using the same `#{...}` format-string syntax used elsewhere.
 
+### Format variables
+
+The following `#{...}` format variables are available for use in format strings
+(e.g. `status-left`, `pane-border-format`, `display-message`):
+
+**Pane** (`pane_*`)
+`pane_active`, `pane_at_bottom`, `pane_at_left`, `pane_at_right`, `pane_at_top`,
+`pane_bottom`, `pane_current_command`, `pane_current_path`, `pane_dead`,
+`pane_dead_signal`, `pane_dead_status`, `pane_dead_time`, `pane_format`,
+`pane_height`, `pane_id`, `pane_in_mode`, `pane_index`, `pane_input_off`,
+`pane_last`, `pane_left`, `pane_marked`, `pane_marked_set`, `pane_mode`,
+`pane_path`, `pane_pid`, `pane_pipe`, `pane_right`, `pane_search_string`,
+`pane_start_command`, `pane_start_path`, `pane_synchronized`, `pane_tabs`,
+`pane_title`, `pane_top`, `pane_tty`, `pane_unseen_changes`, `pane_width`.
+
+The `pane_at_*` variables are `1` when the pane touches the corresponding
+window edge and `0` otherwise.
+
+**Window** (`window_*`)
+`window_active`, `window_activity`, `window_activity_flag`, `window_bell_flag`,
+`window_bigger`, `window_cell_height`, `window_cell_width`, `window_end_flag`,
+`window_flags`, `window_format`, `window_height`, `window_id`, `window_index`,
+`window_last_flag`, `window_layout`, `window_linked`, `window_linked_sessions`,
+`window_linked_sessions_list`, `window_marked_flag`, `window_name`,
+`window_offset_x`, `window_offset_y`, `window_panes`, `window_raw_flags`,
+`window_silence_flag`, `window_stack_index`, `window_start_flag`,
+`window_visible_layout`, `window_width`, `window_zoomed_flag`.
+
+**Session** (`session_*`)
+`session_activity`, `session_alerts`, `session_attached`, `session_attached_list`,
+`session_created`, `session_format`, `session_group`, `session_group_attached`,
+`session_group_attached_list`, `session_group_list`, `session_group_many_attached`,
+`session_group_size`, `session_grouped`, `session_id`, `session_last_attached`,
+`session_many_attached`, `session_marked`, `session_name`, `session_path`,
+`session_stack`, `session_windows`.
+
+**Client** (`client_*`)
+`client_activity`, `client_cell_height`, `client_cell_width`, `client_created`,
+`client_discarded`, `client_flags`, `client_height`, `client_key_table`,
+`client_last_session`, `client_name`, `client_pid`, `client_prefix`,
+`client_readonly`, `client_session`, `client_termfeatures`, `client_termname`,
+`client_termtype`, `client_tty`, `client_uid`, `client_user`, `client_width`,
+`client_written`.
+
+**Server**
+`host`, `host_short`, `pid`, `socket_path`, `start_time`, `version`.
+
 The `window-style` and `window-active-style` window options supply default
 foreground and background colours for panes. `window-style` is applied to
 inactive panes and `window-active-style` to the active pane. Cells that already

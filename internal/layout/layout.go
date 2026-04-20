@@ -395,6 +395,13 @@ func (t *Tree) Unzoom() {
 }
 
 // Cols returns the width of the window in character cells.
+// IsZoomed reports whether a pane in this tree is currently zoomed.
+func (t *Tree) IsZoomed() bool { return t.zoomActive }
+
+// ZoomedLeaf returns the LeafID of the currently zoomed pane.
+// Returns 0 when no pane is zoomed (t.IsZoomed() == false).
+func (t *Tree) ZoomedLeaf() LeafID { return t.zoomed }
+
 func (t *Tree) Cols() int { return t.cols }
 
 // Rows returns the height of the window in character cells.

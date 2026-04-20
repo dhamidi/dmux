@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -32,6 +33,14 @@ type Server struct {
 	ACLWriteAccess map[string]bool
 	// ACLDenyAll blocks all new connections when true.
 	ACLDenyAll bool
+	// StartTime is when the server process was started.
+	StartTime time.Time
+	// SocketPath is the filesystem path of the listening Unix-domain socket.
+	SocketPath string
+	// PidValue is the OS process ID of the server (populated by NewServer).
+	PidValue int
+	// Version is the server version string (e.g. "dmux 0.1").
+	Version string
 }
 
 // NewServer constructs an empty, ready-to-use Server.
@@ -47,6 +56,8 @@ func NewServer() *Server {
 		Channels:       &ChannelTable{},
 		ACL:            make(map[string]bool),
 		ACLWriteAccess: make(map[string]bool),
+		StartTime:      time.Now(),
+		PidValue:       os.Getpid(),
 	}
 }
 
@@ -75,6 +86,9 @@ func (srv *Server) AttachClient(c *Client, sid SessionID) error {
 	}
 	c.Session = sess
 	srv.Clients[c.ID] = c
+	sess.Attached++
+	sess.AttachedList = append(sess.AttachedList, c.ID)
+	sess.LastAttachedAt = time.Now()
 	return nil
 }
 
@@ -82,17 +96,47 @@ func (srv *Server) AttachClient(c *Client, sid SessionID) error {
 // the client table. It is a no-op if id is unknown.
 func (srv *Server) DetachClient(id ClientID) {
 	if c, ok := srv.Clients[id]; ok {
+		if c.Session != nil {
+			c.Session.Attached--
+			for i, cid := range c.Session.AttachedList {
+				if cid == id {
+					c.Session.AttachedList = append(c.Session.AttachedList[:i], c.Session.AttachedList[i+1:]...)
+					break
+				}
+			}
+		}
 		c.Session = nil
 	}
 	delete(srv.Clients, id)
 }
 
 // Lookup satisfies [format.Context].
-// Recognised keys: "session_count".
+// Recognised keys: "session_count", "pid", "host", "host_short",
+// "socket_path", "start_time", "version".
 func (srv *Server) Lookup(key string) (string, bool) {
 	switch key {
 	case "session_count":
 		return fmt.Sprintf("%d", len(srv.Sessions)), true
+	case "pid":
+		return fmt.Sprintf("%d", srv.PidValue), true
+	case "host":
+		h, _ := os.Hostname()
+		return h, true
+	case "host_short":
+		h, _ := os.Hostname()
+		if i := strings.Index(h, "."); i >= 0 {
+			h = h[:i]
+		}
+		return h, true
+	case "socket_path":
+		return srv.SocketPath, true
+	case "start_time":
+		return fmt.Sprintf("%d", srv.StartTime.Unix()), true
+	case "version":
+		if srv.Version != "" {
+			return srv.Version, true
+		}
+		return "dmux", true
 	}
 	return "", false
 }
@@ -122,16 +166,27 @@ type Session struct {
 	Env          Environ
 	Current      *Winlink
 	LastWindowID WindowID // ID of the window that was active before the current one
+	// CreatedAt is when this session was created.
+	CreatedAt time.Time
+	// LastAttachedAt is when a client last attached to this session.
+	LastAttachedAt time.Time
+	// Path is the default working directory for this session.
+	Path string
+	// Attached is the number of currently attached clients.
+	Attached int
+	// AttachedList holds the IDs of currently attached clients.
+	AttachedList []ClientID
 }
 
 // NewSession creates a Session with the given id and name. The options store
 // is a child of parent (which should be Server.Options or nil for a root).
 func NewSession(id SessionID, name string, parent *options.Store) *Session {
 	return &Session{
-		ID:      id,
-		Name:    name,
-		Options: options.NewChild(parent),
-		Env:     make(Environ),
+		ID:        id,
+		Name:      name,
+		Options:   options.NewChild(parent),
+		Env:       make(Environ),
+		CreatedAt: time.Now(),
 	}
 }
 
@@ -144,7 +199,7 @@ func (s *Session) AddWindow(w *Window) *Winlink {
 	if len(s.Windows) > 0 {
 		idx = s.Windows[len(s.Windows)-1].Index + 1
 	}
-	wl := &Winlink{Index: idx, Window: w}
+	wl := &Winlink{Index: idx, Window: w, Session: s}
 	s.Windows = append(s.Windows, wl)
 	if s.Current == nil {
 		s.Current = wl
@@ -175,7 +230,7 @@ func (s *Session) RemoveWindow(i int) {
 }
 
 // Lookup satisfies [format.Context].
-// Recognised keys: "session_id", "session_name", "session_windows".
+// Recognised keys: all session_* format variables.
 func (s *Session) Lookup(key string) (string, bool) {
 	switch key {
 	case "session_id":
@@ -184,6 +239,64 @@ func (s *Session) Lookup(key string) (string, bool) {
 		return s.Name, true
 	case "session_windows":
 		return fmt.Sprintf("%d", len(s.Windows)), true
+	case "session_activity":
+		ts := s.LastAttachedAt
+		if ts.IsZero() {
+			ts = s.CreatedAt
+		}
+		return fmt.Sprintf("%d", ts.Unix()), true
+	case "session_alerts":
+		return "", true
+	case "session_attached":
+		return fmt.Sprintf("%d", s.Attached), true
+	case "session_attached_list":
+		ids := make([]string, len(s.AttachedList))
+		for i, id := range s.AttachedList {
+			ids[i] = string(id)
+		}
+		return strings.Join(ids, ","), true
+	case "session_created":
+		return fmt.Sprintf("%d", s.CreatedAt.Unix()), true
+	case "session_format":
+		return "1", true
+	case "session_group":
+		// Sessions are not grouped by default; return empty.
+		return "", true
+	case "session_group_attached":
+		return fmt.Sprintf("%d", s.Attached), true
+	case "session_group_attached_list":
+		ids := make([]string, len(s.AttachedList))
+		for i, id := range s.AttachedList {
+			ids[i] = string(id)
+		}
+		return strings.Join(ids, ","), true
+	case "session_group_list":
+		return string(s.ID), true
+	case "session_group_many_attached":
+		if s.Attached > 1 {
+			return "1", true
+		}
+		return "0", true
+	case "session_group_size":
+		return "1", true
+	case "session_grouped":
+		return "0", true
+	case "session_last_attached":
+		if !s.LastAttachedAt.IsZero() {
+			return fmt.Sprintf("%d", s.LastAttachedAt.Unix()), true
+		}
+		return fmt.Sprintf("%d", s.CreatedAt.Unix()), true
+	case "session_many_attached":
+		if s.Attached > 1 {
+			return "1", true
+		}
+		return "0", true
+	case "session_marked":
+		return "0", true
+	case "session_path":
+		return s.Path, true
+	case "session_stack":
+		return "", true
 	}
 	return "", false
 }
@@ -206,15 +319,65 @@ func (s *Session) Children(listKey string) []format.Context {
 // with a *Window. The same *Window may appear at multiple indices within one
 // session or across sessions (the session-group feature).
 type Winlink struct {
-	Index  int
-	Window *Window
+	Index   int
+	Window  *Window
+	Session *Session // back-reference to the owning session; set by AddWindow
 }
 
-// Lookup satisfies [format.Context]. The key "window_index" returns this
-// Winlink's index; all other keys are delegated to the underlying Window.
+// Lookup satisfies [format.Context]. Session-position variables
+// (window_active, window_start_flag, window_end_flag, window_last_flag,
+// window_flags) are resolved here; window_index returns this Winlink's index;
+// all other keys are delegated to the underlying Window.
 func (wl *Winlink) Lookup(key string) (string, bool) {
-	if key == "window_index" {
+	switch key {
+	case "window_index":
 		return fmt.Sprintf("%d", wl.Index), true
+	case "window_active":
+		if wl.Session != nil && wl.Session.Current == wl {
+			return "1", true
+		}
+		return "0", true
+	case "window_last_flag":
+		if wl.Session != nil && wl.Window.ID == wl.Session.LastWindowID {
+			return "1", true
+		}
+		return "0", true
+	case "window_start_flag":
+		if wl.Session != nil && len(wl.Session.Windows) > 0 && wl.Session.Windows[0] == wl {
+			return "1", true
+		}
+		return "0", true
+	case "window_end_flag":
+		if wl.Session != nil && len(wl.Session.Windows) > 0 && wl.Session.Windows[len(wl.Session.Windows)-1] == wl {
+			return "1", true
+		}
+		return "0", true
+	case "window_flags":
+		var flags []byte
+		if wl.Session != nil {
+			if wl.Session.Current == wl {
+				flags = append(flags, '*')
+			}
+			if wl.Window.ID == wl.Session.LastWindowID {
+				flags = append(flags, '-')
+			}
+		}
+		if wl.Window.ActivityFlag {
+			flags = append(flags, '!')
+		}
+		if len(flags) == 0 {
+			return " ", true
+		}
+		return string(flags), true
+	case "window_stack_index":
+		if wl.Session != nil {
+			for i, w := range wl.Session.Windows {
+				if w == wl {
+					return fmt.Sprintf("%d", i), true
+				}
+			}
+		}
+		return "0", true
 	}
 	return wl.Window.Lookup(key)
 }
@@ -248,16 +411,28 @@ type Window struct {
 	// When a window is linked into a second session both the originating
 	// session and the destination session appear in this slice.
 	LinkedSessions []SessionID
+	// ActivityAt is when activity was last detected in this window (bell/content change).
+	ActivityAt time.Time
+	// PaneTTYs maps each pane ID to its PTY device path (e.g. "/dev/pts/3").
+	// Populated by the server when creating panes.
+	PaneTTYs map[PaneID]string
+	// PaneStartCmds maps each pane ID to the command it was started with.
+	PaneStartCmds map[PaneID]string
+	// PaneStartPaths maps each pane ID to the working directory when it was created.
+	PaneStartPaths map[PaneID]string
 }
 
 // NewWindow creates an empty Window with no panes. Call [Window.AddPane] to
 // populate it, and assign Layout once the first pane's dimensions are known.
 func NewWindow(id WindowID, name string, parent *options.Store) *Window {
 	return &Window{
-		ID:      id,
-		Name:    name,
-		Panes:   make(map[PaneID]Pane),
-		Options: options.NewChild(parent),
+		ID:             id,
+		Name:           name,
+		Panes:          make(map[PaneID]Pane),
+		Options:        options.NewChild(parent),
+		PaneTTYs:       make(map[PaneID]string),
+		PaneStartCmds:  make(map[PaneID]string),
+		PaneStartPaths: make(map[PaneID]string),
 	}
 }
 
@@ -301,10 +476,16 @@ func (w *Window) RemoveLinkedSession(id SessionID) {
 	}
 }
 
+// boolVal returns "1" if b is true, "0" otherwise. Used for boolean format variables.
+func boolVal(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
 // Lookup satisfies [format.Context].
-// Recognised keys: "window_id", "window_name", "window_panes",
-// "window_activity_flag", "window_linked", "window_linked_sessions",
-// "window_linked_sessions_list".
+// Recognised keys: all window_* format variables.
 func (w *Window) Lookup(key string) (string, bool) {
 	switch key {
 	case "window_id":
@@ -313,16 +494,44 @@ func (w *Window) Lookup(key string) (string, bool) {
 		return w.Name, true
 	case "window_panes":
 		return fmt.Sprintf("%d", len(w.Panes)), true
-	case "window_activity_flag":
+	case "window_activity_flag", "window_bell_flag":
+		return boolVal(w.ActivityFlag), true
+	case "window_activity":
+		return fmt.Sprintf("%d", w.ActivityAt.Unix()), true
+	case "window_active":
+		// Without session context, we can't determine this; return 0.
+		// The correct value is computed in Winlink.Lookup.
+		return "0", true
+	case "window_bigger":
+		return "0", true
+	case "window_cell_height", "window_cell_width":
+		return "0", true
+	case "window_end_flag", "window_start_flag":
+		// Correct values are computed in Winlink.Lookup.
+		return "0", true
+	case "window_flags":
+		// Flags without session context: only show activity flag.
 		if w.ActivityFlag {
-			return "1", true
+			return "!", true
+		}
+		return " ", true
+	case "window_format":
+		return "1", true
+	case "window_height":
+		if w.Layout != nil {
+			return fmt.Sprintf("%d", w.Layout.Rows()), true
 		}
 		return "0", true
+	case "window_last_flag":
+		// Correct value is computed in Winlink.Lookup.
+		return "0", true
+	case "window_layout":
+		if w.Layout != nil {
+			return w.Layout.Marshal(), true
+		}
+		return "0x0,0,0,0", true
 	case "window_linked":
-		if len(w.LinkedSessions) > 1 {
-			return "1", true
-		}
-		return "0", true
+		return boolVal(len(w.LinkedSessions) > 1), true
 	case "window_linked_sessions":
 		return fmt.Sprintf("%d", len(w.LinkedSessions)), true
 	case "window_linked_sessions_list":
@@ -331,13 +540,84 @@ func (w *Window) Lookup(key string) (string, bool) {
 			ids[i] = string(id)
 		}
 		return strings.Join(ids, ","), true
+	case "window_marked_flag":
+		return "0", true
+	case "window_offset_x", "window_offset_y":
+		return "0", true
+	case "window_raw_flags":
+		if w.ActivityFlag {
+			return "!", true
+		}
+		return "", true
+	case "window_silence_flag":
+		return "0", true
+	case "window_stack_index":
+		// Correct value is computed in Winlink.Lookup.
+		return "0", true
+	case "window_visible_layout":
+		if w.Layout != nil {
+			return w.Layout.Marshal(), true
+		}
+		return "0x0,0,0,0", true
+	case "window_width":
+		if w.Layout != nil {
+			return fmt.Sprintf("%d", w.Layout.Cols()), true
+		}
+		return "0", true
+	case "window_zoomed_flag":
+		if w.Layout != nil && w.Layout.IsZoomed() {
+			return "1", true
+		}
+		return "0", true
 	}
 	return "", false
 }
 
-// Children satisfies [format.Context]. No list keys are defined for Window yet.
-func (w *Window) Children(_ string) []format.Context {
+// Children satisfies [format.Context].
+// Recognised list keys: "P", "pane", "panes" — returns one PaneContext per pane.
+func (w *Window) Children(listKey string) []format.Context {
+	switch listKey {
+	case "P", "pane", "panes":
+		return w.buildPaneContexts()
+	}
 	return nil
+}
+
+// buildPaneContexts constructs a PaneContext for each pane in the window.
+func (w *Window) buildPaneContexts() []format.Context {
+	if w.Layout == nil {
+		return nil
+	}
+	winW := w.Layout.Cols()
+	winH := w.Layout.Rows()
+	out := make([]format.Context, 0, len(w.Panes))
+	idx := 0
+	for id, p := range w.Panes {
+		r := w.Layout.Rect(id)
+		pc := &PaneContext{
+			PaneID:       id,
+			PaneIndex:    idx,
+			Left:         r.X,
+			Top:          r.Y,
+			Width:        r.Width,
+			Height:       r.Height,
+			WindowWidth:  winW,
+			WindowHeight: winH,
+			Active:       w.Active == id,
+			Last:         w.LastPaneID == id,
+			Title:        p.Title(),
+			ShellPID:     p.ShellPID(),
+			TTY:          w.PaneTTYs[id],
+			StartCommand: w.PaneStartCmds[id],
+			StartPath:    w.PaneStartPaths[id],
+		}
+		if w.Layout.IsZoomed() {
+			pc.Zoomed = w.Layout.ZoomedLeaf() == id
+		}
+		out = append(out, pc)
+		idx++
+	}
+	return out
 }
 
 // Client represents an attached terminal client. Session is nil when the
@@ -356,15 +636,32 @@ type Client struct {
 	// PID is the OS process ID of the dmux client process. Used by
 	// suspend-client to send SIGTSTP to the client.
 	PID int
+	// CreatedAt is when this client connected.
+	CreatedAt time.Time
+	// UID is the Unix user ID of the connecting client.
+	UID int
+	// UserName is the username of the connecting client.
+	UserName string
+	// LastSession is the name of the session this client was last attached to.
+	LastSession string
+	// Prefix indicates the client is currently in the prefix key state.
+	Prefix bool
+	// Readonly indicates the client was attached in read-only mode.
+	Readonly bool
+	// Written is the number of bytes written to this client.
+	Written int64
+	// Discarded is the number of bytes discarded (e.g. when the client is slow).
+	Discarded int64
 }
 
 // NewClient creates a Client with sensible defaults. The Session field is nil
 // until [Server.AttachClient] is called.
 func NewClient(id ClientID) *Client {
 	return &Client{
-		ID:       id,
-		KeyTable: "root",
-		Env:      make(Environ),
+		ID:        id,
+		KeyTable:  "root",
+		Env:       make(Environ),
+		CreatedAt: time.Now(),
 	}
 }
 
@@ -385,15 +682,14 @@ func (c *Client) PopOverlay() Overlay {
 }
 
 // Lookup satisfies [format.Context].
-// Recognised keys: "client_id", "client_tty", "client_term",
-// "client_width", "client_height", "client_key_table", "client_cwd".
+// Recognised keys: all client_* format variables.
 func (c *Client) Lookup(key string) (string, bool) {
 	switch key {
 	case "client_id":
 		return string(c.ID), true
 	case "client_tty":
 		return c.TTY, true
-	case "client_term":
+	case "client_term", "client_termname", "client_termtype":
 		return c.Term, true
 	case "client_width":
 		return fmt.Sprintf("%d", c.Size.Cols), true
@@ -403,6 +699,39 @@ func (c *Client) Lookup(key string) (string, bool) {
 		return c.KeyTable, true
 	case "client_cwd":
 		return c.Cwd, true
+	case "client_activity":
+		return fmt.Sprintf("%d", c.CreatedAt.Unix()), true
+	case "client_cell_height", "client_cell_width":
+		return "0", true
+	case "client_created":
+		return fmt.Sprintf("%d", c.CreatedAt.Unix()), true
+	case "client_discarded":
+		return fmt.Sprintf("%d", c.Discarded), true
+	case "client_flags":
+		return "", true
+	case "client_last_session":
+		return c.LastSession, true
+	case "client_name":
+		return string(c.ID), true
+	case "client_pid":
+		return fmt.Sprintf("%d", c.PID), true
+	case "client_prefix":
+		return boolVal(c.Prefix), true
+	case "client_readonly":
+		return boolVal(c.Readonly), true
+	case "client_session":
+		if c.Session != nil {
+			return c.Session.Name, true
+		}
+		return "", true
+	case "client_termfeatures":
+		return "", true
+	case "client_uid":
+		return fmt.Sprintf("%d", c.UID), true
+	case "client_user":
+		return c.UserName, true
+	case "client_written":
+		return fmt.Sprintf("%d", c.Written), true
 	}
 	return "", false
 }
