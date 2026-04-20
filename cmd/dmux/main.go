@@ -18,7 +18,7 @@ import (
 
 	// Builtins register themselves with internal/command at import
 	// time. Import with _ to pull them in.
-	_ "github.com/yourname/dmux/internal/command/builtin"
+	_ "github.com/dhamidi/dmux/internal/command/builtin"
 )
 
 func main() {

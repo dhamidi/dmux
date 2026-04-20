@@ -1,0 +1,393 @@
+package command
+
+import "fmt"
+
+// Result is the return value of a command handler.
+type Result struct {
+	// Err, if non-nil, means the command failed.
+	Err error
+	// Output is any text the command produces (e.g. for list-* commands).
+	Output string
+}
+
+// OK returns a successful Result with no output.
+func OK() Result { return Result{} }
+
+// Errorf returns a failed Result wrapping a formatted error string.
+func Errorf(format string, args ...any) Result {
+	return Result{Err: fmt.Errorf(format, args...)}
+}
+
+// WithOutput returns a successful Result carrying text output.
+func WithOutput(s string) Result { return Result{Output: s} }
+
+// ─── View types ──────────────────────────────────────────────────────────────
+//
+// View types are plain-data snapshots passed between the framework and command
+// handlers. They contain no live references to internal packages, so commands
+// can be tested without a running server.
+
+// SessionView is a snapshot of session state.
+type SessionView struct {
+	ID      string
+	Name    string
+	Windows []WindowView
+	// Current is the index into Windows of the active window (-1 if none).
+	Current int
+}
+
+// CurrentWindow returns the active window, or a zero WindowView if none.
+func (s SessionView) CurrentWindow() WindowView {
+	if s.Current >= 0 && s.Current < len(s.Windows) {
+		return s.Windows[s.Current]
+	}
+	return WindowView{}
+}
+
+// WindowView is a snapshot of window state.
+type WindowView struct {
+	ID    string
+	Name  string
+	Index int
+	Panes []PaneView
+	// Active is the ID of the active pane (0 if none).
+	Active int
+}
+
+// ActivePane returns the active pane, or a zero PaneView if none.
+func (w WindowView) ActivePane() PaneView {
+	for _, p := range w.Panes {
+		if p.ID == w.Active {
+			return p
+		}
+	}
+	return PaneView{}
+}
+
+// PaneView is a snapshot of pane state.
+type PaneView struct {
+	ID    int
+	Title string
+}
+
+// ClientView is a snapshot of client state. The zero value represents no
+// client (non-client-originated command).
+type ClientView struct {
+	ID        string
+	SessionID string // empty if detached
+	Cols      int
+	Rows      int
+	TTY       string
+	KeyTable  string
+}
+
+// IsAttached reports whether the client is attached to a session.
+func (c ClientView) IsAttached() bool { return c.SessionID != "" }
+
+// ─── Store interfaces ─────────────────────────────────────────────────────────
+
+// SessionStore is the read interface over sessions used by command handlers
+// and target resolution. *session.Server (wrapped at the server tier)
+// satisfies this interface.
+type SessionStore interface {
+	// GetSession looks up a session by its ID.
+	GetSession(id string) (SessionView, bool)
+	// GetSessionByName looks up a session by its display name.
+	GetSessionByName(name string) (SessionView, bool)
+	// ListSessions returns all sessions in an unspecified order.
+	ListSessions() []SessionView
+}
+
+// ClientStore is the read interface over connected clients.
+type ClientStore interface {
+	// GetClient looks up a client by its ID.
+	GetClient(id string) (ClientView, bool)
+	// ListClients returns all connected clients.
+	ListClients() []ClientView
+}
+
+// Server is the combined read interface that command handlers receive in their
+// Ctx. It merges SessionStore and ClientStore so a single stub satisfies both
+// for testing.
+type Server interface {
+	SessionStore
+	ClientStore
+}
+
+// ─── Argument types ───────────────────────────────────────────────────────────
+
+// ArgSpec describes the flags and positional arguments a command accepts.
+type ArgSpec struct {
+	// Flags lists names of boolean flags (e.g. "d", "k").
+	Flags []string
+	// Options lists names of string-valued flags (e.g. "n", "s").
+	// The "-t" option is added automatically when Target.Kind != TargetNone.
+	Options []string
+	// MinArgs is the minimum number of required positional arguments.
+	MinArgs int
+	// MaxArgs is the maximum number of allowed positional arguments.
+	// -1 means unlimited.
+	MaxArgs int
+}
+
+// ParsedArgs holds the result of parsing a command's arguments.
+type ParsedArgs struct {
+	// Flags holds the boolean flags that were present.
+	Flags map[string]bool
+	// Options holds string-valued flags and their values.
+	Options map[string]string
+	// Positional holds the non-flag arguments.
+	Positional []string
+}
+
+// Flag returns true if the named flag was present (e.g. Flag("d") for -d).
+func (p ParsedArgs) Flag(name string) bool { return p.Flags[name] }
+
+// Option returns the value of a string-valued flag, or "" if absent.
+func (p ParsedArgs) Option(name string) string { return p.Options[name] }
+
+// ─── Target types ─────────────────────────────────────────────────────────────
+
+// TargetKind describes what level of resolution a command's -t flag produces.
+type TargetKind int
+
+const (
+	TargetNone    TargetKind = iota // command takes no target
+	TargetSession                   // -t resolves to a session
+	TargetWindow                    // -t resolves to a session:window
+	TargetPane                      // -t resolves to a session:window.pane
+)
+
+// TargetSpec describes the -t flag semantics for a command.
+type TargetSpec struct {
+	// Kind is the resolution level required.
+	Kind TargetKind
+	// Optional means -t may be absent; the current client context is used.
+	Optional bool
+}
+
+// Target is the resolved target after -t has been parsed and looked up.
+type Target struct {
+	Session SessionView
+	Window  WindowView
+	Pane    PaneView
+	// Kind indicates how far resolution went.
+	Kind TargetKind
+}
+
+// ─── Spec and Ctx ─────────────────────────────────────────────────────────────
+
+// Ctx is the execution context passed to every command handler. All fields
+// use value types or interfaces defined in this package, so handlers can be
+// tested without a live server.
+type Ctx struct {
+	// Server provides access to sessions and clients.
+	Server Server
+	// Client is the client that originated the command.
+	// The zero ClientView indicates a non-client-originated command.
+	Client ClientView
+	// Target is the resolved -t target.
+	Target Target
+	// Args holds the parsed flags and positional arguments.
+	Args ParsedArgs
+	// Queue is the async command queue; handlers may enqueue follow-ups.
+	Queue *Queue
+}
+
+// Spec describes a command that can be registered and dispatched.
+type Spec struct {
+	// Name is the canonical command name (e.g. "new-session").
+	Name string
+	// Alias lists alternative names (e.g. "new-s").
+	Alias []string
+	// Args describes expected flags and positional arguments.
+	Args ArgSpec
+	// Target describes what -t resolves to for this command.
+	Target TargetSpec
+	// Run is called when the command is dispatched.
+	Run func(*Ctx) Result
+}
+
+// ─── Registry ─────────────────────────────────────────────────────────────────
+
+// Registry holds a set of registered command Specs.
+type Registry struct {
+	specs map[string]*Spec
+}
+
+// NewRegistry returns an empty Registry.
+func NewRegistry() *Registry {
+	return &Registry{specs: make(map[string]*Spec)}
+}
+
+// Register adds spec to r. It returns an error if any name or alias is
+// already registered.
+func (r *Registry) Register(spec Spec) error {
+	names := append([]string{spec.Name}, spec.Alias...)
+	for _, name := range names {
+		if _, dup := r.specs[name]; dup {
+			return fmt.Errorf("command: duplicate registration for %q", name)
+		}
+	}
+	ptr := &spec
+	for _, name := range names {
+		r.specs[name] = ptr
+	}
+	return nil
+}
+
+// Lookup returns the Spec registered under name, or nil if not found.
+func (r *Registry) Lookup(name string) *Spec {
+	return r.specs[name]
+}
+
+// List returns all registered Specs without duplicates (aliases share a Spec pointer).
+func (r *Registry) List() []*Spec {
+	seen := map[*Spec]bool{}
+	var out []*Spec
+	for _, s := range r.specs {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Dispatch looks up name, parses rawArgs, resolves the target, and calls the
+// handler. It uses store for target resolution and passes q as Ctx.Queue.
+func (r *Registry) Dispatch(name string, rawArgs []string, store Server, client ClientView, q *Queue) Result {
+	spec := r.Lookup(name)
+	if spec == nil {
+		return Errorf("unknown command: %s", name)
+	}
+
+	// Auto-inject -t into ArgSpec.Options when the command takes a target.
+	argSpec := spec.Args
+	if spec.Target.Kind != TargetNone {
+		hasT := false
+		for _, o := range argSpec.Options {
+			if o == "t" {
+				hasT = true
+				break
+			}
+		}
+		if !hasT {
+			argSpec.Options = append(argSpec.Options, "t")
+		}
+	}
+
+	parsed, err := parseArgs(argSpec, rawArgs)
+	if err != nil {
+		return Result{Err: err}
+	}
+
+	target, err := resolveTarget(spec.Target, parsed.Options["t"], store, client)
+	if err != nil {
+		return Result{Err: err}
+	}
+
+	ctx := &Ctx{
+		Server: store,
+		Client: client,
+		Target: target,
+		Args:   parsed,
+		Queue:  q,
+	}
+	return spec.Run(ctx)
+}
+
+// ─── Default (global) registry ────────────────────────────────────────────────
+
+// Default is the package-level Registry used by package-level Register/Lookup.
+var Default = NewRegistry()
+
+// Register adds spec to the Default registry. It panics if any name or alias
+// is already registered. This is called from each builtin's init() function.
+func Register(spec Spec) {
+	if err := Default.Register(spec); err != nil {
+		panic(err.Error())
+	}
+}
+
+// Lookup returns the Spec registered under name in the Default registry, or
+// nil if not found.
+func Lookup(name string) *Spec { return Default.Lookup(name) }
+
+// List returns all Specs in the Default registry without duplicates.
+func List() []*Spec { return Default.List() }
+
+// Dispatch is a package-level convenience that delegates to Default.Dispatch.
+func Dispatch(name string, rawArgs []string, store Server, client ClientView, q *Queue) Result {
+	return Default.Dispatch(name, rawArgs, store, client, q)
+}
+
+// ─── Argument parsing ─────────────────────────────────────────────────────────
+
+// parseArgs parses rawArgs according to spec, supporting:
+//   - -f (boolean flag)
+//   - -fg (combined flags)
+//   - -o value (option with space)
+//   - -ovalue (option concatenated)
+//   - -- (end of flags)
+func parseArgs(spec ArgSpec, rawArgs []string) (ParsedArgs, error) {
+	flagSet := make(map[string]bool, len(spec.Flags))
+	for _, f := range spec.Flags {
+		flagSet[f] = true
+	}
+	optSet := make(map[string]bool, len(spec.Options))
+	for _, o := range spec.Options {
+		optSet[o] = true
+	}
+
+	flags := make(map[string]bool)
+	opts := make(map[string]string)
+	var positional []string
+
+	i := 0
+	for i < len(rawArgs) {
+		arg := rawArgs[i]
+		if arg == "--" {
+			positional = append(positional, rawArgs[i+1:]...)
+			break
+		}
+		if len(arg) < 2 || arg[0] != '-' {
+			positional = append(positional, arg)
+			i++
+			continue
+		}
+		// arg is -xyz or similar
+		chars := arg[1:]
+		for j := 0; j < len(chars); j++ {
+			name := string(chars[j])
+			switch {
+			case flagSet[name]:
+				flags[name] = true
+			case optSet[name]:
+				if j+1 < len(chars) {
+					// value is the rest of this arg: -tvalue
+					opts[name] = chars[j+1:]
+					j = len(chars) // consume rest
+				} else {
+					i++
+					if i >= len(rawArgs) {
+						return ParsedArgs{}, fmt.Errorf("flag -%s requires an argument", name)
+					}
+					opts[name] = rawArgs[i]
+				}
+			default:
+				return ParsedArgs{}, fmt.Errorf("unknown flag: -%s", name)
+			}
+		}
+		i++
+	}
+
+	if len(positional) < spec.MinArgs {
+		return ParsedArgs{}, fmt.Errorf("requires at least %d argument(s), got %d", spec.MinArgs, len(positional))
+	}
+	if spec.MaxArgs >= 0 && len(positional) > spec.MaxArgs {
+		return ParsedArgs{}, fmt.Errorf("accepts at most %d argument(s), got %d", spec.MaxArgs, len(positional))
+	}
+
+	return ParsedArgs{Flags: flags, Options: opts, Positional: positional}, nil
+}
