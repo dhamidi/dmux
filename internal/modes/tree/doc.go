@@ -1,40 +1,75 @@
 // Package tree implements the session/window/pane chooser
 // (`prefix s`, `choose-tree`, `choose-session`, `choose-window`).
 //
+// # Data model
+//
+// The tree mode works exclusively with plain snapshot values — it holds no
+// live references to session, window, or pane objects.
+//
+// [TreeNode] is the fundamental unit:
+//
+//	type TreeNode struct {
+//	    Kind     NodeKind   // KindSession, KindWindow, or KindPane
+//	    ID       string     // opaque; passed to the OnSelect callback
+//	    Name     string     // human-readable label
+//	    Children []TreeNode // nested nodes
+//	}
+//
+// Callers build a []TreeNode slice from whatever source (live server, config
+// file, test fixture) and pass it to [New].  The tree mode never mutates the
+// slice.
+//
 // # Boundary
 //
-// Implements modes.PaneMode. Takes a *session.Server snapshot at
-// construction and renders a collapsible tree:
+// Implements [modes.PaneMode]. Renders a collapsible tree:
 //
 //	session-a
-//	  0: editor*
-//	  1: shell
+//	  win-0
+//	    pane-0a
+//	  win-1
 //	session-b
-//	  0: logs
+//	  win-2
 //
-// Supports arrow-key navigation, /-search, Enter to select, Esc or
-// q to cancel, x to kill, and the usual vim/emacs movement keys.
+// Supports arrow-key / vim-key navigation (Up/Down/k/j), /-search with
+// Backspace editing and Enter/Escape confirmation, and Enter to select.
+// q and Escape close the mode without selecting.
 //
-// On selection, returns a modes.Outcome carrying the command to run
-// (typically `switch-client -t <target>` or `select-window -t`),
-// which the server loop enqueues.
+// # Selection callback
+//
+// Selection is expressed as a callback rather than direct command dispatch:
+//
+//	OnSelect func(id string)
+//
+// When the user presses Enter the callback is invoked with the highlighted
+// node's ID, then [modes.CloseMode] is returned.  The caller is responsible
+// for translating the ID into whatever command is appropriate
+// (e.g. `switch-client -t <target>`).  Passing nil is valid and silently
+// skips the callback.
 //
 // # Preview
 //
-// The right half of the mode's area previews the currently-highlighted
-// target using the same pane-snapshot mechanism render uses, so users
-// can see what they're switching to before committing.
+// When a [PreviewProvider] is supplied, the right half of the mode's area
+// shows a [pane.CellGrid] snapshot of the currently-highlighted target.
+// [PreviewProvider] is defined as:
+//
+//	type PreviewProvider func(id string) *pane.CellGrid
+//
+// Returning nil suppresses the preview for that node.  When the provider
+// itself is nil the mode uses the full canvas width for the list.
 //
 // # In isolation
 //
-// Construct a fake Server with several Sessions and Windows, render
-// the tree to a cell grid, assert on the output. No client or real
-// terminal required.
+// Construct a []TreeNode slice with synthetic data, call [New] with a stub
+// callback and preview provider, then exercise [Mode.Key] and inspect
+// [Mode.SelectedID] and the callback result.  No client, session, or real
+// terminal is required.
 //
 // # Non-goals
 //
-// Does not mutate server state. It only emits commands as Outcomes.
-// This keeps the mode reusable — `choose-buffer`, `choose-client`,
-// and `choose-customize` can be implemented in this package as
-// alternative Constructors over the same tree infrastructure.
+// The tree mode does not import internal/session or any concrete object
+// model.  It does not mutate server state.  Command dispatch is delegated
+// entirely to the OnSelect callback supplied by the caller.
+// This keeps the mode reusable — choose-buffer, choose-client, and
+// choose-customize can be implemented in this package as alternative
+// constructors over the same tree infrastructure.
 package tree
