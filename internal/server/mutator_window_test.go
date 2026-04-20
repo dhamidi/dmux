@@ -583,3 +583,72 @@ func TestSwapWindowsWindowNotFound(t *testing.T) {
 		t.Error("expected error for unknown window B, got nil")
 	}
 }
+
+func TestFindWindowByName(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	sv, err := m.NewSession("s1")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	wv, err := m.NewWindow(sv.ID, "mywindow")
+	if err != nil {
+		t.Fatalf("NewWindow: %v", err)
+	}
+
+	got, err := m.FindWindow(sv.ID, "mywin")
+	if err != nil {
+		t.Fatalf("FindWindow: %v", err)
+	}
+	if got.ID != wv.ID {
+		t.Errorf("FindWindow returned ID %q, want %q", got.ID, wv.ID)
+	}
+}
+
+func TestFindWindowNoMatch(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	sv, err := m.NewSession("s1")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if _, err := m.NewWindow(sv.ID, "alpha"); err != nil {
+		t.Fatalf("NewWindow: %v", err)
+	}
+
+	if _, err := m.FindWindow(sv.ID, "beta"); err == nil {
+		t.Error("expected error for no match, got nil")
+	}
+}
+
+func TestFindWindowMultipleMatchesReturnsFirst(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	sv, err := m.NewSession("s1")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	wv1, err := m.NewWindow(sv.ID, "work-alpha")
+	if err != nil {
+		t.Fatalf("NewWindow: %v", err)
+	}
+	if _, err := m.NewWindow(sv.ID, "work-beta"); err != nil {
+		t.Fatalf("NewWindow: %v", err)
+	}
+
+	got, err := m.FindWindow(sv.ID, "work")
+	if err != nil {
+		t.Fatalf("FindWindow: %v", err)
+	}
+	if got.ID != wv1.ID {
+		t.Errorf("FindWindow returned ID %q, want first match %q", got.ID, wv1.ID)
+	}
+}
+
+func TestFindWindowSessionNotFound(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	if _, err := m.FindWindow("nonexistent", "anything"); err == nil {
+		t.Error("expected error for unknown session, got nil")
+	}
+}

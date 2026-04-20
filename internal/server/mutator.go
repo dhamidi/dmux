@@ -1080,7 +1080,16 @@ func (m *serverMutator) SwapWindows(sessionID, aWindowID, bWindowID string) erro
 }
 
 func (m *serverMutator) FindWindow(sessionID, pattern string) (command.WindowView, error) {
-	return command.WindowView{}, errStub("find-window")
+	sess, ok := m.state.Sessions[session.SessionID(sessionID)]
+	if !ok {
+		return command.WindowView{}, fmt.Errorf("find-window: session %q not found", sessionID)
+	}
+	for _, wl := range sess.Windows {
+		if strings.Contains(wl.Window.Name, pattern) {
+			return toWindowView(wl), nil
+		}
+	}
+	return command.WindowView{}, fmt.Errorf("find-window: no window matching %q", pattern)
 }
 
 // ─── Pane movement ───────────────────────────────────────────────────────────
