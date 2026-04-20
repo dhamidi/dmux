@@ -483,6 +483,75 @@ func TestMsgStdinKeyBinding(t *testing.T) {
 	}
 }
 
+// TestConfigFileAutoLoad verifies that when ConfigFile is set, the server
+// sources the file at startup and executes the commands in it.
+func TestConfigFileAutoLoad(t *testing.T) {
+	// Write a config file containing a single new-session command.
+	f, err := os.CreateTemp("", "dmux-config-*.conf")
+	if err != nil {
+		t.Fatalf("create temp config: %v", err)
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString("new-session -s test\n"); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	f.Close()
+
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	done := startServer(server.Config{
+		Listener:   pl,
+		Log:        io.Discard,
+		Signals:    sigs,
+		Now:        fixedClock(time.Time{}),
+		ConfigFile: f.Name(),
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+
+	sendHandshake(t, clientConn)
+
+	// Give the server time to process the identify sequence.
+	time.Sleep(20 * time.Millisecond)
+
+	// List sessions and verify the "test" session from the config file exists.
+	cm := proto.CommandMsg{Argv: []string{"list-sessions"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write list-sessions: %v", err)
+	}
+	if err := clientConn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	msgType, payload, err := proto.ReadMsg(clientConn)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if msgType != proto.MsgStdout {
+		t.Fatalf("expected MsgStdout, got %s", msgType)
+	}
+	var sm proto.StdoutMsg
+	if err := sm.Decode(payload); err != nil {
+		t.Fatalf("decode StdoutMsg: %v", err)
+	}
+	if !strings.Contains(string(sm.Data), "test:") {
+		t.Fatalf("expected session 'test' in list-sessions output, got: %q", sm.Data)
+	}
+	clientConn.SetDeadline(time.Time{}) //nolint:errcheck
+
+	sigs <- fakeSignal("SIGTERM")
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}
+
 // testFakePane is a minimal session.Pane for use in TestRenderLoop.
 // Snapshot returns a fixed 3×2 grid with distinct characters.
 type testFakePane struct{}

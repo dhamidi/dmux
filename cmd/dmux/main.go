@@ -43,6 +43,30 @@ import (
 	"github.com/dhamidi/dmux/internal/server"
 )
 
+// configPath returns the path to the dmux configuration file, or "" if none
+// is found. It checks, in order:
+//  1. $DMUX_CONFIG environment variable (if set and non-empty)
+//  2. $HOME/.dmux.conf (if the file exists)
+//  3. $HOME/.tmux.conf (if the file exists)
+func configPath() string {
+	if p := os.Getenv("DMUX_CONFIG"); p != "" {
+		return p
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		if d, err := os.UserHomeDir(); err == nil {
+			home = d
+		}
+	}
+	for _, name := range []string{".dmux.conf", ".tmux.conf"} {
+		p := filepath.Join(home, name)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
 // socketPath returns the Unix-domain socket path for the dmux server,
 // resolved from environment variables with a cache-dir fallback.
 func socketPath() string {
@@ -76,9 +100,10 @@ func runServer(path string) {
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 
 	cfg := server.Config{
-		Listener: ln,
-		Log:      os.Stderr,
-		Signals:  sigs,
+		Listener:   ln,
+		Log:        os.Stderr,
+		Signals:    sigs,
+		ConfigFile: configPath(),
 	}
 	if err := server.Run(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "dmux:", err)

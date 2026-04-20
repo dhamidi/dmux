@@ -51,6 +51,11 @@ type Config struct {
 	// status ticks, etc.). Defaults to time.Now if nil.
 	Now Clock
 
+	// ConfigFile, if non-empty, is sourced via the source-file command
+	// after the server initialises its default bindings and options.
+	// A missing or unreadable file is silently ignored.
+	ConfigFile string
+
 	// OnDirty, when non-nil, is called after a client is marked dirty
 	// for redraw. Tests use this hook to observe redraw scheduling
 	// without a full rendering layer.
@@ -156,6 +161,13 @@ func Run(cfg Config) error {
 
 	if err := loadDefaultBindings(s.mutator); err != nil {
 		return fmt.Errorf("load default bindings: %w", err)
+	}
+
+	if cfg.ConfigFile != "" {
+		var nilClientView command.ClientView
+		command.Dispatch("source-file", []string{cfg.ConfigFile},
+			s.store, nilClientView, s.queue, s.mutator)
+		s.queue.Drain()
 	}
 
 	s.wg.Add(1)
