@@ -23,6 +23,13 @@ order), `-Z` (zoom pane), `-f filter`, `-K key-format`, `-O sort-field`, and
 an optional `[template]` positional argument that replaces `%%` with the
 selected item's name on confirmation (defaults: `paste-buffer -b '%%'` and
 `switch-client -t '%%'`).
+`customize-mode` (`customizemode`) opens a full-screen TUI overlay that lets
+the user browse and edit all registered options and key bindings. The tree view
+groups options by scope (server / session / window) and bindings by key table.
+Navigate with Up/Down arrows (or k/j), expand/collapse nodes with Left/Right
+(or h/l), press Enter to edit the selected option value or key binding command,
+and press q or Escape to close. The `/` key enters a filter bar for quick
+searches. Flags: `-Z` (zoom pane), `-F format`, `-f filter`, `-t target-pane`.
 Each command handler receives a `*command.Ctx` and interacts with the server
 exclusively through its `Server` (read) and `Mutator` (write) interfaces — no
 builtin file imports any other internal package.

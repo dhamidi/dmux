@@ -997,6 +997,10 @@ func (m *serverMutator) EnterChooseTree(clientID, sessionID, windowID string) er
 	return errStub("choose-tree")
 }
 
+func (m *serverMutator) EnterCustomizeMode(clientID string) error {
+	return errStub("customize-mode")
+}
+
 func (m *serverMutator) EnterChooseBuffer(clientID, windowID string, items []command.ChooserItem, template string) error {
 	return errStub("choose-buffer")
 }

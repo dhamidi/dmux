@@ -289,6 +289,7 @@ type Mutator interface {
 	// Mode entry mutations.
 	EnterCopyMode(clientID string, scrollback bool) error
 	EnterChooseTree(clientID, sessionID, windowID string) error
+	EnterCustomizeMode(clientID string) error
 	EnterChooseBuffer(clientID, windowID string, items []ChooserItem, template string) error
 	EnterChooseClient(clientID, windowID string, items []ChooserItem, template string) error
 	EnterClockMode(clientID string, paneID int) error

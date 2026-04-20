@@ -104,8 +104,9 @@ type testBackend struct {
 	signaledChannels []string
 
 	// Mode entry recording.
-	copyModeCalls   []struct{ clientID string; scrollback bool }
-	chooseTreeCalls []struct{ clientID, sessionID, windowID string }
+	copyModeCalls        []struct{ clientID string; scrollback bool }
+	chooseTreeCalls      []struct{ clientID, sessionID, windowID string }
+	customizeModeCalls   []string
 	chooseBufferCalls []struct {
 		clientID, windowID string
 		items              []command.ChooserItem
@@ -519,6 +520,11 @@ func (b *testBackend) EnterCopyMode(clientID string, scrollback bool) error {
 
 func (b *testBackend) EnterChooseTree(clientID, sessionID, windowID string) error {
 	b.chooseTreeCalls = append(b.chooseTreeCalls, struct{ clientID, sessionID, windowID string }{clientID, sessionID, windowID})
+	return nil
+}
+
+func (b *testBackend) EnterCustomizeMode(clientID string) error {
+	b.customizeModeCalls = append(b.customizeModeCalls, clientID)
 	return nil
 }
 

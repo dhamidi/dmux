@@ -32,6 +32,8 @@ A `ClientOverlay` is drawn over the composed window frame in client
 - `modes/menu` — `display-menu`, tmux-style popup menu
 - `modes/displaypanes` — `prefix q`, big numerals over each pane
 - `modes/prompt` — `command-prompt`, `confirm-before`
+- `modes` (inline) — `CustomizeOverlay` for `customize-mode`, a tree
+  view of all options and key bindings with in-place editing
 
 Overlays stack on the client. The top overlay that captures focus
 receives keys; overlays that don't capture focus (like the
