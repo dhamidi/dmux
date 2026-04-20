@@ -1216,3 +1216,66 @@ func TestMouseWheelScroll(t *testing.T) {
 		t.Fatal("Run() did not return within timeout after SIGTERM")
 	}
 }
+
+// TestHookAfterNewSession verifies that a hook registered for after-new-session
+// fires when new-session is called.
+func TestHookAfterNewSession(t *testing.T) {
+	// Pre-register a hook on the shared state that signals a channel.
+	state := session.NewServer()
+	hookFired := make(chan struct{}, 1)
+	state.Hooks.Register("after-new-session", "test", func() {
+		select {
+		case hookFired <- struct{}{}:
+		default:
+		}
+	})
+
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		State:    state,
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+
+	sendHandshake(t, clientConn)
+
+	// Give the server time to process the identify sequence and auto-create
+	// an initial session (which will fire the hook once).
+	time.Sleep(20 * time.Millisecond)
+	// Drain the auto-created session hook.
+	select {
+	case <-hookFired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("hook for after-new-session did not fire for auto-created session")
+	}
+
+	// Now explicitly create another session and verify the hook fires again.
+	cm := proto.CommandMsg{Argv: []string{"new-session", "-s", "hooktest"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write new-session command: %v", err)
+	}
+
+	select {
+	case <-hookFired:
+		// Hook fired for the explicitly created session.
+	case <-time.After(2 * time.Second):
+		t.Fatal("hook for after-new-session did not fire after new-session command")
+	}
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}

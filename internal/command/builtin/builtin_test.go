@@ -7,6 +7,7 @@ import (
 
 	_ "github.com/dhamidi/dmux/internal/command/builtin" // register all builtins
 	"github.com/dhamidi/dmux/internal/command"
+	"github.com/dhamidi/dmux/internal/parse"
 )
 
 // ─── Test backend stub ────────────────────────────────────────────────────────
@@ -117,6 +118,9 @@ type testBackend struct {
 	displayPanesCalls []string
 	commandPromptCalls []struct{ clientID, prompt, initial string }
 	confirmBeforeCalls []struct{ clientID, prompt, command string }
+
+	// Hook state.
+	hookFns map[string]func()
 }
 
 // ─── command.Server (read) implementation ────────────────────────────────────
@@ -496,6 +500,34 @@ func (b *testBackend) CommandPrompt(clientID, prompt, initial string) error {
 func (b *testBackend) ConfirmBefore(clientID, prompt, cmd string) error {
 	b.confirmBeforeCalls = append(b.confirmBeforeCalls, struct{ clientID, prompt, command string }{clientID, prompt, cmd})
 	return nil
+}
+
+func (b *testBackend) SetHook(event, cmd string) error {
+	if b.hookFns == nil {
+		b.hookFns = make(map[string]func())
+	}
+	if cmd == "" {
+		delete(b.hookFns, event)
+		return nil
+	}
+	cmds, err := parse.Parse(cmd)
+	if err != nil || len(cmds) == 0 {
+		return fmt.Errorf("set-hook: invalid command %q: %v", cmd, err)
+	}
+	c := cmds[0]
+	b.hookFns[event] = func() {
+		command.Dispatch(c.Name, c.Args, b, command.ClientView{}, command.NewQueue(), b)
+	}
+	return nil
+}
+
+func (b *testBackend) RunHook(event string) {
+	if b.hookFns == nil {
+		return
+	}
+	if fn, ok := b.hookFns[event]; ok {
+		fn()
+	}
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1097,5 +1129,67 @@ func TestConfirmBefore_ForwardsPromptAndCommand(t *testing.T) {
 	}
 	if got.command != "kill-server" {
 		t.Errorf("ConfirmBefore command = %q, want %q", got.command, "kill-server")
+	}
+}
+
+// ─── Hook tests ───────────────────────────────────────────────────────────────
+
+// TestSetHook_RunsCallback verifies that a hook registered via set-hook fires
+// when run-hook is subsequently called for the same event.
+func TestSetHook_RunsCallback(t *testing.T) {
+	b := newBackend()
+	// Register a hook that calls new-session with a known name.
+	res := dispatch("set-hook", []string{"my-event", "new-session -s hooktest"}, b)
+	if res.Err != nil {
+		t.Fatalf("set-hook returned error: %v", res.Err)
+	}
+	// Fire the hook.
+	res = dispatch("run-hook", []string{"my-event"}, b)
+	if res.Err != nil {
+		t.Fatalf("run-hook returned error: %v", res.Err)
+	}
+	// Verify the hook callback (new-session) was called.
+	if len(b.newSessionCalls) != 1 || b.newSessionCalls[0] != "hooktest" {
+		t.Errorf("expected NewSession called with 'hooktest', got: %v", b.newSessionCalls)
+	}
+}
+
+// TestSetHook_Unset verifies that set-hook -u removes the hook for an event.
+func TestSetHook_Unset(t *testing.T) {
+	b := newBackend()
+	// Register a hook, then unset it.
+	dispatch("set-hook", []string{"my-event", "new-session -s hooktest"}, b) //nolint:errcheck
+	res := dispatch("set-hook", []string{"-u", "my-event"}, b)
+	if res.Err != nil {
+		t.Fatalf("set-hook -u returned error: %v", res.Err)
+	}
+	// Fire the (now-removed) hook — should produce no calls.
+	dispatch("run-hook", []string{"my-event"}, b) //nolint:errcheck
+	if len(b.newSessionCalls) != 0 {
+		t.Errorf("expected no NewSession calls after unset, got: %v", b.newSessionCalls)
+	}
+}
+
+// TestSetHook_RunImmediately verifies that set-hook -R fires the hook right
+// after registering it.
+func TestSetHook_RunImmediately(t *testing.T) {
+	b := newBackend()
+	res := dispatch("set-hook", []string{"-R", "my-event", "new-session -s hooktest"}, b)
+	if res.Err != nil {
+		t.Fatalf("set-hook -R returned error: %v", res.Err)
+	}
+	// Hook should have fired immediately upon registration.
+	if len(b.newSessionCalls) != 1 || b.newSessionCalls[0] != "hooktest" {
+		t.Errorf("expected NewSession called with 'hooktest' immediately, got: %v", b.newSessionCalls)
+	}
+}
+
+// TestRunHook_NoHooksRegistered verifies that run-hook for an event with no
+// hooks registered does not panic and returns OK.
+func TestRunHook_NoHooksRegistered(t *testing.T) {
+	b := newBackend()
+	res := dispatch("run-hook", []string{"nonexistent-event"}, b)
+	if res.Err != nil {
+		t.Fatalf("run-hook for unknown event returned error: %v", res.Err)
 	}
 }

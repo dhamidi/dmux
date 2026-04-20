@@ -147,7 +147,8 @@ func Run(cfg Config) error {
 		s.state = session.NewServer()
 	}
 	s.store = newServerStore(s.state)
-	s.mutator = newServerMutator(s.state, s.triggerDone,
+	s.queue = command.NewQueue()
+	s.mutator = newServerMutator(s.state, s.store, s.queue, s.triggerDone,
 		func(id session.ClientID) (*clientConn, bool) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
@@ -170,8 +171,8 @@ func Run(cfg Config) error {
 			cfg.Mouse = &pane.FakeMouseEncoder{}
 			return pane.New(cfg)
 		},
+		func(paneID int) { s.startPaneWatcher(paneID) },
 	)
-	s.queue = command.NewQueue()
 
 	loadDefaultOptions(s)
 
@@ -335,6 +336,7 @@ func (s *srv) serveConn(nc net.Conn) {
 		close(cc.dirty)
 		s.mu.Unlock()
 		s.log.Printf("client %s detached", client.ID)
+		s.mutator.RunHook("client-detached")
 	}()
 
 	// Step 4: start per-client render goroutine, then enter message loop.
@@ -621,6 +623,53 @@ func (s *srv) autoRenameWindows() {
 			}
 		}
 	}
+}
+
+// startPaneWatcher starts a goroutine that fires the pane-died hook when the
+// pane's child process exits (ShellPID transitions from non-zero to zero).
+// If remain-on-exit is set on the window, the hook is not fired and the pane
+// is not killed automatically.
+func (s *srv) startPaneWatcher(paneID int) {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		wasAlive := false
+		for {
+			select {
+			case <-s.done:
+				return
+			case <-ticker.C:
+			}
+			s.mu.Lock()
+			var p session.Pane
+			var remainOnExit bool
+			for _, sess := range s.state.Sessions {
+				for _, wl := range sess.Windows {
+					win := wl.Window
+					if pane, ok := win.Panes[session.PaneID(paneID)]; ok {
+						p = pane
+						remainOnExit, _ = win.Options.GetBool("remain-on-exit")
+					}
+				}
+			}
+			s.mu.Unlock()
+			if p == nil {
+				// Pane was removed from state; stop watching.
+				return
+			}
+			pid := p.ShellPID()
+			if pid > 0 {
+				wasAlive = true
+			} else if wasAlive && !remainOnExit {
+				// Process was alive before and is now dead.
+				s.mutator.RunHook("pane-died")
+				_ = s.mutator.KillPane(paneID)
+				return
+			}
+		}
+	}()
 }
 
 // renderPaneAdapter adapts a session.Pane to the render.Pane interface,

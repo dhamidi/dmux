@@ -11,10 +11,10 @@ func TestLoadDefaultOptions(t *testing.T) {
 	s := &srv{state: state}
 	loadDefaultOptions(s)
 
-	mut := newServerMutator(state, func() {},
+	mut := newServerMutator(state, nil, nil, func() {},
 		func(session.ClientID) (*clientConn, bool) { return nil, false },
 		func(*clientConn) {},
-		nil,
+		nil, nil,
 	)
 
 	entries := mut.ListOptions("server")

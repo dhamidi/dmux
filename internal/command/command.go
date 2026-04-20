@@ -240,6 +240,13 @@ type Mutator interface {
 	DisplayPanes(clientID string) error
 	CommandPrompt(clientID, prompt, initialValue string) error
 	ConfirmBefore(clientID, prompt, command string) error
+
+	// Hook mutations.
+	// SetHook registers a command to run when event fires.
+	// Pass cmd="" to unregister all hooks for event.
+	SetHook(event, cmd string) error
+	// RunHook fires all registered hooks for event synchronously.
+	RunHook(event string)
 }
 
 // ─── Argument types ───────────────────────────────────────────────────────────

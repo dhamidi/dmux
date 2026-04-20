@@ -10,10 +10,10 @@ import (
 func TestLoadDefaultBindings(t *testing.T) {
 	state := session.NewServer()
 	state.KeyTables = keys.NewRegistry()
-	mut := newServerMutator(state, func() {},
+	mut := newServerMutator(state, nil, nil, func() {},
 		func(session.ClientID) (*clientConn, bool) { return nil, false },
 		func(*clientConn) {},
-		nil,
+		nil, nil,
 	)
 
 	if err := loadDefaultBindings(mut); err != nil {

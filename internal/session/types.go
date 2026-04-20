@@ -143,22 +143,46 @@ func (bs *BufferStack) Delete(i int) {
 	bs.buffers = append(bs.buffers[:i], bs.buffers[i+1:]...)
 }
 
-// HookTable stores named lists of callbacks to invoke on lifecycle events.
+// HookEntry pairs a raw command string with a compiled callback.
+type HookEntry struct {
+	Cmd string  // raw command string, e.g. "display-message 'new session'"
+	fn  func()  // compiled callback, set by server at registration time
+}
+
+// HookTable stores named lists of hook entries to invoke on lifecycle events.
 type HookTable struct {
-	hooks map[string][]func()
+	hooks map[string][]HookEntry
 }
 
-// Register appends fn to the list of callbacks for name.
-func (ht *HookTable) Register(name string, fn func()) {
+// Register stores a named command string for a hook event.
+func (ht *HookTable) Register(name, cmd string, fn func()) {
 	if ht.hooks == nil {
-		ht.hooks = make(map[string][]func())
+		ht.hooks = make(map[string][]HookEntry)
 	}
-	ht.hooks[name] = append(ht.hooks[name], fn)
+	ht.hooks[name] = append(ht.hooks[name], HookEntry{Cmd: cmd, fn: fn})
 }
 
-// Run invokes all callbacks registered under name in registration order.
+// Run invokes all callbacks for name in registration order.
 func (ht *HookTable) Run(name string) {
-	for _, fn := range ht.hooks[name] {
-		fn()
+	for _, e := range ht.hooks[name] {
+		if e.fn != nil {
+			e.fn()
+		}
 	}
+}
+
+// List returns all (event, cmd) pairs stored in the table.
+func (ht *HookTable) List() []struct{ Event, Cmd string } {
+	var out []struct{ Event, Cmd string }
+	for event, entries := range ht.hooks {
+		for _, e := range entries {
+			out = append(out, struct{ Event, Cmd string }{event, e.Cmd})
+		}
+	}
+	return out
+}
+
+// Delete removes all hooks registered for name.
+func (ht *HookTable) Delete(name string) {
+	delete(ht.hooks, name)
 }

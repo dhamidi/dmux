@@ -451,8 +451,8 @@ func TestBufferStack_PushCopiesData(t *testing.T) {
 func TestHookTable_RegisterRun(t *testing.T) {
 	var ht session.HookTable
 	count := 0
-	ht.Register("session-created", func() { count++ })
-	ht.Register("session-created", func() { count += 10 })
+	ht.Register("session-created", "cmd1", func() { count++ })
+	ht.Register("session-created", "cmd2", func() { count += 10 })
 
 	ht.Run("session-created")
 	if count != 11 {

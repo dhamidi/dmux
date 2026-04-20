@@ -12,6 +12,7 @@ import (
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/options"
+	"github.com/dhamidi/dmux/internal/parse"
 	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/session"
@@ -24,6 +25,8 @@ import (
 // wired to srv.Buffers.
 type serverMutator struct {
 	state         *session.Server
+	store         command.Server
+	queue         *command.Queue
 	nextSessionID uint64
 	nextWindowID  uint64
 	shutdown      func()
@@ -32,6 +35,9 @@ type serverMutator struct {
 	// newPane creates a new pane from the given configuration.
 	// Injected from Run (real PTY) or tests (fake).
 	newPane func(cfg pane.Config) (session.Pane, error)
+	// watchPane, if non-nil, is called after each new pane is created.
+	// It starts a goroutine that fires pane-died when the process exits.
+	watchPane func(paneID int)
 }
 
 // newServerMutator returns a command.Mutator backed by state.
@@ -41,17 +47,23 @@ type serverMutator struct {
 // newPaneFn is the factory used to create new panes; pass a fake in tests.
 func newServerMutator(
 	state *session.Server,
+	store command.Server,
+	queue *command.Queue,
 	shutdown func(),
 	getConn func(session.ClientID) (*clientConn, bool),
 	markDirty func(*clientConn),
 	newPaneFn func(cfg pane.Config) (session.Pane, error),
+	watchPaneFn func(paneID int),
 ) command.Mutator {
 	return &serverMutator{
 		state:     state,
+		store:     store,
+		queue:     queue,
 		shutdown:  shutdown,
 		getConn:   getConn,
 		markDirty: markDirty,
 		newPane:   newPaneFn,
+		watchPane: watchPaneFn,
 	}
 }
 
@@ -67,12 +79,14 @@ func (m *serverMutator) NewSession(name string) (command.SessionView, error) {
 	}
 	sess := session.NewSession(id, name, m.state.Options)
 	m.state.AddSession(sess)
-	return command.SessionView{
+	v := command.SessionView{
 		ID:      string(id),
 		Name:    name,
 		Windows: []command.WindowView{},
 		Current: -1,
-	}, nil
+	}
+	m.RunHook("after-new-session")
+	return v, nil
 }
 
 func (m *serverMutator) KillSession(id string) error {
@@ -88,6 +102,7 @@ func (m *serverMutator) KillSession(id string) error {
 		}
 	}
 	m.state.RemoveSession(session.SessionID(id))
+	m.RunHook("after-kill-session")
 	return nil
 }
 
@@ -105,7 +120,11 @@ func (m *serverMutator) AttachClient(clientID, sessionID string) error {
 	if !ok {
 		return fmt.Errorf("attach-client: client %q not found", clientID)
 	}
-	return m.state.AttachClient(c, session.SessionID(sessionID))
+	if err := m.state.AttachClient(c, session.SessionID(sessionID)); err != nil {
+		return err
+	}
+	m.RunHook("client-attached")
+	return nil
 }
 
 func (m *serverMutator) DetachClient(clientID string) error {
@@ -167,6 +186,10 @@ func (m *serverMutator) NewWindow(sessionID, name string) (command.WindowView, e
 	win.Layout = layout.New(cols, rows, paneID)
 
 	wl := sess.AddWindow(win)
+	if m.watchPane != nil {
+		m.watchPane(int(paneID))
+	}
+	m.RunHook("after-new-window")
 	return toWindowView(wl), nil
 }
 
@@ -185,6 +208,7 @@ func (m *serverMutator) KillWindow(sessionID, windowID string) error {
 				}
 			}
 			sess.RemoveWindow(i)
+			m.RunHook("after-kill-window")
 			return nil
 		}
 	}
@@ -213,6 +237,7 @@ func (m *serverMutator) SelectWindow(sessionID, windowID string) error {
 	for _, wl := range sess.Windows {
 		if wl.Window.ID == session.WindowID(windowID) {
 			sess.Current = wl
+			m.RunHook("after-select-window")
 			return nil
 		}
 	}
@@ -245,6 +270,10 @@ func (m *serverMutator) SplitWindow(sessionID, windowID string) (command.PaneVie
 	}
 
 	win.AddPane(newPaneID, p)
+	if m.watchPane != nil {
+		m.watchPane(int(newPaneID))
+	}
+	m.RunHook("after-split-window")
 	return command.PaneView{
 		ID:    int(newPaneID),
 		Title: p.Title(),
@@ -269,6 +298,7 @@ func (m *serverMutator) KillPane(paneID int) error {
 			if len(win.Panes) == 0 {
 				return m.KillWindow(string(sess.ID), string(win.ID))
 			}
+			m.RunHook("after-kill-pane")
 			return nil
 		}
 	}
@@ -677,4 +707,39 @@ func (m *serverMutator) CommandPrompt(clientID, prompt, initialValue string) err
 
 func (m *serverMutator) ConfirmBefore(clientID, prompt, cmd string) error {
 	return errStub("confirm-before")
+}
+
+// ─── Hook mutations ───────────────────────────────────────────────────────────
+
+// SetHook registers a compiled command callback for event.
+// Passing cmd="" removes all hooks for event.
+func (m *serverMutator) SetHook(event, cmd string) error {
+	if cmd == "" {
+		m.state.Hooks.Delete(event)
+		return nil
+	}
+	cmds, err := parse.Parse(cmd)
+	if err != nil {
+		return fmt.Errorf("set-hook: parse %q: %w", cmd, err)
+	}
+	if len(cmds) == 0 {
+		return fmt.Errorf("set-hook: empty command %q", cmd)
+	}
+	c := cmds[0]
+	store := m.store
+	queue := m.queue
+	mut := command.Mutator(m)
+	var nilClientView command.ClientView
+	fn := func() {
+		command.Dispatch(c.Name, c.Args, store, nilClientView, queue, mut)
+	}
+	// Replace existing hooks for this event with the new one.
+	m.state.Hooks.Delete(event)
+	m.state.Hooks.Register(event, cmd, fn)
+	return nil
+}
+
+// RunHook fires all registered hooks for event synchronously.
+func (m *serverMutator) RunHook(event string) {
+	m.state.Hooks.Run(event)
 }
