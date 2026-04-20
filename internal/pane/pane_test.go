@@ -171,6 +171,43 @@ func TestPane_Snapshot_DelegatesToTerminal(t *testing.T) {
 	}
 }
 
+func TestPane_Snapshot_PreservesColorFields(t *testing.T) {
+	p, _, ft, _, _ := newTestPane(t, 1)
+	grid := pane.CellGrid{
+		Rows:  1,
+		Cols:  1,
+		Cells: make([]pane.Cell, 1),
+	}
+	grid.Cells[0] = pane.Cell{
+		Char:  'Z',
+		Fg:    pane.ColorRGB,
+		Bg:    pane.ColorIndexed | 3,
+		Attrs: 1, // AttrBold
+		FgR:   0xff,
+		FgG:   0x80,
+		FgB:   0x00,
+	}
+	ft.SetGrid(grid)
+
+	got := p.Snapshot()
+	c := got.Cells[0]
+	if c.Char != 'Z' {
+		t.Errorf("Char = %q, want 'Z'", c.Char)
+	}
+	if c.Fg != pane.ColorRGB {
+		t.Errorf("Fg = %v, want ColorRGB", c.Fg)
+	}
+	if c.Bg != pane.ColorIndexed|3 {
+		t.Errorf("Bg = %v, want ColorIndexed|3", c.Bg)
+	}
+	if c.Attrs != 1 {
+		t.Errorf("Attrs = %d, want 1", c.Attrs)
+	}
+	if c.FgR != 0xff || c.FgG != 0x80 || c.FgB != 0x00 {
+		t.Errorf("FgRGB = (%02x,%02x,%02x), want (ff,80,00)", c.FgR, c.FgG, c.FgB)
+	}
+}
+
 func TestPane_Close_ReleasesEncoders(t *testing.T) {
 	fp := &pty.FakePTY{}
 	fk := &pane.FakeKeyEncoder{}

@@ -744,7 +744,18 @@ func (a *renderPaneAdapter) Snapshot() render.CellGrid {
 	snap := a.p.Snapshot()
 	cells := make([]render.Cell, len(snap.Cells))
 	for i, c := range snap.Cells {
-		cells[i] = render.Cell{Char: c.Char}
+		cells[i] = render.Cell{
+			Char:  c.Char,
+			Fg:    c.Fg,
+			Bg:    c.Bg,
+			Attrs: c.Attrs,
+			FgR:   c.FgR,
+			FgG:   c.FgG,
+			FgB:   c.FgB,
+			BgR:   c.BgR,
+			BgG:   c.BgG,
+			BgB:   c.BgB,
+		}
 	}
 	return render.CellGrid{Rows: snap.Rows, Cols: snap.Cols, Cells: cells}
 }

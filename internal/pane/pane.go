@@ -11,6 +11,7 @@ import (
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/pty"
+	"github.com/dhamidi/dmux/internal/render"
 )
 
 // PaneID is an opaque identifier for a pane, aliasing [layout.LeafID].
@@ -18,9 +19,28 @@ import (
 // [session.Window.Panes].
 type PaneID = layout.LeafID
 
+// Color is an alias for [render.Color], representing an 8-bit terminal color
+// index or one of the sentinel values [render.ColorDefault] and [render.ColorRGB].
+type Color = render.Color
+
+// Re-export the sentinel Color constants so callers of this package need not
+// import render directly.
+const (
+	ColorDefault = render.ColorDefault
+	ColorIndexed = render.ColorIndexed
+	ColorRGB     = render.ColorRGB
+)
+
 // Cell is a single terminal display cell.
 type Cell struct {
-	Char rune // displayed character; 0 means empty (treated as space)
+	Char  rune  // displayed character; 0 means empty (treated as space)
+	Fg    Color // foreground color; ColorDefault means inherit
+	Bg    Color // background color; ColorDefault means inherit
+	Attrs uint16 // bitmask of SGR attribute flags (see render.Attr* constants)
+	// FgR, FgG, FgB are meaningful only when Fg == ColorRGB.
+	FgR, FgG, FgB uint8
+	// BgR, BgG, BgB are meaningful only when Bg == ColorRGB.
+	BgR, BgG, BgB uint8
 }
 
 // CellGrid is an immutable snapshot of the visible terminal area.
