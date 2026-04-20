@@ -1,48 +1,99 @@
 // Package render composes panes, borders, status lines, and client
 // overlays into a single cell grid ready for term.Flush.
 //
-// # Boundary
+// # Exported interfaces
 //
-// Compose(in Input) Frame, where Input is:
+// [Renderer] is the primary interface callers depend on:
 //
-//	type Input struct {
-//	    Size       Size              // client's terminal size
-//	    Layout     *layout.Tree      // active window's layout
-//	    Panes      Snapshotter       // pane snapshots by LeafID
-//	    Status     []status.Segment  // rendered status line(s)
-//	    Overlays   []ClientOverlay   // popups, menus, display-panes, etc.
-//	    Theme      Theme             // border colors, inactive dimming
+//	type Renderer interface {
+//	    Compose(panes []PanePlacement, overlays []Overlay) CellGrid
 //	}
 //
-// Snapshotter is an interface with Snapshot(LeafID, *RenderState) — so
-// tests can use fake panes, and render doesn't import pane. The Frame
-// is a grid of cells plus the desired cursor state.
+// Callers (server, client) hold a Renderer and never import the
+// concrete renderer type. New(cfg Config) returns a Renderer.
 //
-// # Layers
+// # Accepted interfaces
 //
-// Composed bottom-up:
+// All dependencies are accepted as narrow interfaces so that callers
+// can test composition logic with fakes and real terminal machinery is
+// never required.
 //
-//  1. Window background
-//  2. Each pane rectangle from layout.Rect(), populated from its
-//     render state
-//  3. Pane borders, with the active pane highlighted
-//  4. Status line(s) at configured position
-//  5. ClientOverlays (popups, menus, display-panes numerals), in order
+// [Pane] — the render package's view of a terminal pane:
+//
+//	type Pane interface {
+//	    Bounds() Rect          // screen rectangle this pane occupies
+//	    Snapshot() CellGrid    // immutable snapshot of visible cells
+//	}
+//
+// The concrete pane.Pane satisfies this interface via a thin adapter
+// that converts pane.CellGrid to render.CellGrid.
+//
+// [StatusLine] — the render package's view of a status renderer:
+//
+//	type StatusLine interface {
+//	    Render(width int) []Cell   // one row of exactly width cells
+//	}
+//
+// [Overlay] — the drawing portion of modes.ClientOverlay:
+//
+//	type Overlay interface {
+//	    Rect() Rect                        // bounding rectangle
+//	    Render(dst []Cell)                 // fill dst (len=Width*Height)
+//	}
+//
+// Non-drawing overlay methods (Key, Mouse, CaptureFocus, Close) are
+// intentionally omitted; the server loop handles event routing.
+//
+// # Configuration
+//
+// [Config] holds all constructor inputs:
+//
+//	type Config struct {
+//	    Rows, Cols  int         // output grid dimensions
+//	    Status      StatusLine  // nil disables the status line
+//	    StatusRows  int         // rows reserved for status (typically 0–1)
+//	    Theme       Theme       // border character and colours
+//	}
+//
+// # Composition order
+//
+// Layers are applied bottom-up:
+//
+//  1. Background fill (all cells set to ' ')
+//  2. Pane snapshots in PanePlacement order; later placements overwrite earlier.
+//     Cells outside the pane's Rect are not touched.
+//     Zero-rune cells in a snapshot are normalised to ' '.
+//     Pane output is restricted to rows [0, Rows−StatusRows).
+//  3. Status line cells written into the reserved bottom rows.
+//  4. Overlays applied in order; each overlay's Rect determines its region.
 //
 // # Dirty tracking
 //
-// Compose uses per-row dirty flags from libghostty render states and
-// layout changes to avoid re-composing unchanged regions. term.Flush
-// then does its own diff to the real terminal.
+// Per-row dirty tracking is a caller responsibility: callers may skip
+// passing panes whose rows have not changed. render.Compose always
+// writes all pane and overlay cells it receives and does not maintain
+// internal dirty state.
+//
+// # Data types
+//
+// [Cell] and [CellGrid] are defined in this package; callers that bridge
+// from pane.CellGrid must convert element-by-element (both are
+// struct{Char rune} / row-major grids of the same shape).
+//
+// [Rect] is a type alias for layout.Rect so callers need not import
+// layout directly:
+//
+//	type Rect = layout.Rect  // {X, Y, Width, Height int}
 //
 // # In isolation
 //
-// Testable with a mock Snapshotter that returns canned cell grids.
-// Golden-file tests assert the composed frame for fixed inputs.
+// Tests use fake implementations of Pane, StatusLine, and Overlay
+// that return canned CellGrid data. No real PTY, terminal emulator,
+// or status renderer is required to test composition logic.
 //
 // # Non-goals
 //
-// Not a terminal driver. The Frame is data — actually writing to the
-// tty is term.Flush(Frame). Not a status renderer — status produces
-// its own cells; render just places them.
+// Not a terminal driver. The returned CellGrid is data — writing it
+// to the tty is the job of term.Flush. Not a status renderer — the
+// status package produces []Cell; render just places them.
 package render
