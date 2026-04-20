@@ -34,6 +34,9 @@ type serverMutator struct {
 	shutdown      func()
 	getConn       func(session.ClientID) (*clientConn, bool)
 	markDirty     func(*clientConn)
+	// clearPrevFrame, if non-nil, is called to invalidate the cached previous
+	// frame for a client so the next render performs a full repaint.
+	clearPrevFrame func(session.ClientID)
 	// newPane creates a new pane from the given configuration.
 	// Injected from Run (real PTY) or tests (fake).
 	newPane func(cfg pane.Config) (session.Pane, error)
@@ -45,11 +48,13 @@ type serverMutator struct {
 	events *control.EventBus
 }
 
-// newServerMutator returns a command.Mutator backed by state.
+// newServerMutator returns a *serverMutator backed by state.
 // shutdown is called by KillServer to trigger a graceful shutdown.
 // getConn and markDirty provide access to the live connection map for
 // operations that need to write directly to a client's network connection.
 // newPaneFn is the factory used to create new panes; pass a fake in tests.
+// The clearPrevFrame field may be set on the returned value to enable
+// frame-cache invalidation on explicit full-refresh requests.
 func newServerMutator(
 	state *session.Server,
 	store command.Server,
@@ -60,7 +65,7 @@ func newServerMutator(
 	newPaneFn func(cfg pane.Config) (session.Pane, error),
 	watchPaneFn func(paneID int),
 	eventBus ...*control.EventBus,
-) command.Mutator {
+) *serverMutator {
 	m := &serverMutator{
 		state:     state,
 		store:     store,
@@ -1114,10 +1119,15 @@ func (m *serverMutator) ListHooks() []command.OptionEntry {
 
 // RefreshClient triggers a full redraw for the named client. In this
 // implementation the client is marked dirty so the render loop repaints it.
+// The cached previous frame is invalidated so the next render sends a full
+// repaint rather than an incremental diff.
 func (m *serverMutator) RefreshClient(clientID string) error {
 	c, ok := m.state.Clients[session.ClientID(clientID)]
 	if !ok {
 		return fmt.Errorf("refresh-client: client %q not found", clientID)
+	}
+	if m.clearPrevFrame != nil {
+		m.clearPrevFrame(c.ID)
 	}
 	if conn, ok := m.getConn(c.ID); ok {
 		m.markDirty(conn)

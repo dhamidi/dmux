@@ -157,7 +157,7 @@ func Run(cfg Config) error {
 	}
 	s.store = newServerStore(s.state)
 	s.queue = command.NewQueue()
-	s.mutator = newServerMutator(s.state, s.store, s.queue, s.triggerDone,
+	sm := newServerMutator(s.state, s.store, s.queue, s.triggerDone,
 		func(id session.ClientID) (*clientConn, bool) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
@@ -183,6 +183,12 @@ func Run(cfg Config) error {
 		func(paneID int) { s.startPaneWatcher(paneID) },
 		s.events,
 	)
+	sm.clearPrevFrame = func(id session.ClientID) {
+		s.mu.Lock()
+		delete(s.prevFrames, id)
+		s.mu.Unlock()
+	}
+	s.mutator = sm
 
 	loadDefaultOptions(s)
 
@@ -844,7 +850,21 @@ func (s *srv) renderLoop(cc *clientConn) {
 			},
 		})
 		grid := r.Compose(placements, nil)
-		ansiBytes := render.EncodeANSI(grid)
+
+		// Look up the previous frame for this client and store the current one.
+		s.mu.Lock()
+		prevGrid, hasPrev := s.prevFrames[cc.id]
+		s.prevFrames[cc.id] = grid
+		s.mu.Unlock()
+
+		// On the first render, or when the terminal was resized, fall back to a
+		// full repaint. Otherwise emit only the cells that changed.
+		var ansiBytes []byte
+		if hasPrev && prevGrid.Rows == grid.Rows && prevGrid.Cols == grid.Cols {
+			ansiBytes = render.EncodeDiffANSI(prevGrid, grid)
+		} else {
+			ansiBytes = render.EncodeANSI(grid)
+		}
 
 		msg := proto.StdoutMsg{Data: ansiBytes}
 		_ = proto.WriteMsg(cc.netConn, proto.MsgStdout, msg.Encode())
