@@ -216,7 +216,7 @@ type Mutator interface {
 	SelectPane(sessionID, windowID string, paneID int) error
 	ResizePane(paneID int, direction string, amount int) error
 	CapturePane(paneID int, history bool) (string, error)
-	RespawnPane(paneID int, shell string) error
+	RespawnPane(paneID int, shell string, kill bool, keepHistory bool) error
 
 	// Key binding mutations.
 	BindKey(table, key, cmd string) error

@@ -439,8 +439,32 @@ func (m *serverMutator) CapturePane(paneID int, history bool) (string, error) {
 	return string(content), nil
 }
 
-func (m *serverMutator) RespawnPane(paneID int, shell string) error {
-	return errStub("respawn-pane")
+func (m *serverMutator) RespawnPane(paneID int, shell string, kill bool, keepHistory bool) error {
+	sess, _, p, err := m.findPane(paneID)
+	if err != nil {
+		return err
+	}
+
+	// Check whether the pane's process is still alive.
+	pid := p.ShellPID()
+	if pid > 0 {
+		proc, findErr := os.FindProcess(pid)
+		alive := findErr == nil && proc.Signal(syscall.Signal(0)) == nil
+		if alive && !kill {
+			return fmt.Errorf("pane still active")
+		}
+	}
+
+	if !keepHistory {
+		p.ClearHistory()
+	}
+
+	if err := p.Respawn(shell); err != nil {
+		return fmt.Errorf("respawn-pane: %w", err)
+	}
+
+	m.markSessionDirty(sess)
+	return nil
 }
 
 func (m *serverMutator) BindKey(table, keyStr, cmd string) error {

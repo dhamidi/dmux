@@ -26,8 +26,9 @@ func runRespawnPane(ctx *command.Ctx) command.Result {
 	}
 
 	shell := ctx.Args.Option("e")
+	kill := ctx.Args.Flag("k")
 
-	if err := ctx.Mutator.RespawnPane(ctx.Target.Pane.ID, shell); err != nil {
+	if err := ctx.Mutator.RespawnPane(ctx.Target.Pane.ID, shell, kill, false); err != nil {
 		return command.Errorf("respawn-pane: %v", err)
 	}
 	return command.OK()

@@ -68,8 +68,10 @@ type testBackend struct {
 	}
 	captureOutput string
 	respawnedPanes []struct {
-		paneID int
-		shell  string
+		paneID      int
+		shell       string
+		kill        bool
+		keepHistory bool
 	}
 
 	// Window/pane movement recording.
@@ -430,11 +432,13 @@ func (b *testBackend) CapturePane(paneID int, history bool) (string, error) {
 	return b.captureOutput, nil
 }
 
-func (b *testBackend) RespawnPane(paneID int, shell string) error {
+func (b *testBackend) RespawnPane(paneID int, shell string, kill bool, keepHistory bool) error {
 	b.respawnedPanes = append(b.respawnedPanes, struct {
-		paneID int
-		shell  string
-	}{paneID, shell})
+		paneID      int
+		shell       string
+		kill        bool
+		keepHistory bool
+	}{paneID, shell, kill, keepHistory})
 	return nil
 }
 
@@ -1014,6 +1018,23 @@ func TestRespawnPane_ForwardsPaneIDAndShell(t *testing.T) {
 	}
 	if got.shell != "/bin/bash" {
 		t.Errorf("RespawnPane shell = %q, want %q", got.shell, "/bin/bash")
+	}
+	if got.kill {
+		t.Errorf("RespawnPane kill = true, want false (no -k flag)")
+	}
+}
+
+func TestRespawnPane_ForwardsKillFlag(t *testing.T) {
+	b := newBackend()
+	res := dispatch("respawn-pane", []string{"-k", "-e", "/bin/bash"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if len(b.respawnedPanes) != 1 {
+		t.Fatalf("expected 1 respawn call, got %d", len(b.respawnedPanes))
+	}
+	if !b.respawnedPanes[0].kill {
+		t.Errorf("RespawnPane kill = false, want true (with -k flag)")
 	}
 }
 
