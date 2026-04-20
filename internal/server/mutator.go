@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/dhamidi/dmux/internal/command"
@@ -13,6 +14,7 @@ import (
 	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/session"
+	"github.com/dhamidi/dmux/internal/shell"
 )
 
 // serverMutator wraps *session.Server and implements command.Mutator.
@@ -443,12 +445,50 @@ func (m *serverMutator) DisplayMessage(clientID, msg string) error {
 	return nil
 }
 
-func (m *serverMutator) SendKeys(paneID int, keys []string) error {
-	return errStub("send-keys")
+// findPane scans all sessions and windows for the pane with the given ID.
+func (m *serverMutator) findPane(paneID int) (sess *session.Session, win *session.Window, p session.Pane, err error) {
+	targetID := session.PaneID(paneID)
+	for _, s := range m.state.Sessions {
+		for _, wl := range s.Windows {
+			w := wl.Window
+			if pane, ok := w.Panes[targetID]; ok {
+				return s, w, pane, nil
+			}
+		}
+	}
+	return nil, nil, nil, fmt.Errorf("pane %d not found", paneID)
+}
+
+func (m *serverMutator) SendKeys(paneID int, keyStrs []string) error {
+	_, _, p, err := m.findPane(paneID)
+	if err != nil {
+		return fmt.Errorf("send-keys: %w", err)
+	}
+	for _, keyStr := range keyStrs {
+		k, err := keys.Parse(keyStr)
+		if err != nil {
+			return fmt.Errorf("send-keys: %w", err)
+		}
+		if err := p.SendKey(k); err != nil {
+			return fmt.Errorf("send-keys: %w", err)
+		}
+	}
+	return nil
 }
 
 func (m *serverMutator) RunShell(cmd string, background bool) (string, error) {
-	return "", errStub("run-shell")
+	shellPath := shell.Default(os.LookupEnv, func(path string) bool {
+		_, err := os.Stat(path)
+		return err == nil
+	})
+	if background {
+		if err := exec.Command(shellPath, "-c", cmd).Start(); err != nil {
+			return "", fmt.Errorf("run-shell: %w", err)
+		}
+		return "", nil
+	}
+	out, err := exec.Command(shellPath, "-c", cmd).CombinedOutput()
+	return string(out), err
 }
 
 // ─── Buffer mutations ────────────────────────────────────────────────────────
@@ -486,11 +526,18 @@ func (m *serverMutator) SaveBuffer(name, path string) error {
 }
 
 func (m *serverMutator) PasteBuffer(name string, paneID int) error {
-	if _, ok := m.state.Buffers.GetNamed(name); !ok {
+	buf, ok := m.state.Buffers.GetNamed(name)
+	if !ok {
 		return fmt.Errorf("paste-buffer: buffer %q not found", name)
 	}
-	// Key injection into a live pane is not yet wired.
-	return errStub("paste-buffer (key injection)")
+	_, _, p, err := m.findPane(paneID)
+	if err != nil {
+		return fmt.Errorf("paste-buffer: %w", err)
+	}
+	if err := p.Write(buf.Data); err != nil {
+		return fmt.Errorf("paste-buffer: %w", err)
+	}
+	return nil
 }
 
 func (m *serverMutator) ListBuffers() []command.BufferEntry {
