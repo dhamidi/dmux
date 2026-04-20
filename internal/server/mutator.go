@@ -428,7 +428,15 @@ func (m *serverMutator) markSessionDirty(sess *session.Session) {
 }
 
 func (m *serverMutator) CapturePane(paneID int, history bool) (string, error) {
-	return "", errStub("capture-pane")
+	_, _, p, err := m.findPane(paneID)
+	if err != nil {
+		return "", err
+	}
+	content, err := p.CaptureContent(history)
+	if err != nil {
+		return "", err
+	}
+	return string(content), nil
 }
 
 func (m *serverMutator) RespawnPane(paneID int, shell string) error {
