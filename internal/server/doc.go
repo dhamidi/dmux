@@ -8,21 +8,52 @@
 //
 //	Run(cfg Config) error
 //
-// Config carries the socket path, initial .dmux.conf path, and
-// platform hooks (daemonize on Unix, Windows service integration if
-// ever added). Run blocks until the server exits.
+// Run blocks until a shutdown signal is delivered on cfg.Signals or a
+// connected client sends MsgShutdown. It returns nil on clean shutdown.
+//
+// # Config struct
+//
+// Config expresses every I/O dependency explicitly. Run never calls
+// os.Stderr, os.Getenv, time.Now, or signal.Notify directly.
+//
+//	type Config struct {
+//	    // Listener accepts incoming client connections.
+//	    // The caller opens the socket before constructing Config.
+//	    // Tests may use a net.Pipe-backed listener.
+//	    Listener net.Listener
+//
+//	    // Log is the destination for server diagnostic output.
+//	    // Defaults to io.Discard if nil.
+//	    Log io.Writer
+//
+//	    // Signals receives OS signals. Any received value is treated as a
+//	    // graceful-shutdown trigger (SIGTERM, SIGHUP). Wire via
+//	    // os/signal.Notify in cmd/; send synthetic values in tests.
+//	    Signals <-chan os.Signal
+//
+//	    // Now returns the current time for timer and debounce logic.
+//	    // Defaults to time.Now if nil; inject a fixed clock in tests.
+//	    Now Clock
+//
+//	    // OnDirty, when non-nil, is called whenever a client is marked
+//	    // dirty for redraw. Tests use this hook to observe scheduling
+//	    // without a full rendering layer.
+//	    OnDirty func(id session.ClientID)
+//	}
+//
+// The Clock type alias (func() time.Time) is also exported so callers
+// can name the type when constructing test stubs.
 //
 // # What the loop owns
 //
-//   - A UNIX-domain listener and an accepted-client goroutine pool
+//   - A net.Listener and an accepted-client goroutine pool
 //   - A *session.Server (the state)
 //   - A *command.Queue (work to do)
 //   - A timer wheel for status ticks, display-panes timeouts,
 //     auto-rename polling, silence/activity alerts, job timeouts
 //   - A redraw debouncer that coalesces per-client redraw requests
-//   - Signal handling (SIGHUP/SIGTERM on Unix → graceful shutdown;
-//     SIGWINCH is ignored here — the server's own terminal isn't
-//     the interesting one, clients report their size via proto)
+//   - Signal handling (SIGHUP/SIGTERM → graceful shutdown;
+//     SIGWINCH is ignored — clients report their own size via proto)
 //
 // # Per-client goroutine
 //
@@ -45,8 +76,8 @@
 //
 // # In isolation
 //
-// Bootable against a tempdir socket, connected to from a test with a
-// raw net.Conn sending synthesized proto.Message values. Full
+// Bootable against an in-process listener, connected to from a test
+// with a raw net.Conn sending synthesized proto.Message values. Full
 // end-to-end behavior can be asserted without any real TTY — the
 // "rendered output" bytes come back on the socket and can be parsed
 // by a test.
