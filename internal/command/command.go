@@ -174,6 +174,17 @@ type MenuEntry struct {
 	Command string
 }
 
+// ChooserItem is one selectable entry in a choose-buffer or choose-client
+// interactive picker.
+type ChooserItem struct {
+	// Display is the line shown in the list.
+	Display string
+	// Preview is optional text shown in the preview pane.
+	Preview string
+	// Value is the %% substitution value used when an item is selected.
+	Value string
+}
+
 // Mutator is the write interface that command handlers use to modify server
 // state. It is a separate interface from Server so that command tests can
 // stub only the write-side methods they exercise.
@@ -278,6 +289,8 @@ type Mutator interface {
 	// Mode entry mutations.
 	EnterCopyMode(clientID string, scrollback bool) error
 	EnterChooseTree(clientID, sessionID, windowID string) error
+	EnterChooseBuffer(clientID, windowID string, items []ChooserItem, template string) error
+	EnterChooseClient(clientID, windowID string, items []ChooserItem, template string) error
 	EnterClockMode(clientID string, paneID int) error
 	DisplayPopup(clientID, command, title string, cols, rows int) error
 	DisplayMenu(clientID string, items []MenuEntry) error

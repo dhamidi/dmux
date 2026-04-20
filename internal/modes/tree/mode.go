@@ -33,6 +33,74 @@ type TreeNode struct {
 // cell-grid snapshot to display, or nil if no preview is available.
 type PreviewProvider func(id string) *pane.CellGrid
 
+// ChooserItem is a flat selectable entry used by [NewChooser] for
+// choose-buffer, choose-client, and similar flat-list pickers.
+type ChooserItem struct {
+	// Display is the line shown in the list.
+	Display string
+	// Preview is optional text content shown in the preview pane.
+	Preview string
+	// Value is the identifier passed to the onSelect callback.
+	Value string
+}
+
+// NewChooser creates a flat-list Mode from a slice of [ChooserItem] values.
+// It is the recommended constructor for choose-buffer, choose-client, and
+// any other single-level picker that does not need a tree hierarchy.
+//
+//   - items is the flat list of selectable entries.
+//   - onSelect is called with the selected item's Value when the user presses
+//     Enter; it may be nil.
+//   - noPreview suppresses the preview pane even when items carry Preview text.
+func NewChooser(items []ChooserItem, onSelect func(value string), noPreview bool) *Mode {
+	nodes := make([]TreeNode, len(items))
+	for i, item := range items {
+		nodes[i] = TreeNode{ID: item.Value, Name: item.Display}
+	}
+
+	var preview PreviewProvider
+	if !noPreview {
+		previewMap := make(map[string]string, len(items))
+		for _, item := range items {
+			if item.Preview != "" {
+				previewMap[item.Value] = item.Preview
+			}
+		}
+		if len(previewMap) > 0 {
+			preview = func(id string) *pane.CellGrid {
+				text, ok := previewMap[id]
+				if !ok || text == "" {
+					return nil
+				}
+				lines := strings.Split(text, "\n")
+				rows := len(lines)
+				cols := 0
+				for _, line := range lines {
+					if n := len([]rune(line)); n > cols {
+						cols = n
+					}
+				}
+				if cols == 0 {
+					return nil
+				}
+				grid := &pane.CellGrid{
+					Rows:  rows,
+					Cols:  cols,
+					Cells: make([]pane.Cell, rows*cols),
+				}
+				for r, line := range lines {
+					for c, ch := range []rune(line) {
+						grid.Cells[r*cols+c] = pane.Cell{Char: ch}
+					}
+				}
+				return grid
+			}
+		}
+	}
+
+	return New(nodes, onSelect, preview)
+}
+
 // flatNode is an internal flattened entry used for linear navigation.
 type flatNode struct {
 	node  TreeNode

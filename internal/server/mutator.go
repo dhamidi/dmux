@@ -997,6 +997,14 @@ func (m *serverMutator) EnterChooseTree(clientID, sessionID, windowID string) er
 	return errStub("choose-tree")
 }
 
+func (m *serverMutator) EnterChooseBuffer(clientID, windowID string, items []command.ChooserItem, template string) error {
+	return errStub("choose-buffer")
+}
+
+func (m *serverMutator) EnterChooseClient(clientID, windowID string, items []command.ChooserItem, template string) error {
+	return errStub("choose-client")
+}
+
 func (m *serverMutator) EnterClockMode(clientID string, paneID int) error {
 	return errStub("clock-mode")
 }

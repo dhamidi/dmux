@@ -11,11 +11,18 @@ VT parser, and a Go codebase instead of C.
 Skeleton. The directory layout, package boundaries, and design notes are in
 place. Implementation is progressing.
 
-`internal/command/builtin` now contains ~34 built-in commands covering session,
+`internal/command/builtin` now contains ~36 built-in commands covering session,
 window, pane, client, key-binding, option, scripting, and UI categories.
 New pane-level commands added: `move-pane` (`movep`), `pipe-pane` (`pipep`),
 `slice-pane`, `respawn-window` (`respawnw`), `clear-history` (`clearhist`),
 and `clear-pane` (`clearp`).
+Interactive picker commands `choose-buffer` (`choosebuffer`) and
+`choose-client` (`chooseclient`) open a navigable list of paste buffers or
+connected clients respectively. Both support `-N` (no preview), `-r` (reverse
+order), `-Z` (zoom pane), `-f filter`, `-K key-format`, `-O sort-field`, and
+an optional `[template]` positional argument that replaces `%%` with the
+selected item's name on confirmation (defaults: `paste-buffer -b '%%'` and
+`switch-client -t '%%'`).
 Each command handler receives a `*command.Ctx` and interacts with the server
 exclusively through its `Server` (read) and `Mutator` (write) interfaces — no
 builtin file imports any other internal package.

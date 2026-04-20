@@ -72,4 +72,21 @@
 // This keeps the mode reusable — choose-buffer, choose-client, and
 // choose-customize can be implemented in this package as alternative
 // constructors over the same tree infrastructure.
+//
+// # Flat chooser
+//
+// [ChooserItem] and [NewChooser] provide a flat-list variant of the tree mode
+// suited to choose-buffer and choose-client.  Each [ChooserItem] carries a
+// Display string shown in the list, an optional Preview text shown in the
+// right-hand pane, and a Value passed to the onSelect callback on selection:
+//
+//	items := []tree.ChooserItem{
+//	    {Display: "buf0  5 bytes", Preview: "hello", Value: "buf0"},
+//	}
+//	mode := tree.NewChooser(items, func(v string) { /* act on v */ }, false)
+//
+// [NewChooser] converts each item into a flat [TreeNode] (no children) and
+// builds a text-based [PreviewProvider] from the Preview strings.  Passing
+// noPreview=true suppresses the preview column even when items carry preview
+// text.
 package tree

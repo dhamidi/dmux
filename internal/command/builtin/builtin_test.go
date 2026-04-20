@@ -106,6 +106,16 @@ type testBackend struct {
 	// Mode entry recording.
 	copyModeCalls   []struct{ clientID string; scrollback bool }
 	chooseTreeCalls []struct{ clientID, sessionID, windowID string }
+	chooseBufferCalls []struct {
+		clientID, windowID string
+		items              []command.ChooserItem
+		template           string
+	}
+	chooseClientCalls []struct {
+		clientID, windowID string
+		items              []command.ChooserItem
+		template           string
+	}
 	clockModeCalls  []struct{ clientID string; paneID int }
 	displayPopupCalls []struct {
 		clientID, command, title string
@@ -509,6 +519,24 @@ func (b *testBackend) EnterCopyMode(clientID string, scrollback bool) error {
 
 func (b *testBackend) EnterChooseTree(clientID, sessionID, windowID string) error {
 	b.chooseTreeCalls = append(b.chooseTreeCalls, struct{ clientID, sessionID, windowID string }{clientID, sessionID, windowID})
+	return nil
+}
+
+func (b *testBackend) EnterChooseBuffer(clientID, windowID string, items []command.ChooserItem, template string) error {
+	b.chooseBufferCalls = append(b.chooseBufferCalls, struct {
+		clientID, windowID string
+		items              []command.ChooserItem
+		template           string
+	}{clientID, windowID, items, template})
+	return nil
+}
+
+func (b *testBackend) EnterChooseClient(clientID, windowID string, items []command.ChooserItem, template string) error {
+	b.chooseClientCalls = append(b.chooseClientCalls, struct {
+		clientID, windowID string
+		items              []command.ChooserItem
+		template           string
+	}{clientID, windowID, items, template})
 	return nil
 }
 
