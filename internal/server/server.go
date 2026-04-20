@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dhamidi/dmux/internal/command"
+	_ "github.com/dhamidi/dmux/internal/command/builtin"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/session"
 )
@@ -50,15 +52,18 @@ type Config struct {
 
 // srv is the running server state.
 type srv struct {
-	cfg    Config
-	state  *session.Server
-	log    *log.Logger
-	mu     sync.Mutex
-	conns  map[session.ClientID]*clientConn
-	nextID uint64
-	done   chan struct{}
-	once   sync.Once // ensures done is closed at most once
-	wg     sync.WaitGroup
+	cfg     Config
+	state   *session.Server
+	store   command.Server
+	mutator command.Mutator
+	queue   *command.Queue
+	log     *log.Logger
+	mu      sync.Mutex
+	conns   map[session.ClientID]*clientConn
+	nextID  uint64
+	done    chan struct{}
+	once    sync.Once // ensures done is closed at most once
+	wg      sync.WaitGroup
 }
 
 // clientConn is the server-side view of one connected client.
@@ -88,6 +93,9 @@ func Run(cfg Config) error {
 		conns: make(map[session.ClientID]*clientConn),
 		done:  make(chan struct{}),
 	}
+	s.store = newServerStore(s.state)
+	s.mutator = newServerMutator(s.state)
+	s.queue = command.NewQueue()
 
 	s.wg.Add(1)
 	go s.acceptLoop()
@@ -309,8 +317,27 @@ func (s *srv) clientLoop(cc *clientConn) {
 			}
 
 		case proto.MsgCommand:
-			// Commands will be dispatched through the command queue in
-			// a future iteration; currently a no-op.
+			var cm proto.CommandMsg
+			if err := cm.Decode(payload); err != nil {
+				continue
+			}
+			if len(cm.Argv) == 0 {
+				continue
+			}
+			s.mu.Lock()
+			clientView, _ := s.store.GetClient(string(cc.client.ID))
+			s.mu.Unlock()
+			result := command.Dispatch(cm.Argv[0], cm.Argv[1:], s.store, clientView, s.queue, s.mutator)
+			s.queue.Drain()
+			if result.Err != nil {
+				msg := proto.StdoutMsg{Data: []byte(result.Err.Error() + "\r\n")}
+				_ = proto.WriteMsg(cc.netConn, proto.MsgStdout, msg.Encode())
+			}
+			if result.Output != "" {
+				msg := proto.StdoutMsg{Data: []byte(result.Output)}
+				_ = proto.WriteMsg(cc.netConn, proto.MsgStdout, msg.Encode())
+			}
+			s.markDirty(cc)
 
 		case proto.MsgStdin:
 			// Key input will be decoded through keys.Decoder and dispatched

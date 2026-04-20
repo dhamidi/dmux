@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -269,6 +270,69 @@ func TestVersionMismatch(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run() did not return within timeout")
+	}
+}
+
+// TestCommandDispatch verifies that a MsgCommand from a connected client is
+// dispatched through the command system and the output is returned as MsgStdout.
+// list-commands is used because it always produces output regardless of server
+// state, exercising the full dispatch→encode→send pipeline.
+func TestCommandDispatch(t *testing.T) {
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+
+	sendHandshake(t, clientConn)
+
+	// Give the server time to enter clientLoop.
+	time.Sleep(10 * time.Millisecond)
+
+	// Send list-commands: this command lists all registered commands and always
+	// produces non-empty output, proving the dispatch and output paths work.
+	cm := proto.CommandMsg{Argv: []string{"list-commands"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write MsgCommand: %v", err)
+	}
+
+	// Expect a MsgStdout response containing the session-related command names.
+	if err := clientConn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	msgType, payload, err := proto.ReadMsg(clientConn)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if msgType != proto.MsgStdout {
+		t.Fatalf("expected MsgStdout, got %s", msgType)
+	}
+	var sm proto.StdoutMsg
+	if err := sm.Decode(payload); err != nil {
+		t.Fatalf("decode StdoutMsg: %v", err)
+	}
+	if !strings.Contains(string(sm.Data), "list-sessions") {
+		t.Fatalf("expected output to contain 'list-sessions', got: %q", sm.Data)
+	}
+	// Remove deadline before shutdown.
+	clientConn.SetDeadline(time.Time{}) //nolint:errcheck
+
+	sigs <- fakeSignal("SIGTERM")
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
 	}
 }
 
