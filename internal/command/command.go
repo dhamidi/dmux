@@ -66,6 +66,9 @@ type WindowView struct {
 	LastLayout string
 	// CurrentPreset is the name of the last preset applied to this window.
 	CurrentPreset string
+	// LinkedSessions lists the IDs of all sessions this window is linked into.
+	// It is empty for windows that have never been linked via link-window.
+	LinkedSessions []string
 }
 
 // ActivePane returns the active pane, or a zero PaneView if none.
@@ -242,6 +245,20 @@ type Mutator interface {
 	MoveWindow(sessionID, windowID string, newIndex int) error
 	SwapWindows(sessionID, aWindowID, bWindowID string) error
 	FindWindow(sessionID, pattern string) (WindowView, error)
+
+	// Window linking.
+	// LinkWindow links the window srcWindowID from srcSessionID into
+	// dstSessionID. index specifies the desired display index in the
+	// destination session (-1 means append). afterIndex inserts at index+1,
+	// beforeIndex inserts at index; both are ignored when index is -1.
+	// selectWin selects the linked window in the destination session.
+	// killExisting kills any window that currently holds index in the
+	// destination session before inserting.
+	LinkWindow(srcSessionID, srcWindowID, dstSessionID string, index int, afterIndex, beforeIndex, selectWin, killExisting bool) error
+	// UnlinkWindow removes the window windowID from sessionID's window list
+	// without killing the window itself. If kill is true and the window has
+	// no remaining linked sessions after the removal, all panes are closed.
+	UnlinkWindow(sessionID, windowID string, kill bool) error
 
 	// Pane movement.
 	SwapPane(sessionID, windowID string, paneA, paneB int) error

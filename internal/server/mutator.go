@@ -735,6 +735,125 @@ func (m *serverMutator) ListBuffers() []command.BufferEntry {
 
 // ─── Window movement ─────────────────────────────────────────────────────────
 
+func (m *serverMutator) LinkWindow(srcSessionID, srcWindowID, dstSessionID string, index int, afterIndex, beforeIndex, selectWin, killExisting bool) error {
+	srcSess, ok := m.state.Sessions[session.SessionID(srcSessionID)]
+	if !ok {
+		return fmt.Errorf("link-window: source session %q not found", srcSessionID)
+	}
+
+	var win *session.Window
+	for _, wl := range srcSess.Windows {
+		if wl.Window.ID == session.WindowID(srcWindowID) {
+			win = wl.Window
+			break
+		}
+	}
+	if win == nil {
+		return fmt.Errorf("link-window: window %q not found in session %q", srcWindowID, srcSessionID)
+	}
+
+	dstSess, ok := m.state.Sessions[session.SessionID(dstSessionID)]
+	if !ok {
+		return fmt.Errorf("link-window: destination session %q not found", dstSessionID)
+	}
+
+	// Compute the display index for the new winlink.
+	var insertIdx int
+	if index < 0 {
+		// Append after the last existing index.
+		if len(dstSess.Windows) > 0 {
+			insertIdx = dstSess.Windows[len(dstSess.Windows)-1].Index + 1
+		} else {
+			insertIdx = 1
+		}
+	} else if afterIndex {
+		insertIdx = index + 1
+	} else {
+		insertIdx = index
+	}
+
+	// Kill any existing window at insertIdx if -k was given.
+	if killExisting {
+		for i, wl := range dstSess.Windows {
+			if wl.Index == insertIdx {
+				w := wl.Window
+				for paneID, p := range w.Panes {
+					if err := p.Close(); err != nil {
+						log.Printf("link-window: closing pane %v: %v", paneID, err)
+					}
+				}
+				dstSess.RemoveWindow(i)
+				break
+			}
+		}
+	}
+
+	// If a window still occupies the target index, shift all windows at
+	// >= insertIdx up by one to make room.
+	for _, wl := range dstSess.Windows {
+		if wl.Index >= insertIdx {
+			wl.Index++
+		}
+	}
+
+	// Build and insert the new winlink in sorted order.
+	newWL := &session.Winlink{Index: insertIdx, Window: win}
+	pos := len(dstSess.Windows)
+	for i, wl := range dstSess.Windows {
+		if wl.Index > insertIdx {
+			pos = i
+			break
+		}
+	}
+	dstSess.Windows = append(dstSess.Windows[:pos], append([]*session.Winlink{newWL}, dstSess.Windows[pos:]...)...)
+
+	if dstSess.Current == nil {
+		dstSess.Current = newWL
+	} else if selectWin {
+		dstSess.Current = newWL
+	}
+
+	// Record the link in the window itself.
+	win.AddLinkedSession(session.SessionID(srcSessionID))
+	win.AddLinkedSession(session.SessionID(dstSessionID))
+
+	m.RunHook("after-link-window")
+	return nil
+}
+
+func (m *serverMutator) UnlinkWindow(sessionID, windowID string, kill bool) error {
+	sess, ok := m.state.Sessions[session.SessionID(sessionID)]
+	if !ok {
+		return fmt.Errorf("unlink-window: session %q not found", sessionID)
+	}
+
+	var win *session.Window
+	for i, wl := range sess.Windows {
+		if wl.Window.ID == session.WindowID(windowID) {
+			win = wl.Window
+			sess.RemoveWindow(i)
+			break
+		}
+	}
+	if win == nil {
+		return fmt.Errorf("unlink-window: window %q not found in session %q", windowID, sessionID)
+	}
+
+	win.RemoveLinkedSession(session.SessionID(sessionID))
+
+	if kill && len(win.LinkedSessions) == 0 {
+		for paneID, p := range win.Panes {
+			if err := p.Close(); err != nil {
+				log.Printf("unlink-window: closing pane %v: %v", paneID, err)
+			}
+		}
+		win.Panes = make(map[session.PaneID]session.Pane)
+	}
+
+	m.RunHook("after-unlink-window")
+	return nil
+}
+
 func (m *serverMutator) MoveWindow(sessionID, windowID string, newIndex int) error {
 	return errStub("move-window")
 }

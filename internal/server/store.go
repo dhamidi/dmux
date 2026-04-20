@@ -92,18 +92,23 @@ func toWindowView(wl *session.Winlink) command.WindowView {
 		cols = w.Layout.Cols()
 		rows = w.Layout.Rows()
 	}
+	linkedSessions := make([]string, len(w.LinkedSessions))
+	for i, id := range w.LinkedSessions {
+		linkedSessions[i] = string(id)
+	}
 	return command.WindowView{
-		ID:            string(w.ID),
-		Name:          w.Name,
-		Index:         wl.Index,
-		Panes:         panes,
-		Active:        int(w.Active),
-		LastPaneID:    int(w.LastPaneID),
-		ActivityFlag:  w.ActivityFlag,
-		Cols:          cols,
-		Rows:          rows,
-		LastLayout:    w.LastLayout,
-		CurrentPreset: w.CurrentPreset,
+		ID:             string(w.ID),
+		Name:           w.Name,
+		Index:          wl.Index,
+		Panes:          panes,
+		Active:         int(w.Active),
+		LastPaneID:     int(w.LastPaneID),
+		ActivityFlag:   w.ActivityFlag,
+		Cols:           cols,
+		Rows:           rows,
+		LastLayout:     w.LastLayout,
+		CurrentPreset:  w.CurrentPreset,
+		LinkedSessions: linkedSessions,
 	}
 }
 

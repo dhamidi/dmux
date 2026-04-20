@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/dhamidi/dmux/internal/format"
@@ -233,6 +234,11 @@ type Window struct {
 	// (e.g. "even-horizontal"). Used to determine the next/previous preset
 	// when cycling with select-layout -n/-p.
 	CurrentPreset string
+	// LinkedSessions records every session this window is linked into via
+	// link-window. It is empty for windows that have never been linked.
+	// When a window is linked into a second session both the originating
+	// session and the destination session appear in this slice.
+	LinkedSessions []SessionID
 }
 
 // NewWindow creates an empty Window with no panes. Call [Window.AddPane] to
@@ -264,9 +270,32 @@ func (w *Window) RemovePane(id PaneID) {
 	}
 }
 
+// AddLinkedSession records that this window also appears in sess. It is
+// idempotent: adding the same session twice has no effect.
+func (w *Window) AddLinkedSession(id SessionID) {
+	for _, s := range w.LinkedSessions {
+		if s == id {
+			return
+		}
+	}
+	w.LinkedSessions = append(w.LinkedSessions, id)
+}
+
+// RemoveLinkedSession removes sess from the linked-sessions list. It is a
+// no-op if sess is not present.
+func (w *Window) RemoveLinkedSession(id SessionID) {
+	for i, s := range w.LinkedSessions {
+		if s == id {
+			w.LinkedSessions = append(w.LinkedSessions[:i], w.LinkedSessions[i+1:]...)
+			return
+		}
+	}
+}
+
 // Lookup satisfies [format.Context].
 // Recognised keys: "window_id", "window_name", "window_panes",
-// "window_activity_flag".
+// "window_activity_flag", "window_linked", "window_linked_sessions",
+// "window_linked_sessions_list".
 func (w *Window) Lookup(key string) (string, bool) {
 	switch key {
 	case "window_id":
@@ -280,6 +309,19 @@ func (w *Window) Lookup(key string) (string, bool) {
 			return "1", true
 		}
 		return "0", true
+	case "window_linked":
+		if len(w.LinkedSessions) > 1 {
+			return "1", true
+		}
+		return "0", true
+	case "window_linked_sessions":
+		return fmt.Sprintf("%d", len(w.LinkedSessions)), true
+	case "window_linked_sessions_list":
+		ids := make([]string, len(w.LinkedSessions))
+		for i, id := range w.LinkedSessions {
+			ids[i] = string(id)
+		}
+		return strings.Join(ids, ","), true
 	}
 	return "", false
 }

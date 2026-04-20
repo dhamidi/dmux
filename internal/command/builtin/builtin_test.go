@@ -159,6 +159,17 @@ type testBackend struct {
 		visibleToo bool
 	}
 	clearedPanes []int
+
+	// Window linking recording.
+	linkedWindows []struct {
+		srcSessionID, srcWindowID, dstSessionID string
+		index                                   int
+		afterIndex, beforeIndex, selectWin, killExisting bool
+	}
+	unlinkedWindows []struct {
+		sessionID, windowID string
+		kill                bool
+	}
 }
 
 // ─── command.Server (read) implementation ────────────────────────────────────
@@ -635,6 +646,23 @@ func (b *testBackend) ClearHistory(paneID int, visibleToo bool) error {
 
 func (b *testBackend) ClearPane(paneID int) error {
 	b.clearedPanes = append(b.clearedPanes, paneID)
+	return nil
+}
+
+func (b *testBackend) LinkWindow(srcSessionID, srcWindowID, dstSessionID string, index int, afterIndex, beforeIndex, selectWin, killExisting bool) error {
+	b.linkedWindows = append(b.linkedWindows, struct {
+		srcSessionID, srcWindowID, dstSessionID string
+		index                                   int
+		afterIndex, beforeIndex, selectWin, killExisting bool
+	}{srcSessionID, srcWindowID, dstSessionID, index, afterIndex, beforeIndex, selectWin, killExisting})
+	return nil
+}
+
+func (b *testBackend) UnlinkWindow(sessionID, windowID string, kill bool) error {
+	b.unlinkedWindows = append(b.unlinkedWindows, struct {
+		sessionID, windowID string
+		kill                bool
+	}{sessionID, windowID, kill})
 	return nil
 }
 
