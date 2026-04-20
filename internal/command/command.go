@@ -308,6 +308,9 @@ type Mutator interface {
 	SetHook(event, cmd string) error
 	// RunHook fires all registered hooks for event synchronously.
 	RunHook(event string)
+	// ListHooks returns all registered hooks as OptionEntry pairs where
+	// Name is the event name and Value is the command string.
+	ListHooks() []OptionEntry
 
 	// Client display mutations.
 	// RefreshClient triggers a full redraw for the client identified by clientID.

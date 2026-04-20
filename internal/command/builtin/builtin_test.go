@@ -145,7 +145,8 @@ type testBackend struct {
 	}
 
 	// Hook state.
-	hookFns map[string]func()
+	hookFns  map[string]func()
+	hookCmds map[string]string
 
 	// Pane pipe / clear recording.
 	pipedPanes []struct {
@@ -629,14 +630,27 @@ func (b *testBackend) ResizeWindow(sessionID, windowID string, cols, rows int) e
 	return nil
 }
 
+func (b *testBackend) ListHooks() []command.OptionEntry {
+	var out []command.OptionEntry
+	for event, cmd := range b.hookCmds {
+		out = append(out, command.OptionEntry{Name: event, Value: cmd})
+	}
+	return out
+}
+
 func (b *testBackend) SetHook(event, cmd string) error {
 	if b.hookFns == nil {
 		b.hookFns = make(map[string]func())
 	}
+	if b.hookCmds == nil {
+		b.hookCmds = make(map[string]string)
+	}
 	if cmd == "" {
 		delete(b.hookFns, event)
+		delete(b.hookCmds, event)
 		return nil
 	}
+	b.hookCmds[event] = cmd
 	cmds, err := parse.Parse(cmd)
 	if err != nil || len(cmds) == 0 {
 		return fmt.Errorf("set-hook: invalid command %q: %v", cmd, err)

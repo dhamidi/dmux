@@ -1074,6 +1074,17 @@ func (m *serverMutator) RunHook(event string) {
 	m.state.Hooks.Run(event)
 }
 
+// ListHooks returns all registered hooks as OptionEntry pairs where Name is
+// the event name and Value is the command string.
+func (m *serverMutator) ListHooks() []command.OptionEntry {
+	entries := m.state.Hooks.List()
+	out := make([]command.OptionEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, command.OptionEntry{Name: e.Event, Value: e.Cmd})
+	}
+	return out
+}
+
 // ─── Client display mutations ─────────────────────────────────────────────────
 
 // RefreshClient triggers a full redraw for the named client. In this

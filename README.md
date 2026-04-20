@@ -21,6 +21,11 @@ New session/client utility commands:
 - `refresh-client` (`refresh`): force a client to redraw (`-d` detach, `-s WxH` resize, `-c pane` select pane, `-D/-U/-L/-R` scroll viewport).
 - `suspend-client` (`suspendc`): send SIGTSTP to the dmux client process, returning control to the calling shell.
 - `server-access`: manage the server-level access control list (`-a user` allow, `-d user` deny, `-n` deny all new connections, `-w` grant write access).
+
+Option alias commands (for tmux config compatibility):
+- `set-window-option` (`setw`): equivalent to `set-option -w`; sets a window-scoped option. Supports `-a` (append), `-F` (format expand), `-o` (only if unset), `-q` (suppress errors), `-u` (unset), `-t target-window`.
+- `show-window-options` (`showw`): equivalent to `show-options -w`; lists window-scoped options. Supports `-g` (global window options), `-q`, `-v` (values only), `-t target-window`, and an optional option name to filter output.
+- `show-hooks`: lists all hooks registered with `set-hook`, one per line in `hook-name command` format. Supports `-g` and `-t target-session`.
 Interactive picker commands `choose-buffer` (`choosebuffer`) and
 `choose-client` (`chooseclient`) open a navigable list of paste buffers or
 connected clients respectively. Both support `-N` (no preview), `-r` (reverse
