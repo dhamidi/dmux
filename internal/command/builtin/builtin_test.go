@@ -70,6 +70,31 @@ type testBackend struct {
 		paneID int
 		shell  string
 	}
+
+	// Window/pane movement recording.
+	movedWindows []struct {
+		sessionID, windowID string
+		newIndex            int
+	}
+	swappedWindows []struct {
+		sessionID, aWindowID, bWindowID string
+	}
+	foundWindows    []struct{ sessionID, pattern string }
+	foundWindowView command.WindowView
+	swappedPanes    []struct {
+		sessionID, windowID string
+		paneA, paneB        int
+	}
+	brokenPanes []struct {
+		sessionID, windowID string
+		paneID              int
+	}
+	brokenWindowView command.WindowView
+	joinedPanes      []struct {
+		srcSessionID, srcWindowID string
+		srcPaneID                 int
+		dstSessionID, dstWindowID string
+	}
 }
 
 // ─── command.Server (read) implementation ────────────────────────────────────
@@ -307,6 +332,51 @@ func (b *testBackend) RespawnPane(paneID int, shell string) error {
 		paneID int
 		shell  string
 	}{paneID, shell})
+	return nil
+}
+
+func (b *testBackend) MoveWindow(sessionID, windowID string, newIndex int) error {
+	b.movedWindows = append(b.movedWindows, struct {
+		sessionID, windowID string
+		newIndex            int
+	}{sessionID, windowID, newIndex})
+	return nil
+}
+
+func (b *testBackend) SwapWindows(sessionID, aWindowID, bWindowID string) error {
+	b.swappedWindows = append(b.swappedWindows, struct {
+		sessionID, aWindowID, bWindowID string
+	}{sessionID, aWindowID, bWindowID})
+	return nil
+}
+
+func (b *testBackend) FindWindow(sessionID, pattern string) (command.WindowView, error) {
+	b.foundWindows = append(b.foundWindows, struct{ sessionID, pattern string }{sessionID, pattern})
+	return b.foundWindowView, nil
+}
+
+func (b *testBackend) SwapPane(sessionID, windowID string, paneA, paneB int) error {
+	b.swappedPanes = append(b.swappedPanes, struct {
+		sessionID, windowID string
+		paneA, paneB        int
+	}{sessionID, windowID, paneA, paneB})
+	return nil
+}
+
+func (b *testBackend) BreakPane(sessionID, windowID string, paneID int) (command.WindowView, error) {
+	b.brokenPanes = append(b.brokenPanes, struct {
+		sessionID, windowID string
+		paneID              int
+	}{sessionID, windowID, paneID})
+	return b.brokenWindowView, nil
+}
+
+func (b *testBackend) JoinPane(srcSessionID, srcWindowID string, srcPaneID int, dstSessionID, dstWindowID string) error {
+	b.joinedPanes = append(b.joinedPanes, struct {
+		srcSessionID, srcWindowID string
+		srcPaneID                 int
+		dstSessionID, dstWindowID string
+	}{srcSessionID, srcWindowID, srcPaneID, dstSessionID, dstWindowID})
 	return nil
 }
 
@@ -558,5 +628,135 @@ func TestRespawnPane_ForwardsPaneIDAndShell(t *testing.T) {
 	}
 	if got.shell != "/bin/bash" {
 		t.Errorf("RespawnPane shell = %q, want %q", got.shell, "/bin/bash")
+	}
+}
+
+// ─── Movement command tests ───────────────────────────────────────────────────
+
+func newBackendTwoWindows() *testBackend {
+	b := newBackend()
+	win2 := command.WindowView{ID: "w2", Name: "other", Index: 1, Panes: []command.PaneView{{ID: 2, Title: "sh"}}, Active: 2}
+	s := b.sessions[0]
+	s.Windows = append(s.Windows, win2)
+	b.sessions[0] = s
+	return b
+}
+
+func TestMoveWindow_MovesToEnd(t *testing.T) {
+	b := newBackend()
+	res := dispatch("move-window", []string{"-t", "alpha:main", "-a"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if len(b.movedWindows) != 1 {
+		t.Fatalf("expected 1 MoveWindow call, got %d", len(b.movedWindows))
+	}
+	got := b.movedWindows[0]
+	if got.sessionID != "s1" || got.windowID != "w1" {
+		t.Errorf("MoveWindow(%q, %q, _): unexpected session/window", got.sessionID, got.windowID)
+	}
+	if got.newIndex != -1 {
+		t.Errorf("MoveWindow newIndex = %d, want -1 (append)", got.newIndex)
+	}
+}
+
+func TestSwapWindow_SwapsTwoWindows(t *testing.T) {
+	b := newBackendTwoWindows()
+	res := dispatch("swap-window", []string{"-t", "alpha:main", "-s", "other"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if len(b.swappedWindows) != 1 {
+		t.Fatalf("expected 1 SwapWindows call, got %d", len(b.swappedWindows))
+	}
+	got := b.swappedWindows[0]
+	if got.sessionID != "s1" {
+		t.Errorf("SwapWindows sessionID = %q, want %q", got.sessionID, "s1")
+	}
+	if got.aWindowID != "w1" || got.bWindowID != "w2" {
+		t.Errorf("SwapWindows(%q, %q): unexpected window IDs", got.aWindowID, got.bWindowID)
+	}
+}
+
+func TestFindWindow_ReturnsMatchingWindow(t *testing.T) {
+	b := newBackend()
+	b.foundWindowView = command.WindowView{ID: "w1", Name: "main", Index: 0}
+	res := dispatch("find-window", []string{"main"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if len(b.foundWindows) != 1 {
+		t.Fatalf("expected 1 FindWindow call, got %d", len(b.foundWindows))
+	}
+	if b.foundWindows[0].pattern != "main" {
+		t.Errorf("FindWindow pattern = %q, want %q", b.foundWindows[0].pattern, "main")
+	}
+	if !strings.Contains(res.Output, "main") {
+		t.Errorf("find-window output %q does not contain 'main'", res.Output)
+	}
+}
+
+func TestSwapPane_SwapsTwoPanes(t *testing.T) {
+	b := newBackend()
+	res := dispatch("swap-pane", []string{"-t", "alpha:main.%1", "-s", "2"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if len(b.swappedPanes) != 1 {
+		t.Fatalf("expected 1 SwapPane call, got %d", len(b.swappedPanes))
+	}
+	got := b.swappedPanes[0]
+	if got.paneA != 1 || got.paneB != 2 {
+		t.Errorf("SwapPane(%d, %d): want (1, 2)", got.paneA, got.paneB)
+	}
+}
+
+func TestBreakPane_DetachesActivePane(t *testing.T) {
+	b := newBackend()
+	b.brokenWindowView = command.WindowView{ID: "w2", Name: "bash", Index: 1}
+	res := dispatch("break-pane", nil, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if len(b.brokenPanes) != 1 {
+		t.Fatalf("expected 1 BreakPane call, got %d", len(b.brokenPanes))
+	}
+	got := b.brokenPanes[0]
+	if got.sessionID != "s1" || got.windowID != "w1" || got.paneID != 1 {
+		t.Errorf("BreakPane(%q, %q, %d): unexpected args", got.sessionID, got.windowID, got.paneID)
+	}
+}
+
+func TestBreakPane_PrintFlag_OutputsWindowInfo(t *testing.T) {
+	b := newBackend()
+	b.brokenWindowView = command.WindowView{ID: "w2", Name: "bash", Index: 1}
+	res := dispatch("break-pane", []string{"-P"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if !strings.Contains(res.Output, "bash") {
+		t.Errorf("break-pane -P output %q does not contain 'bash'", res.Output)
+	}
+}
+
+func TestJoinPane_MovesPaneBetweenWindows(t *testing.T) {
+	b := newBackendTwoWindows()
+	// Move pane 1 from window index 0 ("main") into window index 1 ("other").
+	res := dispatch("join-pane", []string{"-s", ":0.1", "-t", "alpha:other"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if len(b.joinedPanes) != 1 {
+		t.Fatalf("expected 1 JoinPane call, got %d", len(b.joinedPanes))
+	}
+	got := b.joinedPanes[0]
+	if got.srcWindowID != "w1" {
+		t.Errorf("JoinPane srcWindowID = %q, want %q", got.srcWindowID, "w1")
+	}
+	if got.srcPaneID != 1 {
+		t.Errorf("JoinPane srcPaneID = %d, want 1", got.srcPaneID)
+	}
+	if got.dstWindowID != "w2" {
+		t.Errorf("JoinPane dstWindowID = %q, want %q", got.dstWindowID, "w2")
 	}
 }

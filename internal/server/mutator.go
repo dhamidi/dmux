@@ -179,3 +179,31 @@ func (m *serverMutator) ListBuffers() []command.BufferEntry {
 	}
 	return out
 }
+
+// ─── Window movement ─────────────────────────────────────────────────────────
+
+func (m *serverMutator) MoveWindow(sessionID, windowID string, newIndex int) error {
+	return errStub("move-window")
+}
+
+func (m *serverMutator) SwapWindows(sessionID, aWindowID, bWindowID string) error {
+	return errStub("swap-window")
+}
+
+func (m *serverMutator) FindWindow(sessionID, pattern string) (command.WindowView, error) {
+	return command.WindowView{}, errStub("find-window")
+}
+
+// ─── Pane movement ───────────────────────────────────────────────────────────
+
+func (m *serverMutator) SwapPane(sessionID, windowID string, paneA, paneB int) error {
+	return errStub("swap-pane")
+}
+
+func (m *serverMutator) BreakPane(sessionID, windowID string, paneID int) (command.WindowView, error) {
+	return command.WindowView{}, errStub("break-pane")
+}
+
+func (m *serverMutator) JoinPane(srcSessionID, srcWindowID string, srcPaneID int, dstSessionID, dstWindowID string) error {
+	return errStub("join-pane")
+}

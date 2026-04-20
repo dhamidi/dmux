@@ -193,6 +193,16 @@ type Mutator interface {
 	SaveBuffer(name, path string) error
 	PasteBuffer(name string, paneID int) error
 	ListBuffers() []BufferEntry
+
+	// Window movement.
+	MoveWindow(sessionID, windowID string, newIndex int) error
+	SwapWindows(sessionID, aWindowID, bWindowID string) error
+	FindWindow(sessionID, pattern string) (WindowView, error)
+
+	// Pane movement.
+	SwapPane(sessionID, windowID string, paneA, paneB int) error
+	BreakPane(sessionID, windowID string, paneID int) (WindowView, error)
+	JoinPane(srcSessionID, srcWindowID string, srcPaneID int, dstSessionID, dstWindowID string) error
 }
 
 // ─── Argument types ───────────────────────────────────────────────────────────
