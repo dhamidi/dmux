@@ -4,8 +4,9 @@
 // # Boundary
 //
 // A Runner manages a pool of goroutines. Submit a Job and get back a
-// Handle; the Runner spawns the process, captures stdout/stderr, and
-// invokes the completion callback on a worker goroutine.
+// Handle; the Runner spawns the process via the injected [Executor],
+// captures stdout/stderr, and invokes the completion callback on a
+// worker goroutine.
 //
 //	type Job struct {
 //	    Command  string         // sh -c "..." style
@@ -19,6 +20,34 @@
 //	    ExitCode int
 //	    Err      error
 //	}
+//
+// # Executor interface
+//
+// Process spawning is abstracted behind [Executor]:
+//
+//	type Executor interface {
+//	    Run(ctx context.Context, name string, args []string) (stdout, stderr []byte, err error)
+//	}
+//
+// The production implementation is [OSExecutor], which calls
+// [os/exec.Command] under the hood. Tests can substitute a fake
+// implementation that returns canned output without spawning real
+// processes.
+//
+// # Constructor
+//
+// Create a Runner with [NewRunner]:
+//
+//	r := job.NewRunner(job.OSExecutor{}, 4) // 4 worker goroutines
+//	defer r.Stop()
+//
+//	handle := r.Submit(job.Job{
+//	    Command: "echo hello",
+//	    OnDone: func(res job.Result) {
+//	        fmt.Printf("stdout: %s\n", res.Stdout)
+//	    },
+//	})
+//	handle.Wait()
 //
 // # Uses
 //
