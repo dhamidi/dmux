@@ -975,11 +975,108 @@ func (m *serverMutator) UnlinkWindow(sessionID, windowID string, kill bool) erro
 }
 
 func (m *serverMutator) MoveWindow(sessionID, windowID string, newIndex int) error {
-	return errStub("move-window")
+	sess, ok := m.state.Sessions[session.SessionID(sessionID)]
+	if !ok {
+		return fmt.Errorf("move-window: session %q not found", sessionID)
+	}
+
+	// Find the winlink for the window to move.
+	srcIdx := -1
+	for i, wl := range sess.Windows {
+		if wl.Window.ID == session.WindowID(windowID) {
+			srcIdx = i
+			break
+		}
+	}
+	if srcIdx < 0 {
+		return fmt.Errorf("move-window: window %q not found in session %q", windowID, sessionID)
+	}
+
+	// If no explicit destination, leave the window in place.
+	if newIndex == 0 {
+		return nil
+	}
+
+	// Remove the winlink from its current position.
+	wl := sess.Windows[srcIdx]
+	sess.Windows = append(sess.Windows[:srcIdx], sess.Windows[srcIdx+1:]...)
+
+	// Determine the target display index.
+	var targetIdx int
+	if newIndex < 0 {
+		// Append after the last existing window.
+		if len(sess.Windows) > 0 {
+			targetIdx = sess.Windows[len(sess.Windows)-1].Index + 1
+		} else {
+			targetIdx = 1
+		}
+	} else {
+		targetIdx = newIndex
+	}
+
+	// Shift all windows with index >= targetIdx up by one to make room.
+	for _, existing := range sess.Windows {
+		if existing.Index >= targetIdx {
+			existing.Index++
+		}
+	}
+
+	// Update the moved window's display index.
+	wl.Index = targetIdx
+
+	// Insert in sorted order by index.
+	pos := len(sess.Windows)
+	for i, existing := range sess.Windows {
+		if existing.Index > targetIdx {
+			pos = i
+			break
+		}
+	}
+	sess.Windows = append(sess.Windows[:pos], append([]*session.Winlink{wl}, sess.Windows[pos:]...)...)
+
+	// Keep Current pointer valid.
+	if sess.Current == nil && len(sess.Windows) > 0 {
+		sess.Current = sess.Windows[0]
+	}
+
+	m.RunHook("after-move-window")
+	return nil
 }
 
 func (m *serverMutator) SwapWindows(sessionID, aWindowID, bWindowID string) error {
-	return errStub("swap-window")
+	sess, ok := m.state.Sessions[session.SessionID(sessionID)]
+	if !ok {
+		return fmt.Errorf("swap-window: session %q not found", sessionID)
+	}
+
+	var wlA, wlB *session.Winlink
+	for _, wl := range sess.Windows {
+		switch wl.Window.ID {
+		case session.WindowID(aWindowID):
+			wlA = wl
+		case session.WindowID(bWindowID):
+			wlB = wl
+		}
+	}
+	if wlA == nil {
+		return fmt.Errorf("swap-window: window %q not found in session %q", aWindowID, sessionID)
+	}
+	if wlB == nil {
+		return fmt.Errorf("swap-window: window %q not found in session %q", bWindowID, sessionID)
+	}
+
+	// Exchange display indices.
+	wlA.Index, wlB.Index = wlB.Index, wlA.Index
+
+	// Re-sort the Windows slice to reflect the new order.
+	for i := 1; i < len(sess.Windows); i++ {
+		for j := i; j > 0 && sess.Windows[j].Index < sess.Windows[j-1].Index; j-- {
+			sess.Windows[j], sess.Windows[j-1] = sess.Windows[j-1], sess.Windows[j]
+		}
+	}
+
+	m.RunHook("after-swap-window")
+	return nil
 }
 
 func (m *serverMutator) FindWindow(sessionID, pattern string) (command.WindowView, error) {

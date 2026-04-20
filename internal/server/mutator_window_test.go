@@ -340,3 +340,246 @@ func TestSelectPane(t *testing.T) {
 		t.Errorf("win.Active = %d, want %d", win.Active, pv.ID)
 	}
 }
+
+// ─── MoveWindow tests ─────────────────────────────────────────────────────────
+
+func TestMoveWindowAppendToEnd(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	sv, err := m.NewSession("s1")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	wv1, err := m.NewWindow(sv.ID, "win1")
+	if err != nil {
+		t.Fatalf("NewWindow win1: %v", err)
+	}
+	wv2, err := m.NewWindow(sv.ID, "win2")
+	if err != nil {
+		t.Fatalf("NewWindow win2: %v", err)
+	}
+	wv3, err := m.NewWindow(sv.ID, "win3")
+	if err != nil {
+		t.Fatalf("NewWindow win3: %v", err)
+	}
+
+	sess := m.state.Sessions[session.SessionID(sv.ID)]
+	origIdx := sess.Windows[0].Index // index of win1
+
+	// Move win1 (-1 = append to end).
+	if err := m.MoveWindow(sv.ID, wv1.ID, -1); err != nil {
+		t.Fatalf("MoveWindow: %v", err)
+	}
+
+	// win1 should now be last.
+	last := sess.Windows[len(sess.Windows)-1]
+	if last.Window.ID != session.WindowID(wv1.ID) {
+		t.Errorf("last window = %q, want win1 (%q)", last.Window.ID, wv1.ID)
+	}
+	_ = origIdx
+	_ = wv2
+	_ = wv3
+}
+
+func TestMoveWindowToSpecificIndex(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	sv, err := m.NewSession("s1")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	wv1, err := m.NewWindow(sv.ID, "win1")
+	if err != nil {
+		t.Fatalf("NewWindow win1: %v", err)
+	}
+	wv2, err := m.NewWindow(sv.ID, "win2")
+	if err != nil {
+		t.Fatalf("NewWindow win2: %v", err)
+	}
+	wv3, err := m.NewWindow(sv.ID, "win3")
+	if err != nil {
+		t.Fatalf("NewWindow win3: %v", err)
+	}
+
+	sess := m.state.Sessions[session.SessionID(sv.ID)]
+	// win3 is currently last; move it to index 1 (first position).
+	win3Index := sess.Windows[2].Index
+
+	if err := m.MoveWindow(sv.ID, wv3.ID, 1); err != nil {
+		t.Fatalf("MoveWindow: %v", err)
+	}
+
+	first := sess.Windows[0]
+	if first.Window.ID != session.WindowID(wv3.ID) {
+		t.Errorf("first window = %q, want win3 (%q)", first.Window.ID, wv3.ID)
+	}
+	if first.Index != 1 {
+		t.Errorf("first window index = %d, want 1", first.Index)
+	}
+	_ = wv1
+	_ = wv2
+	_ = win3Index
+}
+
+func TestMoveWindowNoOp(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	sv, err := m.NewSession("s1")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	wv1, err := m.NewWindow(sv.ID, "win1")
+	if err != nil {
+		t.Fatalf("NewWindow win1: %v", err)
+	}
+	wv2, err := m.NewWindow(sv.ID, "win2")
+	if err != nil {
+		t.Fatalf("NewWindow win2: %v", err)
+	}
+
+	sess := m.state.Sessions[session.SessionID(sv.ID)]
+	before0 := sess.Windows[0].Window.ID
+	before1 := sess.Windows[1].Window.ID
+
+	// newIndex=0 should be a no-op.
+	if err := m.MoveWindow(sv.ID, wv1.ID, 0); err != nil {
+		t.Fatalf("MoveWindow: %v", err)
+	}
+
+	if sess.Windows[0].Window.ID != before0 || sess.Windows[1].Window.ID != before1 {
+		t.Error("MoveWindow(newIndex=0) changed window order, expected no-op")
+	}
+	_ = wv2
+}
+
+func TestMoveWindowSessionNotFound(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	if err := m.MoveWindow("nonexistent", "w1", -1); err == nil {
+		t.Error("expected error for unknown session, got nil")
+	}
+}
+
+func TestMoveWindowNotFound(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	sv, err := m.NewSession("s1")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	if err := m.MoveWindow(sv.ID, "nonexistent", -1); err == nil {
+		t.Error("expected error for unknown window, got nil")
+	}
+}
+
+// ─── SwapWindows tests ────────────────────────────────────────────────────────
+
+func TestSwapWindowsSameSession(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	sv, err := m.NewSession("s1")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	wv1, err := m.NewWindow(sv.ID, "win1")
+	if err != nil {
+		t.Fatalf("NewWindow win1: %v", err)
+	}
+	wv2, err := m.NewWindow(sv.ID, "win2")
+	if err != nil {
+		t.Fatalf("NewWindow win2: %v", err)
+	}
+
+	sess := m.state.Sessions[session.SessionID(sv.ID)]
+	idx1Before := sess.Windows[0].Index
+	idx2Before := sess.Windows[1].Index
+
+	if err := m.SwapWindows(sv.ID, wv1.ID, wv2.ID); err != nil {
+		t.Fatalf("SwapWindows: %v", err)
+	}
+
+	// After swap: win2 should have the original index of win1, and vice versa.
+	var wl1, wl2 *session.Winlink
+	for _, wl := range sess.Windows {
+		switch wl.Window.ID {
+		case session.WindowID(wv1.ID):
+			wl1 = wl
+		case session.WindowID(wv2.ID):
+			wl2 = wl
+		}
+	}
+	if wl1.Index != idx2Before {
+		t.Errorf("win1 index after swap = %d, want %d", wl1.Index, idx2Before)
+	}
+	if wl2.Index != idx1Before {
+		t.Errorf("win2 index after swap = %d, want %d", wl2.Index, idx1Before)
+	}
+	// The slice should be sorted: win2 is now first.
+	if sess.Windows[0].Window.ID != session.WindowID(wv2.ID) {
+		t.Errorf("first window after swap = %q, want win2 (%q)", sess.Windows[0].Window.ID, wv2.ID)
+	}
+}
+
+func TestSwapWindowsThreeWindows(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	sv, err := m.NewSession("s1")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	wv1, err := m.NewWindow(sv.ID, "win1")
+	if err != nil {
+		t.Fatalf("NewWindow win1: %v", err)
+	}
+	wv2, err := m.NewWindow(sv.ID, "win2")
+	if err != nil {
+		t.Fatalf("NewWindow win2: %v", err)
+	}
+	wv3, err := m.NewWindow(sv.ID, "win3")
+	if err != nil {
+		t.Fatalf("NewWindow win3: %v", err)
+	}
+
+	// Swap win1 and win3; win2 stays in the middle.
+	if err := m.SwapWindows(sv.ID, wv1.ID, wv3.ID); err != nil {
+		t.Fatalf("SwapWindows: %v", err)
+	}
+
+	sess := m.state.Sessions[session.SessionID(sv.ID)]
+	// win3 should now be first, win2 in the middle, win1 last.
+	if sess.Windows[0].Window.ID != session.WindowID(wv3.ID) {
+		t.Errorf("first window = %q, want win3", sess.Windows[0].Window.ID)
+	}
+	if sess.Windows[1].Window.ID != session.WindowID(wv2.ID) {
+		t.Errorf("middle window = %q, want win2", sess.Windows[1].Window.ID)
+	}
+	if sess.Windows[2].Window.ID != session.WindowID(wv1.ID) {
+		t.Errorf("last window = %q, want win1", sess.Windows[2].Window.ID)
+	}
+}
+
+func TestSwapWindowsSessionNotFound(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	if err := m.SwapWindows("nonexistent", "w1", "w2"); err == nil {
+		t.Error("expected error for unknown session, got nil")
+	}
+}
+
+func TestSwapWindowsWindowNotFound(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	sv, err := m.NewSession("s1")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	wv1, err := m.NewWindow(sv.ID, "win1")
+	if err != nil {
+		t.Fatalf("NewWindow: %v", err)
+	}
+
+	if err := m.SwapWindows(sv.ID, wv1.ID, "nonexistent"); err == nil {
+		t.Error("expected error for unknown window B, got nil")
+	}
+}
