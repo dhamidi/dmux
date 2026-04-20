@@ -407,6 +407,27 @@ func (t *Tree) Cols() int { return t.cols }
 // Rows returns the height of the window in character cells.
 func (t *Tree) Rows() int { return t.rows }
 
+// SwapLeaves exchanges the positions of two leaves in the tree without
+// changing the split structure or sizes. If either ID is not present in the
+// tree, SwapLeaves is a no-op.
+func (t *Tree) SwapLeaves(a, b LeafID) {
+	ids := collectLeaves(t.root)
+	ai, bi := -1, -1
+	for i, id := range ids {
+		if id == a {
+			ai = i
+		} else if id == b {
+			bi = i
+		}
+	}
+	if ai < 0 || bi < 0 || ai == bi {
+		return
+	}
+	ids[ai], ids[bi] = ids[bi], ids[ai]
+	pos := 0
+	assignLeavesInNode(t.root, ids, &pos)
+}
+
 // RotateLeaves rotates the leaf IDs within the tree without changing the
 // split structure or sizes. If forward is true, pane 0 moves to the position
 // of pane 1, pane 1 to position 2, etc.; the last pane wraps to position 0.
