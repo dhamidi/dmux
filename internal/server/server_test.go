@@ -583,6 +583,8 @@ func (f *testFakePaneWithPID) Write(data []byte) error                     { ret
 func (f *testFakePaneWithPID) ShellPID() int                               { return f.pid }
 func (f *testFakePaneWithPID) LastOutputAt() time.Time                     { return time.Time{} }
 func (f *testFakePaneWithPID) ConsumeBell() bool                           { return false }
+func (f *testFakePaneWithPID) ClearHistory()                               {}
+func (f *testFakePaneWithPID) ClearScreen() error                          { return nil }
 func (f *testFakePaneWithPID) Snapshot() pane.CellGrid {
 	return pane.CellGrid{Rows: 1, Cols: 1, Cells: []pane.Cell{{Char: 'X'}}}
 }
@@ -601,6 +603,8 @@ func (f *testFakePane) Write(data []byte) error                     { return nil
 func (f *testFakePane) ShellPID() int                               { return 0 }
 func (f *testFakePane) LastOutputAt() time.Time                     { return time.Time{} }
 func (f *testFakePane) ConsumeBell() bool                           { return false }
+func (f *testFakePane) ClearHistory()                               {}
+func (f *testFakePane) ClearScreen() error                          { return nil }
 func (f *testFakePane) Snapshot() pane.CellGrid {
 	return pane.CellGrid{
 		Rows: 2, Cols: 3,
@@ -812,6 +816,8 @@ func (p *testCapturingPane) Respawn(shell string) error                  { retur
 func (p *testCapturingPane) SendKey(key keys.Key) error                  { return nil }
 func (p *testCapturingPane) LastOutputAt() time.Time                     { return time.Time{} }
 func (p *testCapturingPane) ConsumeBell() bool                           { return false }
+func (p *testCapturingPane) ClearHistory()                               {}
+func (p *testCapturingPane) ClearScreen() error                          { return nil }
 func (p *testCapturingPane) Write(data []byte) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1331,6 +1337,8 @@ func (p *testMonitorPane) ConsumeBell() bool {
 	p.bellResult = false
 	return v
 }
+func (p *testMonitorPane) ClearHistory()       {}
+func (p *testMonitorPane) ClearScreen() error  { return nil }
 
 // buildMonitorTestState creates a server state with one session, one window,
 // and one testMonitorPane. The monitor options are pre-registered so that

@@ -28,6 +28,8 @@ func (r *recordingPane) Close() error                                { return ni
 func (r *recordingPane) ShellPID() int                               { return 0 }
 func (r *recordingPane) LastOutputAt() time.Time                     { return time.Time{} }
 func (r *recordingPane) ConsumeBell() bool                           { return false }
+func (r *recordingPane) ClearHistory()                               {}
+func (r *recordingPane) ClearScreen() error                          { return nil }
 
 // newTestMutatorWithRecordingPane creates a serverMutator with a session
 // containing a window backed by a recordingPane.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -133,6 +134,13 @@ type Pane interface {
 	// ConsumeBell returns true if a BEL character (\x07) was received since
 	// the last call, and resets the flag.
 	ConsumeBell() bool
+
+	// ClearHistory discards all lines stored in the pane's scrollback buffer.
+	ClearHistory()
+
+	// ClearScreen injects the ANSI erase-display sequence into the pane's
+	// pseudo-terminal, causing the visible area to be blanked.
+	ClearScreen() error
 }
 
 // Config holds the parameters for creating a new Pane.
@@ -172,6 +180,14 @@ type pane struct {
 	ptyFactory   func(shell string, cols, rows int) (pty.PTY, error)
 	lastOutputAt time.Time // updated each time the PTY reader writes to the terminal
 	bellPending  bool      // set when \x07 (BEL) is detected in output
+
+	// Scrollback stores lines that have scrolled off the visible area.
+	scrollback [][]Cell
+
+	// pipeCmd is the subprocess started by pipe-pane, if any.
+	pipeCmd *exec.Cmd
+	// pipeDone is closed when the pipe goroutines have all exited.
+	pipeDone chan struct{}
 
 	// done is closed by copyOutput when it exits.
 	done chan struct{}
@@ -366,6 +382,19 @@ func (p *pane) Respawn(shell string) error {
 
 	go p.copyOutput()
 	return nil
+}
+
+// ClearHistory discards all lines stored in the scrollback buffer.
+func (p *pane) ClearHistory() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.scrollback = p.scrollback[:0]
+}
+
+// ClearScreen injects the ANSI cursor-home + erase-display sequence into the
+// pane's pseudo-terminal, causing the visible area to be blanked.
+func (p *pane) ClearScreen() error {
+	return p.Write([]byte("\x1b[H\x1b[2J"))
 }
 
 // Close shuts down the pane: it closes the encoders and terminal

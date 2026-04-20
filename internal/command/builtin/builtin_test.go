@@ -134,6 +134,31 @@ type testBackend struct {
 
 	// Hook state.
 	hookFns map[string]func()
+
+	// Pane pipe / clear recording.
+	pipedPanes []struct {
+		paneID               int
+		shellCmd             string
+		inFlag, outFlag, onceFlag bool
+	}
+	movedPanes []struct {
+		srcSessionID, srcWindowID string
+		srcPaneID                 int
+		dstSessionID, dstWindowID string
+	}
+	slicedPanes []struct {
+		sessionID, windowID string
+		paneID              int
+	}
+	respawnedWindows []struct {
+		sessionID, windowID string
+		shell, dir          string
+	}
+	clearedHistoryPanes []struct {
+		paneID     int
+		visibleToo bool
+	}
+	clearedPanes []int
 }
 
 // ─── command.Server (read) implementation ────────────────────────────────────
@@ -564,6 +589,53 @@ func (b *testBackend) RunHook(event string) {
 	if fn, ok := b.hookFns[event]; ok {
 		fn()
 	}
+}
+
+func (b *testBackend) PipePane(paneID int, shellCmd string, inFlag, outFlag, onceFlag bool) error {
+	b.pipedPanes = append(b.pipedPanes, struct {
+		paneID               int
+		shellCmd             string
+		inFlag, outFlag, onceFlag bool
+	}{paneID, shellCmd, inFlag, outFlag, onceFlag})
+	return nil
+}
+
+func (b *testBackend) MovePane(srcSessionID, srcWindowID string, srcPaneID int, dstSessionID, dstWindowID string) error {
+	b.movedPanes = append(b.movedPanes, struct {
+		srcSessionID, srcWindowID string
+		srcPaneID                 int
+		dstSessionID, dstWindowID string
+	}{srcSessionID, srcWindowID, srcPaneID, dstSessionID, dstWindowID})
+	return nil
+}
+
+func (b *testBackend) SlicePane(sessionID, windowID string, paneID int) (command.PaneView, error) {
+	b.slicedPanes = append(b.slicedPanes, struct {
+		sessionID, windowID string
+		paneID              int
+	}{sessionID, windowID, paneID})
+	return command.PaneView{ID: 99, Title: "slice"}, nil
+}
+
+func (b *testBackend) RespawnWindow(sessionID, windowID, shell, dir string) error {
+	b.respawnedWindows = append(b.respawnedWindows, struct {
+		sessionID, windowID string
+		shell, dir          string
+	}{sessionID, windowID, shell, dir})
+	return nil
+}
+
+func (b *testBackend) ClearHistory(paneID int, visibleToo bool) error {
+	b.clearedHistoryPanes = append(b.clearedHistoryPanes, struct {
+		paneID     int
+		visibleToo bool
+	}{paneID, visibleToo})
+	return nil
+}
+
+func (b *testBackend) ClearPane(paneID int) error {
+	b.clearedPanes = append(b.clearedPanes, paneID)
+	return nil
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

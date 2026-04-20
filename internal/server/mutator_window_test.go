@@ -27,6 +27,8 @@ func (f *fakePane) Close() error                               { f.closed = true
 func (f *fakePane) ShellPID() int                              { return 0 }
 func (f *fakePane) LastOutputAt() time.Time                    { return time.Time{} }
 func (f *fakePane) ConsumeBell() bool                          { return false }
+func (f *fakePane) ClearHistory()                              {}
+func (f *fakePane) ClearScreen() error                         { return nil }
 
 // newTestMutatorWithPane creates a serverMutator backed by a fresh session.Server
 // and a fake pane factory that returns fakePane instances.

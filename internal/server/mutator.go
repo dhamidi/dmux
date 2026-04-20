@@ -761,6 +761,46 @@ func (m *serverMutator) JoinPane(srcSessionID, srcWindowID string, srcPaneID int
 	return errStub("join-pane")
 }
 
+func (m *serverMutator) MovePane(srcSessionID, srcWindowID string, srcPaneID int, dstSessionID, dstWindowID string) error {
+	return errStub("move-pane")
+}
+
+func (m *serverMutator) SlicePane(sessionID, windowID string, paneID int) (command.PaneView, error) {
+	return command.PaneView{}, errStub("slice-pane")
+}
+
+func (m *serverMutator) RespawnWindow(sessionID, windowID, shell, dir string) error {
+	return errStub("respawn-window")
+}
+
+// ─── Pane pipe / clear operations ────────────────────────────────────────────
+
+func (m *serverMutator) PipePane(paneID int, shellCmd string, inFlag, outFlag, onceFlag bool) error {
+	return errStub("pipe-pane")
+}
+
+func (m *serverMutator) ClearHistory(paneID int, visibleToo bool) error {
+	_, _, p, err := m.findPane(paneID)
+	if err != nil {
+		return fmt.Errorf("clear-history: %w", err)
+	}
+	p.ClearHistory()
+	if visibleToo {
+		if err := p.ClearScreen(); err != nil {
+			return fmt.Errorf("clear-history: clear screen: %w", err)
+		}
+	}
+	return nil
+}
+
+func (m *serverMutator) ClearPane(paneID int) error {
+	_, _, p, err := m.findPane(paneID)
+	if err != nil {
+		return fmt.Errorf("clear-pane: %w", err)
+	}
+	return p.ClearScreen()
+}
+
 // ─── Environment mutations ────────────────────────────────────────────────────
 
 // resolveEnviron maps a scope string to the appropriate session.Environ.

@@ -23,6 +23,8 @@ func (p *mockPane) Snapshot() pane.CellGrid               { return pane.CellGrid
 func (p *mockPane) ShellPID() int                         { return 0 }
 func (p *mockPane) LastOutputAt() time.Time               { return time.Time{} }
 func (p *mockPane) ConsumeBell() bool                     { return false }
+func (p *mockPane) ClearHistory()                         {}
+func (p *mockPane) ClearScreen() error                    { return nil }
 
 // helpers
 

@@ -274,6 +274,34 @@ type Mutator interface {
 	SetHook(event, cmd string) error
 	// RunHook fires all registered hooks for event synchronously.
 	RunHook(event string)
+
+	// Pane pipe mutations.
+	// PipePane connects the output of a pane to a shell command.
+	// shellCmd is the command to run; empty string stops an existing pipe.
+	// inFlag routes the command's stdout back to the pane's stdin.
+	// outFlag routes the pane's output to the command's stdin (default).
+	// onceFlag only opens the pipe if the pane is not already piped.
+	PipePane(paneID int, shellCmd string, inFlag, outFlag, onceFlag bool) error
+
+	// MovePane moves a pane to a different window (analogous to JoinPane but
+	// the source pane is detached from its current window before joining).
+	MovePane(srcSessionID, srcWindowID string, srcPaneID int, dstSessionID, dstWindowID string) error
+
+	// SlicePane creates a new pane whose initial content is taken from a
+	// rectangular region of an existing pane's snapshot.
+	SlicePane(sessionID, windowID string, paneID int) (PaneView, error)
+
+	// RespawnWindow relaunches the shell or a given command in all dead panes
+	// of the target window, optionally killing live panes first.
+	RespawnWindow(sessionID, windowID, shell, dir string) error
+
+	// ClearHistory discards the scrollback buffer of a pane.
+	// If visibleToo is true the visible screen is also erased.
+	ClearHistory(paneID int, visibleToo bool) error
+
+	// ClearPane erases the visible content of a pane by injecting the ANSI
+	// clear-screen sequence into its pseudo-terminal.
+	ClearPane(paneID int) error
 }
 
 // ─── Argument types ───────────────────────────────────────────────────────────

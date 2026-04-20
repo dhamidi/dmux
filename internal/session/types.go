@@ -82,6 +82,11 @@ type Pane interface {
 	// ConsumeBell returns true if a BEL character (\x07) was received since
 	// the last call, and resets the flag.
 	ConsumeBell() bool
+	// ClearHistory discards all lines stored in the pane's scrollback buffer.
+	ClearHistory()
+	// ClearScreen injects the ANSI erase-display sequence into the pane's
+	// pseudo-terminal, blanking the visible area.
+	ClearScreen() error
 }
 
 // Overlay is the interface that the session package requires of a client
