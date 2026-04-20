@@ -652,3 +652,183 @@ func TestFindWindowSessionNotFound(t *testing.T) {
 		t.Error("expected error for unknown session, got nil")
 	}
 }
+
+// ─── BreakPane tests ──────────────────────────────────────────────────────────
+
+func TestBreakPane_CreatesNewWindow(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	sv, err := m.NewSession("s1")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	wv, err := m.NewWindow(sv.ID, "win1")
+	if err != nil {
+		t.Fatalf("NewWindow: %v", err)
+	}
+
+	// Split to get two panes, then break one out.
+	pv, err := m.SplitWindow(sv.ID, wv.ID)
+	if err != nil {
+		t.Fatalf("SplitWindow: %v", err)
+	}
+
+	newWv, err := m.BreakPane(sv.ID, wv.ID, pv.ID)
+	if err != nil {
+		t.Fatalf("BreakPane: %v", err)
+	}
+
+	sess := m.state.Sessions[session.SessionID(sv.ID)]
+	if got := len(sess.Windows); got != 2 {
+		t.Errorf("sess.Windows count = %d, want 2", got)
+	}
+
+	// The broken-out window should have exactly one pane.
+	if got := len(newWv.Panes); got != 1 {
+		t.Errorf("new WindowView pane count = %d, want 1", got)
+	}
+
+	// The original window should still have one pane.
+	var origWin *session.Window
+	for _, wl := range sess.Windows {
+		if wl.Window.ID == session.WindowID(wv.ID) {
+			origWin = wl.Window
+			break
+		}
+	}
+	if origWin == nil {
+		t.Fatal("original window not found in session")
+	}
+	if got := len(origWin.Panes); got != 1 {
+		t.Errorf("original window pane count = %d, want 1", got)
+	}
+}
+
+func TestBreakPane_SourceWindowKilledWhenEmpty(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	sv, err := m.NewSession("s1")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	wv, err := m.NewWindow(sv.ID, "win1")
+	if err != nil {
+		t.Fatalf("NewWindow: %v", err)
+	}
+
+	// Break the only pane out — source window should be destroyed.
+	activePaneID := wv.Active
+	_, err = m.BreakPane(sv.ID, wv.ID, activePaneID)
+	if err != nil {
+		t.Fatalf("BreakPane: %v", err)
+	}
+
+	sess := m.state.Sessions[session.SessionID(sv.ID)]
+	// The original window is gone; only the new window remains.
+	if got := len(sess.Windows); got != 1 {
+		t.Errorf("sess.Windows count = %d, want 1 (new window only)", got)
+	}
+	// The remaining window must not be the original.
+	if sess.Windows[0].Window.ID == session.WindowID(wv.ID) {
+		t.Error("original window still present after breaking its only pane")
+	}
+}
+
+func TestBreakPane_PaneNotFound(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	sv, err := m.NewSession("s1")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	wv, err := m.NewWindow(sv.ID, "win1")
+	if err != nil {
+		t.Fatalf("NewWindow: %v", err)
+	}
+
+	if _, err := m.BreakPane(sv.ID, wv.ID, 9999); err == nil {
+		t.Error("expected error for non-existent pane, got nil")
+	}
+}
+
+// ─── JoinPane tests ───────────────────────────────────────────────────────────
+
+func TestJoinPane_MovesPaneBetweenWindows(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	sv, err := m.NewSession("s1")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	wv1, err := m.NewWindow(sv.ID, "win1")
+	if err != nil {
+		t.Fatalf("NewWindow win1: %v", err)
+	}
+	wv2, err := m.NewWindow(sv.ID, "win2")
+	if err != nil {
+		t.Fatalf("NewWindow win2: %v", err)
+	}
+
+	// Split win1 so it has two panes, then join one into win2.
+	pv, err := m.SplitWindow(sv.ID, wv1.ID)
+	if err != nil {
+		t.Fatalf("SplitWindow: %v", err)
+	}
+
+	if err := m.JoinPane(sv.ID, wv1.ID, pv.ID, sv.ID, wv2.ID); err != nil {
+		t.Fatalf("JoinPane: %v", err)
+	}
+
+	sess := m.state.Sessions[session.SessionID(sv.ID)]
+
+	var win1, win2 *session.Window
+	for _, wl := range sess.Windows {
+		switch wl.Window.ID {
+		case session.WindowID(wv1.ID):
+			win1 = wl.Window
+		case session.WindowID(wv2.ID):
+			win2 = wl.Window
+		}
+	}
+
+	if win1 == nil || win2 == nil {
+		t.Fatal("could not find both windows after JoinPane")
+	}
+	if got := len(win1.Panes); got != 1 {
+		t.Errorf("win1 pane count = %d, want 1", got)
+	}
+	if got := len(win2.Panes); got != 2 {
+		t.Errorf("win2 pane count = %d, want 2", got)
+	}
+}
+
+func TestJoinPane_SourceWindowKilledWhenEmpty(t *testing.T) {
+	m, _, _ := newTestMutatorWithPane()
+
+	sv, err := m.NewSession("s1")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	wv1, err := m.NewWindow(sv.ID, "win1")
+	if err != nil {
+		t.Fatalf("NewWindow win1: %v", err)
+	}
+	wv2, err := m.NewWindow(sv.ID, "win2")
+	if err != nil {
+		t.Fatalf("NewWindow win2: %v", err)
+	}
+
+	// win1 has only one pane; joining it into win2 should destroy win1.
+	activePaneID := wv1.Active
+	if err := m.JoinPane(sv.ID, wv1.ID, activePaneID, sv.ID, wv2.ID); err != nil {
+		t.Fatalf("JoinPane: %v", err)
+	}
+
+	sess := m.state.Sessions[session.SessionID(sv.ID)]
+	if got := len(sess.Windows); got != 1 {
+		t.Errorf("sess.Windows count = %d, want 1 (win1 should be destroyed)", got)
+	}
+	if sess.Windows[0].Window.ID != session.WindowID(wv2.ID) {
+		t.Errorf("remaining window = %q, want win2 (%q)", sess.Windows[0].Window.ID, wv2.ID)
+	}
+}

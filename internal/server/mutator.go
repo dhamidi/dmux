@@ -1128,11 +1128,118 @@ func (m *serverMutator) SwapPane(sessionID, windowID string, paneA, paneB int) e
 }
 
 func (m *serverMutator) BreakPane(sessionID, windowID string, paneID int) (command.WindowView, error) {
-	return command.WindowView{}, errStub("break-pane")
+	srcID := session.PaneID(paneID)
+
+	srcWin, err := m.findWindow(sessionID, windowID)
+	if err != nil {
+		return command.WindowView{}, fmt.Errorf("break-pane: %w", err)
+	}
+	srcPane, ok := srcWin.Panes[srcID]
+	if !ok {
+		return command.WindowView{}, fmt.Errorf("break-pane: pane %d not found in window %q", paneID, windowID)
+	}
+
+	sess, ok := m.state.Sessions[session.SessionID(sessionID)]
+	if !ok {
+		return command.WindowView{}, fmt.Errorf("break-pane: session %q not found", sessionID)
+	}
+
+	// Remove the pane from the source window's layout and pane map.
+	srcWin.RemovePane(srcID)
+	srcWin.Layout.Close(srcID)
+
+	// Create a new window that will hold just this pane.
+	m.nextWindowID++
+	newWinID := session.WindowID(fmt.Sprintf("w%d", m.nextWindowID))
+	newWin := session.NewWindow(newWinID, fmt.Sprintf("window%d", m.nextWindowID), sess.Options)
+
+	// Size the new window to match the attached client, or fall back to 80×24.
+	cols, rows := 80, 24
+	for _, c := range m.state.Clients {
+		if c.Session != nil && c.Session.ID == sess.ID {
+			if c.Size.Cols > 0 {
+				cols = c.Size.Cols
+			}
+			if c.Size.Rows > 0 {
+				rows = c.Size.Rows
+			}
+			break
+		}
+	}
+
+	newWin.AddPane(srcID, srcPane)
+	newWin.Layout = layout.New(cols, rows, srcID)
+
+	// Resize the moved pane to fill the new window.
+	_ = srcPane.Resize(cols, rows)
+
+	// Rebalance remaining panes in the source window.
+	for id, p := range srcWin.Panes {
+		r := srcWin.Layout.Rect(id)
+		if r.Width > 0 && r.Height > 0 {
+			_ = p.Resize(r.Width, r.Height)
+		}
+	}
+
+	// Add the new window to the session before potentially killing the source,
+	// so the session is never left windowless.
+	wl := sess.AddWindow(newWin)
+	m.notifyAll(control.WindowAddEvent{WindowID: string(newWinID)})
+
+	// If the source window is now empty, remove it.
+	if len(srcWin.Panes) == 0 {
+		_ = m.KillWindow(sessionID, windowID)
+	}
+
+	m.RunHook("after-break-pane")
+	return toWindowView(wl), nil
 }
 
 func (m *serverMutator) JoinPane(srcSessionID, srcWindowID string, srcPaneID int, dstSessionID, dstWindowID string) error {
-	return errStub("join-pane")
+	srcID := session.PaneID(srcPaneID)
+
+	srcWin, err := m.findWindow(srcSessionID, srcWindowID)
+	if err != nil {
+		return fmt.Errorf("join-pane: %w", err)
+	}
+	srcPane, ok := srcWin.Panes[srcID]
+	if !ok {
+		return fmt.Errorf("join-pane: pane %d not found in window %q", srcPaneID, srcWindowID)
+	}
+	dstWin, err := m.findWindow(dstSessionID, dstWindowID)
+	if err != nil {
+		return fmt.Errorf("join-pane: %w", err)
+	}
+
+	// Remove the pane from the source window.
+	srcWin.RemovePane(srcID)
+	srcWin.Layout.Close(srcID)
+
+	// Insert the pane into the destination window by splitting the active pane.
+	newID := dstWin.Layout.Split(dstWin.Active, layout.Vertical)
+	dstWin.AddPane(newID, srcPane)
+
+	// Resize the moved pane to its new slot.
+	r := dstWin.Layout.Rect(newID)
+	if r.Width > 0 && r.Height > 0 {
+		_ = srcPane.Resize(r.Width, r.Height)
+	}
+
+	// Rebalance remaining panes in the source window.
+	for id, p := range srcWin.Panes {
+		r := srcWin.Layout.Rect(id)
+		if r.Width > 0 && r.Height > 0 {
+			_ = p.Resize(r.Width, r.Height)
+		}
+	}
+
+	// If the source window is now empty, remove it.
+	if len(srcWin.Panes) == 0 {
+		_ = m.KillWindow(srcSessionID, srcWindowID)
+	}
+
+	m.RunHook("after-join-pane")
+	return nil
 }
 
 func (m *serverMutator) MovePane(srcSessionID, srcWindowID string, srcPaneID int, dstSessionID, dstWindowID string) error {
