@@ -9,9 +9,10 @@
 // worker goroutine.
 //
 //	type Job struct {
-//	    Command  string         // sh -c "..." style
-//	    Timeout  time.Duration  // 0 = no timeout
-//	    OnDone   func(Result)
+//	    Name    string         // path or name of the program to run
+//	    Args    []string       // command-line arguments (not including program name)
+//	    Timeout time.Duration  // 0 = no timeout
+//	    OnDone  func(Result)
 //	}
 //
 //	type Result struct {
@@ -42,7 +43,8 @@
 //	defer r.Stop()
 //
 //	handle := r.Submit(job.Job{
-//	    Command: "echo hello",
+//	    Name: "echo",
+//	    Args: []string{"hello"},
 //	    OnDone: func(res job.Result) {
 //	        fmt.Printf("stdout: %s\n", res.Stdout)
 //	    },
