@@ -52,7 +52,7 @@
 //	    Rows, Cols  int         // output grid dimensions
 //	    Status      StatusLine  // nil disables the status line
 //	    StatusRows  int         // rows reserved for status (typically 0–1)
-//	    Theme       Theme       // border character and colours
+//	    Theme       Theme       // border line set and colours
 //	}
 //
 // # Composition order

@@ -244,6 +244,118 @@ func TestCompose_PaneClippedAtGridBoundary(t *testing.T) {
 	}
 }
 
+// TestCompose_BorderLineSet verifies that two panes side-by-side produce
+// border characters matching the configured pane-border-lines set.
+func TestCompose_BorderLineSet(t *testing.T) {
+	tests := []struct {
+		borderLines string
+		wantVert    rune
+		wantHoriz   rune
+	}{
+		{"single", '│', '─'},
+		{"double", '║', '═'},
+		{"heavy", '┃', '━'},
+		{"simple", '|', '-'},
+		{"padded", ' ', ' '},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.borderLines, func(t *testing.T) {
+			r := render.New(render.Config{
+				Rows: 4,
+				Cols: 9,
+				Theme: render.Theme{BorderLines: tc.borderLines},
+			})
+
+			// Left pane occupies cols 0-4 (col 4 is the vertical border).
+			left := &fakePane{
+				bounds: render.Rect{X: 0, Y: 0, Width: 5, Height: 4},
+				grid:   makeGrid(4, 5, 'L'),
+			}
+			// Right pane occupies cols 5-8.
+			right := &fakePane{
+				bounds: render.Rect{X: 5, Y: 0, Width: 4, Height: 4},
+				grid:   makeGrid(4, 4, 'R'),
+			}
+
+			grid := r.Compose([]render.PanePlacement{
+				{Pane: left, Rect: left.bounds},
+				{Pane: right, Rect: right.bounds},
+			}, nil)
+
+			// The vertical border at col 4 (right edge of left pane) should
+			// contain the Vertical character from the selected set for rows
+			// that are not also a horizontal border (i.e. not the bottom row).
+			for row := 0; row < 3; row++ {
+				if got := cellAt(grid, row, 4).Char; got != tc.wantVert {
+					t.Errorf("border cell(%d,4) = %q, want %q", row, got, tc.wantVert)
+				}
+			}
+		})
+	}
+}
+
+// TestCompose_BorderLineSet_TopBottom verifies that a top/bottom two-pane layout
+// produces horizontal border characters.
+func TestCompose_BorderLineSet_TopBottom(t *testing.T) {
+	r := render.New(render.Config{
+		Rows: 5,
+		Cols: 6,
+		Theme: render.Theme{BorderLines: "double"},
+	})
+
+	// Top pane occupies rows 0-2 (row 2 is the horizontal border).
+	top := &fakePane{
+		bounds: render.Rect{X: 0, Y: 0, Width: 6, Height: 3},
+		grid:   makeGrid(3, 6, 'T'),
+	}
+	// Bottom pane occupies rows 3-4.
+	bottom := &fakePane{
+		bounds: render.Rect{X: 0, Y: 3, Width: 6, Height: 2},
+		grid:   makeGrid(2, 6, 'B'),
+	}
+
+	grid := r.Compose([]render.PanePlacement{
+		{Pane: top, Rect: top.bounds},
+		{Pane: bottom, Rect: bottom.bounds},
+	}, nil)
+
+	// Row 2 (bottom of top pane) should be horizontal double-line border '═',
+	// except the last column which is the right edge of the top pane.
+	for col := 0; col < 5; col++ {
+		if got := cellAt(grid, 2, col).Char; got != '═' {
+			t.Errorf("border cell(2,%d) = %q, want '═'", col, got)
+		}
+	}
+}
+
+// TestCompose_BorderLineSet_NoBorderWhenEmpty verifies that no border is drawn
+// when BorderLines is empty (default).
+func TestCompose_BorderLineSet_NoBorderWhenEmpty(t *testing.T) {
+	r := render.New(render.Config{Rows: 4, Cols: 9})
+
+	left := &fakePane{
+		bounds: render.Rect{X: 0, Y: 0, Width: 5, Height: 4},
+		grid:   makeGrid(4, 5, 'L'),
+	}
+	right := &fakePane{
+		bounds: render.Rect{X: 5, Y: 0, Width: 4, Height: 4},
+		grid:   makeGrid(4, 4, 'R'),
+	}
+
+	grid := r.Compose([]render.PanePlacement{
+		{Pane: left, Rect: left.bounds},
+		{Pane: right, Rect: right.bounds},
+	}, nil)
+
+	// Without BorderLines, col 4 should still have the pane content 'L'.
+	for row := 0; row < 4; row++ {
+		if got := cellAt(grid, row, 4).Char; got != 'L' {
+			t.Errorf("cell(%d,4) = %q, want 'L' (no border)", row, got)
+		}
+	}
+}
+
 // TestCompose_NilStatusNoReservedRow verifies that when Status is nil,
 // all rows are available for panes.
 func TestCompose_NilStatusNoReservedRow(t *testing.T) {

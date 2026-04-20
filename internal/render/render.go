@@ -92,9 +92,9 @@ type PanePlacement struct {
 
 // Theme configures visual aspects of the composed frame.
 type Theme struct {
-	// BorderChar is the rune drawn for pane-border cells.
-	// Zero defaults to a space (no visible border).
-	BorderChar rune
+	// BorderLines is the pane-border-lines option value ("single", "double",
+	// "heavy", "simple", or "padded"). An empty string disables border drawing.
+	BorderLines string
 }
 
 // Config holds all dependencies for a [Renderer].
@@ -186,6 +186,11 @@ func (r *renderer) Compose(panes []PanePlacement, overlays []Overlay) CellGrid {
 		}
 	}
 
+	// Draw pane borders when BorderLines is configured.
+	if r.cfg.Theme.BorderLines != "" {
+		r.drawBorders(&grid, panes, paneRows, cols)
+	}
+
 	// Draw synchronize-panes border markers (*) at the right and bottom edges
 	// of each pane that has SynchronizedPanes set, using a yellow colour.
 	syncBorderCell := Cell{Char: '*', Fg: ColorIndexed | 3}
@@ -245,4 +250,84 @@ func (r *renderer) Compose(panes []PanePlacement, overlays []Overlay) CellGrid {
 	}
 
 	return grid
+}
+
+// drawBorders draws pane border characters into grid using the BorderSet
+// determined by r.cfg.Theme.BorderLines.
+//
+// For each pane placement, the rightmost column of its rect is treated as a
+// vertical border and the bottom row as a horizontal border. At intersections
+// the appropriate junction character (corner, T, or cross) is selected.
+func (r *renderer) drawBorders(grid *CellGrid, panes []PanePlacement, paneRows, cols int) {
+	type borderInfo struct {
+		isVert  bool
+		isHoriz bool
+	}
+
+	borderGrid := make([]borderInfo, paneRows*cols)
+
+	for _, pp := range panes {
+		rect := pp.Rect
+
+		// Right column → vertical border segment.
+		bc := rect.X + rect.Width - 1
+		if bc >= 0 && bc < cols {
+			for row := rect.Y; row < rect.Y+rect.Height && row < paneRows; row++ {
+				if row >= 0 {
+					borderGrid[row*cols+bc].isVert = true
+				}
+			}
+		}
+
+		// Bottom row → horizontal border segment.
+		br := rect.Y + rect.Height - 1
+		if br >= 0 && br < paneRows {
+			for col := rect.X; col < rect.X+rect.Width && col < cols; col++ {
+				if col >= 0 {
+					borderGrid[br*cols+col].isHoriz = true
+				}
+			}
+		}
+	}
+
+	isVert := func(row, col int) bool {
+		if row < 0 || row >= paneRows || col < 0 || col >= cols {
+			return false
+		}
+		return borderGrid[row*cols+col].isVert
+	}
+	isHoriz := func(row, col int) bool {
+		if row < 0 || row >= paneRows || col < 0 || col >= cols {
+			return false
+		}
+		return borderGrid[row*cols+col].isHoriz
+	}
+
+	bs := BorderSetForName(r.cfg.Theme.BorderLines)
+
+	for row := 0; row < paneRows; row++ {
+		for col := 0; col < cols; col++ {
+			b := borderGrid[row*cols+col]
+			if !b.isVert && !b.isHoriz {
+				continue
+			}
+
+			var ch rune
+			if b.isVert && b.isHoriz {
+				hasTop := isVert(row-1, col)
+				hasBottom := isVert(row+1, col)
+				hasLeft := isHoriz(row, col-1)
+				hasRight := isHoriz(row, col+1)
+				ch = bs.junctionChar(hasTop, hasBottom, hasLeft, hasRight)
+			} else if b.isVert {
+				ch = bs.Vertical
+			} else {
+				ch = bs.Horizontal
+			}
+
+			if ch != 0 {
+				grid.Cells[row*cols+col] = Cell{Char: ch}
+			}
+		}
+	}
 }
