@@ -35,6 +35,13 @@
 // input bytes: it has no side effects other than advancing the read
 // position and returning a Key value.
 //
+// Why a custom decoder? go-libghostty (github.com/mitchellh/go-libghostty)
+// provides only output-side APIs: [KeyEncoder] and [MouseEncoder] encode
+// events into escape sequences sent to a PTY, and [Terminal] parses PTY
+// output. It has no API for decoding raw bytes from stdin into key events.
+// The custom [Decoder] is therefore necessary and must be retained; it
+// cannot be replaced by go-libghostty without upstream changes.
+//
 // Supported input protocols:
 //
 //   - Printable Unicode characters and ASCII control codes
@@ -66,6 +73,15 @@
 // (see package session). Dispatch: look up the client's current
 // table, call [Table.Lookup] with the decoded key, enqueue the
 // resulting command. All dispatch logic lives outside this package.
+//
+// Nested and modal keybindings are fully supported. Each session.Client
+// has a KeyTable string field that points at the active Table in the
+// Registry. The built-in switch-table command changes that field,
+// enabling tmux-style prefix-key schemes (e.g. C-b in "root" switches
+// the client to "prefix"; a subsequent key is dispatched from "prefix"
+// and then the table resets). Any number of named tables may be
+// registered, making modal keybinding schemes straightforward to
+// configure.
 //
 // # In isolation
 //
