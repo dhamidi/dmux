@@ -164,6 +164,9 @@ type Mutator interface {
 	SplitWindow(sessionID, windowID string) (PaneView, error)
 	KillPane(paneID int) error
 	SelectPane(sessionID, windowID string, paneID int) error
+	ResizePane(paneID int, direction string, amount int) error
+	CapturePane(paneID int, history bool) (string, error)
+	RespawnPane(paneID int, shell string) error
 
 	// Key binding mutations.
 	BindKey(table, key, cmd string) error

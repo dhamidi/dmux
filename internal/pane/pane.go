@@ -1,6 +1,11 @@
 package pane
 
 import (
+	"bytes"
+	"fmt"
+	"os"
+	"sync"
+
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/pty"
@@ -106,13 +111,22 @@ type Pane interface {
 	// Snapshot returns an immutable snapshot of the visible terminal state.
 	Snapshot() CellGrid
 
+	// CaptureContent returns the visible terminal content as plain text.
+	// If history is true, scrollback content is included when available.
+	CaptureContent(history bool) ([]byte, error)
+
+	// Respawn kills the current child process and starts a fresh one using
+	// the given shell (falls back to $SHELL or /bin/sh if empty).
+	// Returns an error if no PTYFactory was configured.
+	Respawn(shell string) error
+
 	// Close shuts down the child process and releases all resources.
 	// It blocks until the output-copy goroutine has exited.
 	Close() error
 }
 
 // Config holds the parameters for creating a new Pane.
-// All fields are required.
+// All fields except PTYFactory are required.
 type Config struct {
 	// ID is the pane's unique identifier within its window.
 	ID PaneID
@@ -128,15 +142,24 @@ type Config struct {
 
 	// Mouse encodes mouse events for the child process.
 	Mouse MouseEncoder
+
+	// PTYFactory is called by Respawn to create a replacement PTY.
+	// The arguments are the shell command, current cols, and current rows.
+	// If nil, Respawn returns an error.
+	PTYFactory func(shell string, cols, rows int) (pty.PTY, error)
 }
 
 // pane is the concrete implementation of Pane.
 type pane struct {
 	id       PaneID
-	pty      pty.PTY
 	term     Terminal
 	keyEnc   KeyEncoder
 	mouseEnc MouseEncoder
+
+	mu         sync.Mutex
+	ptyField   pty.PTY
+	cols, rows int
+	ptyFactory func(shell string, cols, rows int) (pty.PTY, error)
 
 	// done is closed by copyOutput when it exits.
 	done chan struct{}
@@ -147,12 +170,13 @@ type pane struct {
 // the PTY in cfg must already be open.
 func New(cfg Config) (Pane, error) {
 	p := &pane{
-		id:       cfg.ID,
-		pty:      cfg.PTY,
-		term:     cfg.Term,
-		keyEnc:   cfg.Keys,
-		mouseEnc: cfg.Mouse,
-		done:     make(chan struct{}),
+		id:         cfg.ID,
+		ptyField:   cfg.PTY,
+		term:       cfg.Term,
+		keyEnc:     cfg.Keys,
+		mouseEnc:   cfg.Mouse,
+		ptyFactory: cfg.PTYFactory,
+		done:       make(chan struct{}),
 	}
 	go p.copyOutput()
 	return p, nil
@@ -164,7 +188,11 @@ func (p *pane) copyOutput() {
 	defer close(p.done)
 	buf := make([]byte, 4096)
 	for {
-		n, err := p.pty.Read(buf)
+		p.mu.Lock()
+		currentPTY := p.ptyField
+		p.mu.Unlock()
+
+		n, err := currentPTY.Read(buf)
 		if n > 0 {
 			p.term.Write(buf[:n]) //nolint:errcheck
 		}
@@ -182,7 +210,10 @@ func (p *pane) Title() string {
 }
 
 func (p *pane) Write(data []byte) error {
-	_, err := p.pty.Write(data)
+	p.mu.Lock()
+	currentPTY := p.ptyField
+	p.mu.Unlock()
+	_, err := currentPTY.Write(data)
 	return err
 }
 
@@ -191,7 +222,10 @@ func (p *pane) SendKey(key keys.Key) error {
 	if err != nil {
 		return err
 	}
-	_, err = p.pty.Write(data)
+	p.mu.Lock()
+	currentPTY := p.ptyField
+	p.mu.Unlock()
+	_, err = currentPTY.Write(data)
 	return err
 }
 
@@ -200,19 +234,92 @@ func (p *pane) SendMouse(ev keys.MouseEvent) error {
 	if err != nil {
 		return err
 	}
-	_, err = p.pty.Write(data)
+	p.mu.Lock()
+	currentPTY := p.ptyField
+	p.mu.Unlock()
+	_, err = currentPTY.Write(data)
 	return err
 }
 
 func (p *pane) Resize(cols, rows int) error {
-	if err := p.pty.Resize(rows, cols); err != nil {
+	p.mu.Lock()
+	currentPTY := p.ptyField
+	p.mu.Unlock()
+
+	if err := currentPTY.Resize(rows, cols); err != nil {
 		return err
 	}
-	return p.term.Resize(cols, rows)
+	if err := p.term.Resize(cols, rows); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	p.cols, p.rows = cols, rows
+	p.mu.Unlock()
+	return nil
 }
 
 func (p *pane) Snapshot() CellGrid {
 	return p.term.Snapshot()
+}
+
+// CaptureContent renders the visible terminal grid as plain text.
+// Each row is terminated by a newline. If history is true, the same
+// visible content is returned (full scrollback requires Terminal interface
+// extensions not yet implemented).
+func (p *pane) CaptureContent(_ bool) ([]byte, error) {
+	grid := p.term.Snapshot()
+	var buf bytes.Buffer
+	for row := 0; row < grid.Rows; row++ {
+		for col := 0; col < grid.Cols; col++ {
+			ch := grid.Cells[row*grid.Cols+col].Char
+			if ch == 0 {
+				ch = ' '
+			}
+			buf.WriteRune(ch)
+		}
+		buf.WriteByte('\n')
+	}
+	return buf.Bytes(), nil
+}
+
+// Respawn closes the current child process and starts a fresh one. The shell
+// argument names the executable to run; if empty, $SHELL is used, falling
+// back to /bin/sh. Returns an error if no PTYFactory was configured.
+func (p *pane) Respawn(shell string) error {
+	p.mu.Lock()
+	factory := p.ptyFactory
+	cols, rows := p.cols, p.rows
+	oldPTY := p.ptyField
+	p.mu.Unlock()
+
+	if factory == nil {
+		return fmt.Errorf("respawn: no PTY factory configured")
+	}
+
+	if shell == "" {
+		shell = os.Getenv("SHELL")
+		if shell == "" {
+			shell = "/bin/sh"
+		}
+	}
+
+	// Close the old PTY (signals EOF to copyOutput goroutine) and wait for it.
+	oldPTY.Close() //nolint:errcheck
+	<-p.done
+
+	// Start a replacement PTY.
+	newPTY, err := factory(shell, cols, rows)
+	if err != nil {
+		return fmt.Errorf("respawn: %w", err)
+	}
+
+	p.mu.Lock()
+	p.ptyField = newPTY
+	p.done = make(chan struct{})
+	p.mu.Unlock()
+
+	go p.copyOutput()
+	return nil
 }
 
 // Close shuts down the pane: it closes the encoders and terminal
@@ -222,7 +329,10 @@ func (p *pane) Close() error {
 	p.keyEnc.Close()
 	p.mouseEnc.Close()
 	p.term.Close()
-	err := p.pty.Close()
+	p.mu.Lock()
+	currentPTY := p.ptyField
+	p.mu.Unlock()
+	err := currentPTY.Close()
 	<-p.done
 	return err
 }

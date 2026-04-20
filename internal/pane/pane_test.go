@@ -196,6 +196,87 @@ func TestPane_Close_ReleasesEncoders(t *testing.T) {
 	}
 }
 
+func TestPane_CaptureContent_RendersGrid(t *testing.T) {
+	p, _, ft, _, _ := newTestPane(t, 1)
+	grid := pane.CellGrid{
+		Rows:  2,
+		Cols:  3,
+		Cells: make([]pane.Cell, 2*3),
+	}
+	// First row: "Hi "
+	grid.Cells[0] = pane.Cell{Char: 'H'}
+	grid.Cells[1] = pane.Cell{Char: 'i'}
+	// grid.Cells[2] is zero → space
+	// Second row: "ok "
+	grid.Cells[3] = pane.Cell{Char: 'o'}
+	grid.Cells[4] = pane.Cell{Char: 'k'}
+	ft.SetGrid(grid)
+
+	content, err := p.CaptureContent(false)
+	if err != nil {
+		t.Fatalf("CaptureContent: %v", err)
+	}
+	want := "Hi \nok \n"
+	if string(content) != want {
+		t.Fatalf("CaptureContent = %q, want %q", content, want)
+	}
+}
+
+func TestPane_CaptureContent_EmptyGrid(t *testing.T) {
+	p, _, _, _, _ := newTestPane(t, 1)
+	content, err := p.CaptureContent(false)
+	if err != nil {
+		t.Fatalf("CaptureContent: %v", err)
+	}
+	if len(content) != 0 {
+		t.Fatalf("CaptureContent on empty grid = %q, want empty", content)
+	}
+}
+
+func TestPane_Respawn_ClosesOldPTYAndOpensNew(t *testing.T) {
+	oldPTY := &pty.FakePTY{}
+	newPTY := &pty.FakePTY{}
+
+	ft := &pane.FakeTerminal{}
+	fk := &pane.FakeKeyEncoder{}
+	fm := &pane.FakeMouseEncoder{}
+
+	factory := func(shell string, cols, rows int) (pty.PTY, error) {
+		return newPTY, nil
+	}
+
+	p, err := pane.New(pane.Config{
+		ID:         1,
+		PTY:        oldPTY,
+		Term:       ft,
+		Keys:       fk,
+		Mouse:      fm,
+		PTYFactory: factory,
+	})
+	if err != nil {
+		t.Fatalf("pane.New: %v", err)
+	}
+	defer p.Close()
+
+	if err := p.Respawn("bash"); err != nil {
+		t.Fatalf("Respawn: %v", err)
+	}
+
+	// The old PTY should have been closed by Respawn.
+	// We verify by checking that the old FakePTY was closed.
+	// FakePTY.Close sets closed=true; subsequent Writes return ErrClosedPipe.
+	if _, err := oldPTY.Write([]byte("test")); err == nil {
+		t.Error("expected old PTY to be closed after Respawn, but Write succeeded")
+	}
+}
+
+func TestPane_Respawn_ErrorWithoutFactory(t *testing.T) {
+	p, _, _, _, _ := newTestPane(t, 1)
+	if err := p.Respawn(""); err == nil {
+		t.Error("expected error from Respawn with no PTYFactory, got nil")
+	}
+}
+
 func TestPane_Close_ReleasesTerminal(t *testing.T) {
 	fp := &pty.FakePTY{}
 	ft := &pane.FakeTerminal{}

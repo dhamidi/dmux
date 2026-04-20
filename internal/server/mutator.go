@@ -77,6 +77,18 @@ func (m *serverMutator) SelectPane(sessionID, windowID string, paneID int) error
 	return errStub("select-pane")
 }
 
+func (m *serverMutator) ResizePane(paneID int, direction string, amount int) error {
+	return errStub("resize-pane")
+}
+
+func (m *serverMutator) CapturePane(paneID int, history bool) (string, error) {
+	return "", errStub("capture-pane")
+}
+
+func (m *serverMutator) RespawnPane(paneID int, shell string) error {
+	return errStub("respawn-pane")
+}
+
 func (m *serverMutator) BindKey(table, key, cmd string) error {
 	return errStub("bind-key")
 }

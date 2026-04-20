@@ -55,6 +55,12 @@ type Pane interface {
 	Resize(cols, rows int) error
 	// Close shuts down the pane's child process and frees its resources.
 	Close() error
+	// CaptureContent returns the visible terminal content as plain text.
+	// If history is true, scrollback content is included when available.
+	CaptureContent(history bool) ([]byte, error)
+	// Respawn kills the current child process and starts a fresh one using
+	// the given shell (falls back to $SHELL or /bin/sh if empty).
+	Respawn(shell string) error
 }
 
 // Overlay is the interface that the session package requires of a client

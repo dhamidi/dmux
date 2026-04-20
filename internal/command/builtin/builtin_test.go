@@ -54,6 +54,22 @@ type testBackend struct {
 		name   string
 		paneID int
 	}
+
+	// Pane mutation recording.
+	resizedPanes []struct {
+		paneID    int
+		direction string
+		amount    int
+	}
+	capturedPanes []struct {
+		paneID  int
+		history bool
+	}
+	captureOutput string
+	respawnedPanes []struct {
+		paneID int
+		shell  string
+	}
 }
 
 // ─── command.Server (read) implementation ────────────────────────────────────
@@ -269,6 +285,31 @@ func (b *testBackend) ListBuffers() []command.BufferEntry {
 	return out
 }
 
+func (b *testBackend) ResizePane(paneID int, direction string, amount int) error {
+	b.resizedPanes = append(b.resizedPanes, struct {
+		paneID    int
+		direction string
+		amount    int
+	}{paneID, direction, amount})
+	return nil
+}
+
+func (b *testBackend) CapturePane(paneID int, history bool) (string, error) {
+	b.capturedPanes = append(b.capturedPanes, struct {
+		paneID  int
+		history bool
+	}{paneID, history})
+	return b.captureOutput, nil
+}
+
+func (b *testBackend) RespawnPane(paneID int, shell string) error {
+	b.respawnedPanes = append(b.respawnedPanes, struct {
+		paneID int
+		shell  string
+	}{paneID, shell})
+	return nil
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 func newBackend() *testBackend {
@@ -440,5 +481,82 @@ func TestKillPane_KillsTargetPane(t *testing.T) {
 	}
 	if len(b.killedPanes) != 1 || b.killedPanes[0] != 1 {
 		t.Errorf("KillPane(1) not called; got: %v", b.killedPanes)
+	}
+}
+
+func TestResizePane_ForwardsDirectionAndAmount(t *testing.T) {
+	b := newBackend()
+	res := dispatch("resize-pane", []string{"-R", "5"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if len(b.resizedPanes) != 1 {
+		t.Fatalf("expected 1 resize call, got %d", len(b.resizedPanes))
+	}
+	got := b.resizedPanes[0]
+	if got.paneID != 1 {
+		t.Errorf("ResizePane paneID = %d, want 1", got.paneID)
+	}
+	if got.direction != "R" {
+		t.Errorf("ResizePane direction = %q, want %q", got.direction, "R")
+	}
+	if got.amount != 5 {
+		t.Errorf("ResizePane amount = %d, want 5", got.amount)
+	}
+}
+
+func TestResizePane_DefaultAmount(t *testing.T) {
+	b := newBackend()
+	res := dispatch("resize-pane", []string{"-D"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if len(b.resizedPanes) != 1 || b.resizedPanes[0].amount != 1 {
+		t.Errorf("expected default amount 1, got: %v", b.resizedPanes)
+	}
+}
+
+func TestCapturePane_PrintsToOutput(t *testing.T) {
+	b := newBackend()
+	b.captureOutput = "hello world\n"
+	res := dispatch("capture-pane", []string{"-p"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if res.Output != "hello world\n" {
+		t.Errorf("capture-pane -p output = %q, want %q", res.Output, "hello world\n")
+	}
+	if len(b.capturedPanes) != 1 || b.capturedPanes[0].paneID != 1 {
+		t.Errorf("CapturePane not called with paneID=1: %v", b.capturedPanes)
+	}
+}
+
+func TestCapturePane_StoresInBuffer(t *testing.T) {
+	b := newBackend()
+	b.captureOutput = "content"
+	res := dispatch("capture-pane", []string{"-b", "mybuf"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if b.buffers["mybuf"] != "content" {
+		t.Errorf("buffer 'mybuf' = %q, want %q", b.buffers["mybuf"], "content")
+	}
+}
+
+func TestRespawnPane_ForwardsPaneIDAndShell(t *testing.T) {
+	b := newBackend()
+	res := dispatch("respawn-pane", []string{"-e", "/bin/bash"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if len(b.respawnedPanes) != 1 {
+		t.Fatalf("expected 1 respawn call, got %d", len(b.respawnedPanes))
+	}
+	got := b.respawnedPanes[0]
+	if got.paneID != 1 {
+		t.Errorf("RespawnPane paneID = %d, want 1", got.paneID)
+	}
+	if got.shell != "/bin/bash" {
+		t.Errorf("RespawnPane shell = %q, want %q", got.shell, "/bin/bash")
 	}
 }

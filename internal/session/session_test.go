@@ -15,9 +15,11 @@ type mockPane struct {
 	rows  int
 }
 
-func (p *mockPane) Title() string           { return p.title }
-func (p *mockPane) Resize(c, r int) error  { p.cols = c; p.rows = r; return nil }
-func (p *mockPane) Close() error            { return nil }
+func (p *mockPane) Title() string                              { return p.title }
+func (p *mockPane) Resize(c, r int) error                     { p.cols = c; p.rows = r; return nil }
+func (p *mockPane) Close() error                               { return nil }
+func (p *mockPane) CaptureContent(_ bool) ([]byte, error)     { return nil, nil }
+func (p *mockPane) Respawn(_ string) error                     { return nil }
 
 // mockOverlay satisfies session.Overlay.
 type mockOverlay struct{ name string }
