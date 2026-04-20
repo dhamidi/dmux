@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -936,4 +937,282 @@ func TestSynchronizePanes(t *testing.T) {
 			t.Errorf("non-active pane: want no input with synchronize-panes off, got %q", other.Written())
 		}
 	})
+}
+
+// buildMouseTestState creates a server state with mouse=on (session level),
+// one session, and one window with two capturing panes laid out side by side.
+// Pane 1 occupies cols 0-39, pane 2 occupies cols 40-79 (both full height).
+func buildMouseTestState(t *testing.T, mouseOn bool) (
+	state *session.Server,
+	pane1 *testCapturingPane,
+	pane2 *testCapturingPane,
+	sess *session.Session,
+	win *session.Window,
+) {
+	t.Helper()
+	state = session.NewServer()
+	state.Options.Register("mouse", options.Bool, false)
+
+	sess = session.NewSession(session.SessionID("$1"), "mouse-sess", state.Options)
+	if mouseOn {
+		if err := sess.Options.Set("mouse", true); err != nil {
+			t.Fatalf("set mouse option: %v", err)
+		}
+	}
+
+	paneID1 := session.PaneID(1)
+	paneID2 := session.PaneID(2)
+	pane1 = &testCapturingPane{}
+	pane2 = &testCapturingPane{}
+
+	win = session.NewWindow(session.WindowID("@1"), "main", sess.Options)
+	win.AddPane(paneID1, pane1) // paneID1 becomes Active
+	win.AddPane(paneID2, pane2)
+
+	// 80x24 layout split horizontally: pane1 left (0-39), pane2 right (40-79).
+	win.Layout = layout.New(80, 24, paneID1)
+	win.Layout.Split(paneID1, layout.Horizontal)
+
+	sess.AddWindow(win)
+	state.AddSession(sess)
+	return state, pane1, pane2, sess, win
+}
+
+// encodeSGRMouse returns the raw SGR mouse escape sequence for a press event
+// at the given 0-based column and row with the specified button code.
+// button 0 = left, 64 = wheel-up, 65 = wheel-down.
+func encodeSGRMouse(button, col, row int) []byte {
+	// SGR format: ESC [ < btn ; col+1 ; row+1 M  (1-based coords)
+	return []byte(fmt.Sprintf("\x1b[<%d;%d;%dM", button, col+1, row+1))
+}
+
+// TestMouseClickToFocus verifies that a left-click inside a non-active pane's
+// rectangle (with mouse=on) changes the active pane to that pane.
+func TestMouseClickToFocus(t *testing.T) {
+	state, _, _, _, win := buildMouseTestState(t, true)
+
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+	dirtyIDs := make(chan session.ClientID, 16)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		State:    state,
+		OnDirty: func(id session.ClientID) {
+			select {
+			case dirtyIDs <- id:
+			default:
+			}
+		},
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+	sendHandshake(t, clientConn)
+	time.Sleep(20 * time.Millisecond)
+
+	// Drain server output so renderLoop never blocks.
+	go func() {
+		for {
+			if _, _, err := proto.ReadMsg(clientConn); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Attach client to the pre-configured session.
+	cm := proto.CommandMsg{Argv: []string{"attach-session", "-t", "mouse-sess"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write attach-session: %v", err)
+	}
+	select {
+	case <-dirtyIDs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnDirty not called after attach-session")
+	}
+
+	// Pane 1 is active (left half, cols 0-39). Click at col=50, row=10
+	// which is inside pane 2 (right half, cols 40-79).
+	clickBytes := encodeSGRMouse(0, 50, 10)
+	stdinMsg := proto.StdinMsg{Data: clickBytes}
+	if err := proto.WriteMsg(clientConn, proto.MsgStdin, stdinMsg.Encode()); err != nil {
+		t.Fatalf("write MsgStdin (click): %v", err)
+	}
+
+	// Wait for the dirty event that marks MsgStdin processing complete.
+	select {
+	case <-dirtyIDs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnDirty not called after mouse click")
+	}
+
+	// Verify the active pane changed to pane 2.
+	if win.Active != session.PaneID(2) {
+		t.Errorf("expected active pane 2, got %v", win.Active)
+	}
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}
+
+// TestMouseOffPassthrough verifies that when mouse=off, mouse events are
+// forwarded as raw bytes to the active pane without routing.
+func TestMouseOffPassthrough(t *testing.T) {
+	state, activePaneCapture, _, _, _ := buildMouseTestState(t, false)
+
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+	dirtyIDs := make(chan session.ClientID, 16)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		State:    state,
+		OnDirty: func(id session.ClientID) {
+			select {
+			case dirtyIDs <- id:
+			default:
+			}
+		},
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+	sendHandshake(t, clientConn)
+	time.Sleep(20 * time.Millisecond)
+
+	go func() {
+		for {
+			if _, _, err := proto.ReadMsg(clientConn); err != nil {
+				return
+			}
+		}
+	}()
+
+	cm := proto.CommandMsg{Argv: []string{"attach-session", "-t", "mouse-sess"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write attach-session: %v", err)
+	}
+	select {
+	case <-dirtyIDs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnDirty not called after attach-session")
+	}
+
+	// Send a mouse click event.
+	clickBytes := encodeSGRMouse(0, 50, 10)
+	stdinMsg := proto.StdinMsg{Data: clickBytes}
+	if err := proto.WriteMsg(clientConn, proto.MsgStdin, stdinMsg.Encode()); err != nil {
+		t.Fatalf("write MsgStdin (mouse): %v", err)
+	}
+
+	select {
+	case <-dirtyIDs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnDirty not called after MsgStdin")
+	}
+
+	// The raw bytes must have been forwarded to the active pane.
+	written := activePaneCapture.Written()
+	if !bytes.Equal(written, clickBytes) {
+		t.Errorf("expected raw bytes %q forwarded to active pane, got %q", clickBytes, written)
+	}
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}
+
+// TestMouseWheelScroll verifies that wheel-up events (mouse=on) are written
+// as raw bytes to the active pane.
+func TestMouseWheelScroll(t *testing.T) {
+	state, activePaneCapture, _, _, _ := buildMouseTestState(t, true)
+
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+	dirtyIDs := make(chan session.ClientID, 16)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		State:    state,
+		OnDirty: func(id session.ClientID) {
+			select {
+			case dirtyIDs <- id:
+			default:
+			}
+		},
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+	sendHandshake(t, clientConn)
+	time.Sleep(20 * time.Millisecond)
+
+	go func() {
+		for {
+			if _, _, err := proto.ReadMsg(clientConn); err != nil {
+				return
+			}
+		}
+	}()
+
+	cm := proto.CommandMsg{Argv: []string{"attach-session", "-t", "mouse-sess"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write attach-session: %v", err)
+	}
+	select {
+	case <-dirtyIDs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnDirty not called after attach-session")
+	}
+
+	// Wheel-up: SGR button 64.
+	wheelBytes := encodeSGRMouse(64, 10, 5)
+	stdinMsg := proto.StdinMsg{Data: wheelBytes}
+	if err := proto.WriteMsg(clientConn, proto.MsgStdin, stdinMsg.Encode()); err != nil {
+		t.Fatalf("write MsgStdin (wheel): %v", err)
+	}
+
+	select {
+	case <-dirtyIDs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnDirty not called after MsgStdin")
+	}
+
+	// The raw wheel bytes must have been written to the active pane.
+	written := activePaneCapture.Written()
+	if !bytes.Equal(written, wheelBytes) {
+		t.Errorf("expected wheel bytes %q written to active pane, got %q", wheelBytes, written)
+	}
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
 }

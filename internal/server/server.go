@@ -14,6 +14,7 @@ import (
 	"github.com/dhamidi/dmux/internal/command"
 	_ "github.com/dhamidi/dmux/internal/command/builtin"
 	"github.com/dhamidi/dmux/internal/keys"
+	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/osinfo"
 	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
@@ -106,10 +107,11 @@ type srv struct {
 
 // clientConn is the server-side view of one connected client.
 type clientConn struct {
-	id      session.ClientID
-	netConn net.Conn
-	client  *session.Client
-	dirty   chan struct{} // buffered(1); written to when a redraw is needed
+	id         session.ClientID
+	netConn    net.Conn
+	client     *session.Client
+	dirty      chan struct{}      // buffered(1); written to when a redraw is needed
+	dragBorder *layout.BorderID  // non-nil while a border drag is in progress
 }
 
 // Run starts the dmux server and blocks until shutdown.
@@ -312,7 +314,20 @@ func (s *srv) serveConn(nc net.Conn) {
 		}
 	}
 
+	// Send SGR mouse enable sequences if the session has mouse turned on.
+	s.mu.Lock()
+	if cc.client.Session != nil {
+		if mouseOn, _ := cc.client.Session.Options.GetBool("mouse"); mouseOn {
+			out := proto.StdoutMsg{Data: []byte("\x1b[?1006h\x1b[?1000h")}
+			_ = proto.WriteMsg(cc.netConn, proto.MsgStdout, out.Encode())
+		}
+	}
+	s.mu.Unlock()
+
 	defer func() {
+		// Send SGR mouse disable sequences before detaching.
+		out := proto.StdoutMsg{Data: []byte("\x1b[?1000l\x1b[?1006l")}
+		_ = proto.WriteMsg(cc.netConn, proto.MsgStdout, out.Encode())
 		s.mu.Lock()
 		delete(s.conns, client.ID)
 		delete(s.decoders, client.ID)
@@ -473,6 +488,11 @@ func (s *srv) clientLoop(cc *clientConn) {
 				k, err := cd.dec.Next()
 				if err != nil {
 					break // io.EOF or decode error: no more keys in this payload
+				}
+
+				if k.Code == keys.CodeMouse {
+					s.handleMouseEvent(cc, k.Mouse)
+					continue
 				}
 
 				s.mu.Lock()
@@ -669,5 +689,90 @@ func (s *srv) renderLoop(cc *clientConn) {
 
 		msg := proto.StdoutMsg{Data: ansiBytes}
 		_ = proto.WriteMsg(cc.netConn, proto.MsgStdout, msg.Encode())
+	}
+}
+
+// mouseEventRaw reconstructs an SGR mouse escape sequence from a MouseEvent.
+// This is used to forward mouse events to panes as raw bytes.
+func mouseEventRaw(m keys.MouseEvent) []byte {
+	var bits int
+	switch m.Button {
+	case keys.MouseLeft:
+		bits = 0
+	case keys.MouseMiddle:
+		bits = 1
+	case keys.MouseRight:
+		bits = 2
+	case keys.MouseWheelUp:
+		bits = 64
+	case keys.MouseWheelDown:
+		bits = 65
+	default:
+		bits = 3
+	}
+	if m.Action == keys.MouseMotion {
+		bits |= 32
+	}
+	final := 'M'
+	if m.Action == keys.MouseRelease {
+		final = 'm'
+	}
+	return []byte(fmt.Sprintf("\x1b[<%d;%d;%d%c", bits, m.Col+1, m.Row+1, final))
+}
+
+// handleMouseEvent routes a decoded mouse event to the appropriate handler
+// based on the session's mouse option and the event type.
+func (s *srv) handleMouseEvent(cc *clientConn, m keys.MouseEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess := cc.client.Session
+	if sess == nil {
+		return
+	}
+
+	// Guard: when the mouse option is off, forward raw bytes to the active pane.
+	mouseOn, _ := sess.Options.GetBool("mouse")
+	if !mouseOn {
+		if sess.Current != nil {
+			win := sess.Current.Window
+			if win != nil {
+				if p, ok := win.Panes[win.Active]; ok {
+					_ = p.Write(mouseEventRaw(m))
+				}
+			}
+		}
+		return
+	}
+
+	if sess.Current == nil {
+		return
+	}
+	win := sess.Current.Window
+	if win == nil {
+		return
+	}
+
+	switch {
+	case m.Button == keys.MouseLeft && m.Action == keys.MousePress:
+		// Click to focus: find the pane under the cursor and select it.
+		paneID, ok := layout.PaneAt(win.Layout, m.Col, m.Row)
+		if ok && paneID != win.Active {
+			_ = s.mutator.SelectPane(string(sess.ID), string(win.ID), int(paneID))
+		}
+
+	case m.Button == keys.MouseLeft && m.Action == keys.MouseMotion:
+		// Border drag: detect a border and record it; attempt resize.
+		borderID, ok := layout.BorderAt(win.Layout, m.Col, m.Row)
+		if ok {
+			cc.dragBorder = borderID
+			_ = s.mutator.ResizePane(int(borderID.PaneID), "R", 1)
+		}
+
+	case m.Button == keys.MouseWheelUp || m.Button == keys.MouseWheelDown:
+		// Wheel scroll: forward raw bytes to the active pane.
+		if p, ok := win.Panes[win.Active]; ok {
+			_ = p.Write(mouseEventRaw(m))
+		}
 	}
 }

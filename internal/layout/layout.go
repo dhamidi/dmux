@@ -37,6 +37,47 @@ type Rect struct {
 	X, Y, Width, Height int
 }
 
+// BorderID identifies the shared border between two adjacent panes. PaneID is
+// one of the panes; Edge is that pane's edge along which the border lies.
+type BorderID struct {
+	PaneID LeafID
+	Edge   Edge
+}
+
+// PaneAt returns the LeafID of the pane whose rectangle contains the point
+// (col, row). Returns (0, false) if no pane covers that point.
+func PaneAt(t *Tree, col, row int) (LeafID, bool) {
+	for id := range t.Leaves() {
+		r := t.Rect(id)
+		if r.Width == 0 || r.Height == 0 {
+			continue
+		}
+		if col >= r.X && col < r.X+r.Width && row >= r.Y && row < r.Y+r.Height {
+			return id, true
+		}
+	}
+	return 0, false
+}
+
+// BorderAt returns the BorderID of the border (pane edge) that passes through
+// (col, row). A border is the 1-cell gap at the right or bottom edge of a
+// pane that is shared with an adjacent pane.
+func BorderAt(t *Tree, col, row int) (*BorderID, bool) {
+	for id := range t.Leaves() {
+		r := t.Rect(id)
+		if r.Width == 0 || r.Height == 0 {
+			continue
+		}
+		if col == r.X+r.Width && row >= r.Y && row < r.Y+r.Height {
+			return &BorderID{PaneID: id, Edge: EdgeRight}, true
+		}
+		if row == r.Y+r.Height && col >= r.X && col < r.X+r.Width {
+			return &BorderID{PaneID: id, Edge: EdgeBottom}, true
+		}
+	}
+	return nil, false
+}
+
 // Preset names a common layout arrangement.
 type Preset int
 

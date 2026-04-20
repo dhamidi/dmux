@@ -20,6 +20,7 @@
 //	type Edge      int                 // EdgeTop, EdgeBottom, EdgeLeft, EdgeRight
 //	type Rect      struct{ X, Y, Width, Height int }
 //	type Preset    int                 // PresetEvenHorizontal, PresetEvenVertical, …
+//	type BorderID  struct{ PaneID LeafID; Edge Edge }
 //
 // # Public surface
 //
@@ -35,6 +36,8 @@
 //	Unmarshal(s string) (*Tree, error)
 //	(*Tree).Zoom(leaf LeafID)               // temporarily maximize
 //	(*Tree).Unzoom()
+//	PaneAt(t *Tree, col, row int) (LeafID, bool)
+//	BorderAt(t *Tree, col, row int) (*BorderID, bool)
 //
 // The Marshal format matches tmux's "e6d4,80x24,0,0{...}" so existing
 // layout strings work and external tools can read them.

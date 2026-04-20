@@ -22,6 +22,12 @@ server on first use and attaches as a client. Run `dmux <command> [args]` to
 issue a specific command (e.g. `dmux new-session`). The binary contains both
 roles; `dmux start-server` runs in server mode explicitly.
 
+Mouse support is implemented and gated on the `mouse` session option. When
+`mouse` is `on`, the server handles SGR mouse events: left-click focuses the
+pane under the cursor, drag on a border resizes panes, and scroll-wheel events
+are forwarded to the active pane. When `mouse` is `off` (the default), all
+mouse escape sequences are forwarded to the active pane unchanged.
+
 ## Usage
 
 ```
