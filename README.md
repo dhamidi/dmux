@@ -35,8 +35,8 @@ Each package has a `doc.go` describing its boundary, public surface, and what
 - `github.com/mitchellh/go-libghostty` — Go bindings to libghostty-vt.
   Provides the terminal emulator that backs every pane. Links libghostty-vt
   statically via cgo; the resulting binary has no runtime deps beyond libc.
-- `golang.org/x/sys` — Windows syscalls (ConPTY, `CreatePseudoConsole`,
-  `SetConsoleMode`) that aren't in stdlib. Unix builds don't pull this in.
+- `golang.org/x/sys` — Platform syscalls: `TIOCGWINSZ`/termios on Unix,
+  ConPTY/`SetConsoleMode`/`GetConsoleScreenBufferInfo` on Windows.
 
 No other third-party dependencies.
 
