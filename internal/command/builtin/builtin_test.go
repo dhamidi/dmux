@@ -95,6 +95,12 @@ type testBackend struct {
 		srcPaneID                 int
 		dstSessionID, dstWindowID string
 	}
+
+	// Environment recording.
+	environ         map[string]map[string]string // scope -> name -> value
+	serverMessages  []string
+	lockServerCalled bool
+	signaledChannels []string
 }
 
 // ─── command.Server (read) implementation ────────────────────────────────────
@@ -378,6 +384,50 @@ func (b *testBackend) JoinPane(srcSessionID, srcWindowID string, srcPaneID int, 
 		dstSessionID, dstWindowID string
 	}{srcSessionID, srcWindowID, srcPaneID, dstSessionID, dstWindowID})
 	return nil
+}
+
+func (b *testBackend) SetEnvironment(scope, name, value string, remove bool) error {
+	if b.environ == nil {
+		b.environ = make(map[string]map[string]string)
+	}
+	if b.environ[scope] == nil {
+		b.environ[scope] = make(map[string]string)
+	}
+	if remove {
+		delete(b.environ[scope], name)
+	} else {
+		b.environ[scope][name] = value
+	}
+	return nil
+}
+
+func (b *testBackend) ListEnvironment(scope string) []command.EnvironEntry {
+	if b.environ == nil || b.environ[scope] == nil {
+		return nil
+	}
+	var out []command.EnvironEntry
+	for k, v := range b.environ[scope] {
+		out = append(out, command.EnvironEntry{Name: k, Value: v})
+	}
+	return out
+}
+
+func (b *testBackend) ShowMessages() []string {
+	return b.serverMessages
+}
+
+func (b *testBackend) LockServer() error {
+	b.lockServerCalled = true
+	return nil
+}
+
+func (b *testBackend) WaitFor(channel string) error {
+	// In tests, WaitFor returns immediately (no blocking).
+	return nil
+}
+
+func (b *testBackend) SignalChannel(channel string) {
+	b.signaledChannels = append(b.signaledChannels, channel)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -758,5 +808,124 @@ func TestJoinPane_MovesPaneBetweenWindows(t *testing.T) {
 	}
 	if got.dstWindowID != "w2" {
 		t.Errorf("JoinPane dstWindowID = %q, want %q", got.dstWindowID, "w2")
+	}
+}
+
+// ─── Environment and server management tests ──────────────────────────────────
+
+func TestSetEnvironment_StoresValue(t *testing.T) {
+	b := newBackend()
+	res := dispatch("set-environment", []string{"FOO", "bar"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	// Default scope is the current session ID "s1".
+	if b.environ["s1"]["FOO"] != "bar" {
+		t.Errorf("environ[s1][FOO] = %q, want %q", b.environ["s1"]["FOO"], "bar")
+	}
+}
+
+func TestSetEnvironment_GlobalScope(t *testing.T) {
+	b := newBackend()
+	res := dispatch("set-environment", []string{"-g", "GLOBAL", "value"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if b.environ["global"]["GLOBAL"] != "value" {
+		t.Errorf("environ[global][GLOBAL] = %q, want %q", b.environ["global"]["GLOBAL"], "value")
+	}
+}
+
+func TestSetEnvironment_RemovesVariable(t *testing.T) {
+	b := newBackend()
+	// Pre-populate.
+	if err := b.SetEnvironment("s1", "FOO", "bar", false); err != nil {
+		t.Fatal(err)
+	}
+	res := dispatch("set-environment", []string{"-r", "FOO"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if _, ok := b.environ["s1"]["FOO"]; ok {
+		t.Error("FOO was not removed from environ")
+	}
+}
+
+func TestShowEnvironment_FormatsOutput(t *testing.T) {
+	b := newBackend()
+	if err := b.SetEnvironment("s1", "FOO", "bar", false); err != nil {
+		t.Fatal(err)
+	}
+	res := dispatch("show-environment", nil, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if !strings.Contains(res.Output, "FOO=bar") {
+		t.Errorf("show-environment output %q does not contain 'FOO=bar'", res.Output)
+	}
+}
+
+func TestShowEnvironment_FiltersByName(t *testing.T) {
+	b := newBackend()
+	if err := b.SetEnvironment("s1", "FOO", "bar", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetEnvironment("s1", "BAZ", "qux", false); err != nil {
+		t.Fatal(err)
+	}
+	res := dispatch("show-environment", []string{"FOO"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if !strings.Contains(res.Output, "FOO=bar") {
+		t.Errorf("output %q missing 'FOO=bar'", res.Output)
+	}
+	if strings.Contains(res.Output, "BAZ") {
+		t.Errorf("output %q should not contain 'BAZ'", res.Output)
+	}
+}
+
+func TestShowMessages_ReturnsMessages(t *testing.T) {
+	b := newBackend()
+	b.serverMessages = []string{"hello", "world"}
+	res := dispatch("show-messages", nil, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if !strings.Contains(res.Output, "hello") {
+		t.Errorf("show-messages output %q does not contain 'hello'", res.Output)
+	}
+	if !strings.Contains(res.Output, "world") {
+		t.Errorf("show-messages output %q does not contain 'world'", res.Output)
+	}
+}
+
+func TestWaitFor_Signal_SignalsChannel(t *testing.T) {
+	b := newBackend()
+	res := dispatch("wait-for", []string{"-S", "mychan"}, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if len(b.signaledChannels) != 1 || b.signaledChannels[0] != "mychan" {
+		t.Errorf("SignalChannel not called with 'mychan': %v", b.signaledChannels)
+	}
+}
+
+func TestLockServer_CallsMutator(t *testing.T) {
+	b := newBackend()
+	res := dispatch("lock-server", nil, b)
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if !b.lockServerCalled {
+		t.Error("LockServer() was not called")
+	}
+}
+
+func TestStartServer_ReturnsOK(t *testing.T) {
+	b := newBackend()
+	res := dispatch("start-server", nil, b)
+	if res.Err != nil {
+		t.Fatalf("start-server returned error: %v", res.Err)
 	}
 }

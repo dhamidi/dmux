@@ -20,6 +20,9 @@ type Server struct {
 	Env       Environ
 	Hooks     *HookTable
 	KeyTables *keys.Registry
+	Channels  *ChannelTable
+	// Messages holds recent server log lines for show-messages.
+	Messages []string
 }
 
 // NewServer constructs an empty, ready-to-use Server.
@@ -32,6 +35,7 @@ func NewServer() *Server {
 		Env:       make(Environ),
 		Hooks:     &HookTable{},
 		KeyTables: keys.NewRegistry(),
+		Channels:  &ChannelTable{},
 	}
 }
 

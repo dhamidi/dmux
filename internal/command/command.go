@@ -140,6 +140,16 @@ type BufferEntry struct {
 	Size int
 }
 
+// EnvironEntry is a name-value pair from ListEnvironment.
+type EnvironEntry struct {
+	// Name is the environment variable name.
+	Name string
+	// Value is the environment variable value.
+	Value string
+	// Removed is true if the variable was unset (-r flag).
+	Removed bool
+}
+
 // Mutator is the write interface that command handlers use to modify server
 // state. It is a separate interface from Server so that command tests can
 // stub only the write-side methods they exercise.
@@ -203,6 +213,16 @@ type Mutator interface {
 	SwapPane(sessionID, windowID string, paneA, paneB int) error
 	BreakPane(sessionID, windowID string, paneID int) (WindowView, error)
 	JoinPane(srcSessionID, srcWindowID string, srcPaneID int, dstSessionID, dstWindowID string) error
+
+	// Environment mutations.
+	SetEnvironment(scope, name, value string, remove bool) error
+	ListEnvironment(scope string) []EnvironEntry
+
+	// Server management.
+	ShowMessages() []string
+	LockServer() error
+	WaitFor(channel string) error
+	SignalChannel(channel string)
 }
 
 // ─── Argument types ───────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/dhamidi/dmux/internal/command"
@@ -575,4 +576,71 @@ func (m *serverMutator) BreakPane(sessionID, windowID string, paneID int) (comma
 
 func (m *serverMutator) JoinPane(srcSessionID, srcWindowID string, srcPaneID int, dstSessionID, dstWindowID string) error {
 	return errStub("join-pane")
+}
+
+// ─── Environment mutations ────────────────────────────────────────────────────
+
+// resolveEnviron maps a scope string to the appropriate session.Environ.
+// Scope "global" or "server" maps to the server's global Env. Any other
+// string is interpreted as a session ID.
+func (m *serverMutator) resolveEnviron(scope string) (session.Environ, error) {
+	switch scope {
+	case "global", "server":
+		return m.state.Env, nil
+	default:
+		sess, ok := m.state.Sessions[session.SessionID(scope)]
+		if !ok {
+			return nil, fmt.Errorf("session %q not found", scope)
+		}
+		return sess.Env, nil
+	}
+}
+
+func (m *serverMutator) SetEnvironment(scope, name, value string, remove bool) error {
+	env, err := m.resolveEnviron(scope)
+	if err != nil {
+		return fmt.Errorf("set-environment: %w", err)
+	}
+	if remove {
+		env.Remove(name)
+	} else {
+		env.Set(name, value)
+	}
+	return nil
+}
+
+func (m *serverMutator) ListEnvironment(scope string) []command.EnvironEntry {
+	env, err := m.resolveEnviron(scope)
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(env))
+	for k := range env {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	out := make([]command.EnvironEntry, len(names))
+	for i, k := range names {
+		out[i] = command.EnvironEntry{Name: k, Value: env[k]}
+	}
+	return out
+}
+
+// ─── Server management ───────────────────────────────────────────────────────
+
+func (m *serverMutator) ShowMessages() []string {
+	return m.state.Messages
+}
+
+func (m *serverMutator) LockServer() error {
+	// No real screen-lock mechanism in this implementation.
+	return nil
+}
+
+func (m *serverMutator) WaitFor(channel string) error {
+	return m.state.Channels.Wait(channel)
+}
+
+func (m *serverMutator) SignalChannel(channel string) {
+	m.state.Channels.Signal(channel)
 }
