@@ -152,6 +152,8 @@ func Run(cfg Config) error {
 	)
 	s.queue = command.NewQueue()
 
+	loadDefaultOptions(s)
+
 	if err := loadDefaultBindings(s.mutator); err != nil {
 		return fmt.Errorf("load default bindings: %w", err)
 	}
