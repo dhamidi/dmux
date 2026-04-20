@@ -761,6 +761,9 @@ func (s *srv) renderLoop(cc *clientConn) {
 		}
 
 		syncPanes, _ := win.Options.GetBool("synchronize-panes")
+		borderLines, _ := win.Options.GetString("pane-border-lines")
+		borderStatus, _ := win.Options.GetString("pane-border-status")
+		borderFormat, _ := win.Options.GetString("pane-border-format")
 		placements := make([]render.PanePlacement, 0, len(win.Panes))
 		for id, p := range win.Panes {
 			rect := win.Layout.Rect(id)
@@ -771,11 +774,20 @@ func (s *srv) renderLoop(cc *clientConn) {
 				Pane:              &renderPaneAdapter{p: p, rect: rect},
 				Rect:              rect,
 				SynchronizedPanes: syncPanes,
+				PaneIndex:         int(id),
 			})
 		}
 		s.mu.Unlock()
 
-		r := render.New(render.Config{Rows: rows, Cols: cols})
+		r := render.New(render.Config{
+			Rows: rows,
+			Cols: cols,
+			Theme: render.Theme{
+				BorderLines:      borderLines,
+				PaneBorderStatus: borderStatus,
+				PaneBorderFormat: borderFormat,
+			},
+		})
 		grid := r.Compose(placements, nil)
 		ansiBytes := render.EncodeANSI(grid)
 

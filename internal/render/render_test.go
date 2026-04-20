@@ -356,6 +356,166 @@ func TestCompose_BorderLineSet_NoBorderWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestCompose_PaneBorderStatus_Top verifies that pane-border-status "top"
+// places the default format label (#{pane_index}) on the horizontal border
+// immediately above each pane, centered within the pane width.
+func TestCompose_PaneBorderStatus_Top(t *testing.T) {
+	r := render.New(render.Config{
+		Rows: 6,
+		Cols: 8,
+		Theme: render.Theme{
+			BorderLines:      "single",
+			PaneBorderStatus: "top",
+		},
+	})
+
+	// Top pane: rows 0-2 (row 2 is the horizontal border).
+	top := &fakePane{
+		bounds: render.Rect{X: 0, Y: 0, Width: 8, Height: 3},
+		grid:   makeGrid(3, 8, 'T'),
+	}
+	// Bottom pane: rows 3-5 (row 5 is the horizontal border).
+	bottom := &fakePane{
+		bounds: render.Rect{X: 0, Y: 3, Width: 8, Height: 3},
+		grid:   makeGrid(3, 8, 'B'),
+	}
+
+	grid := r.Compose([]render.PanePlacement{
+		{Pane: top, Rect: top.bounds, PaneIndex: 0},
+		{Pane: bottom, Rect: bottom.bounds, PaneIndex: 1},
+	}, nil)
+
+	// "top" of the bottom pane (PaneIndex 1) is the border above it: row 2.
+	// maxWidth = 8-2 = 6, label "1" len=1, leftPad = (6-1)/2 = 2
+	// label char at col startCol+leftPad = 1+2 = 3
+	if got := cellAt(grid, 2, 3).Char; got != '1' {
+		t.Errorf("border label cell(2,3) = %q, want '1'", got)
+	}
+	// Columns to the left of the label should be horizontal border characters.
+	for col := 1; col < 3; col++ {
+		if got := cellAt(grid, 2, col).Char; got != '─' {
+			t.Errorf("border pad cell(2,%d) = %q, want '─'", col, got)
+		}
+	}
+
+	// "top" of the top pane (PaneIndex 0) is row -1: no label should be written.
+	// Row 0 should still contain pane content 'T', not a label character.
+	if got := cellAt(grid, 0, 3).Char; got != 'T' {
+		t.Errorf("top-pane row 0 cell(0,3) = %q, want 'T' (no top border for first pane)", got)
+	}
+}
+
+// TestCompose_PaneBorderStatus_Bottom verifies that pane-border-status "bottom"
+// places the label on the pane's own bottom horizontal border row.
+func TestCompose_PaneBorderStatus_Bottom(t *testing.T) {
+	r := render.New(render.Config{
+		Rows: 6,
+		Cols: 8,
+		Theme: render.Theme{
+			BorderLines:      "single",
+			PaneBorderStatus: "bottom",
+		},
+	})
+
+	top := &fakePane{
+		bounds: render.Rect{X: 0, Y: 0, Width: 8, Height: 3},
+		grid:   makeGrid(3, 8, 'T'),
+	}
+	bottom := &fakePane{
+		bounds: render.Rect{X: 0, Y: 3, Width: 8, Height: 3},
+		grid:   makeGrid(3, 8, 'B'),
+	}
+
+	grid := r.Compose([]render.PanePlacement{
+		{Pane: top, Rect: top.bounds, PaneIndex: 0},
+		{Pane: bottom, Rect: bottom.bounds, PaneIndex: 1},
+	}, nil)
+
+	// "bottom" of top pane (PaneIndex 0) is row 2.
+	// Label "0": maxWidth=6, leftPad=(6-1)/2=2, col=1+2=3
+	if got := cellAt(grid, 2, 3).Char; got != '0' {
+		t.Errorf("border label cell(2,3) = %q, want '0'", got)
+	}
+
+	// "bottom" of bottom pane (PaneIndex 1) is row 5.
+	// Label "1" at col 3.
+	if got := cellAt(grid, 5, 3).Char; got != '1' {
+		t.Errorf("border label cell(5,3) = %q, want '1'", got)
+	}
+}
+
+// TestCompose_PaneBorderStatus_Off verifies that pane-border-status "off"
+// (and empty string) leaves borders unchanged with no label overlay.
+func TestCompose_PaneBorderStatus_Off(t *testing.T) {
+	for _, status := range []string{"off", ""} {
+		t.Run(status, func(t *testing.T) {
+			r := render.New(render.Config{
+				Rows: 6,
+				Cols: 8,
+				Theme: render.Theme{
+					BorderLines:      "single",
+					PaneBorderStatus: status,
+				},
+			})
+
+			top := &fakePane{
+				bounds: render.Rect{X: 0, Y: 0, Width: 8, Height: 3},
+				grid:   makeGrid(3, 8, 'T'),
+			}
+			bottom := &fakePane{
+				bounds: render.Rect{X: 0, Y: 3, Width: 8, Height: 3},
+				grid:   makeGrid(3, 8, 'B'),
+			}
+
+			grid := r.Compose([]render.PanePlacement{
+				{Pane: top, Rect: top.bounds, PaneIndex: 0},
+				{Pane: bottom, Rect: bottom.bounds, PaneIndex: 1},
+			}, nil)
+
+			// Row 2 should be a plain horizontal border '─' with no label digits.
+			for col := 0; col < 7; col++ {
+				if got := cellAt(grid, 2, col).Char; got != '─' {
+					t.Errorf("cell(2,%d) = %q, want '─' (no label when status=%q)", col, got, status)
+				}
+			}
+		})
+	}
+}
+
+// TestCompose_PaneBorderStatus_Truncate verifies that labels longer than
+// pane width minus 2 are truncated to fit.
+func TestCompose_PaneBorderStatus_Truncate(t *testing.T) {
+	r := render.New(render.Config{
+		Rows: 6,
+		Cols: 6,
+		Theme: render.Theme{
+			BorderLines:      "single",
+			PaneBorderStatus: "bottom",
+			PaneBorderFormat: "hello",
+		},
+	})
+
+	// Pane width 6 → maxWidth = 4. "hello" (5 chars) truncated to "hell".
+	top := &fakePane{
+		bounds: render.Rect{X: 0, Y: 0, Width: 6, Height: 3},
+		grid:   makeGrid(3, 6, 'T'),
+	}
+
+	grid := r.Compose([]render.PanePlacement{
+		{Pane: top, Rect: top.bounds, PaneIndex: 0},
+	}, nil)
+
+	// The border row is row 2. Interior cols 1-4 (maxWidth=4).
+	// "hell" fills all 4 interior cols (leftPad=0).
+	want := []rune{'h', 'e', 'l', 'l'}
+	for i, wantCh := range want {
+		col := 1 + i
+		if got := cellAt(grid, 2, col).Char; got != wantCh {
+			t.Errorf("truncated label cell(2,%d) = %q, want %q", col, got, wantCh)
+		}
+	}
+}
+
 // TestCompose_NilStatusNoReservedRow verifies that when Status is nil,
 // all rows are available for panes.
 func TestCompose_NilStatusNoReservedRow(t *testing.T) {

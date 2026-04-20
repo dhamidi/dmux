@@ -1,6 +1,11 @@
 package render
 
-import "github.com/dhamidi/dmux/internal/layout"
+import (
+	"strconv"
+
+	"github.com/dhamidi/dmux/internal/format"
+	"github.com/dhamidi/dmux/internal/layout"
+)
 
 // SGR attribute flags for Cell.Attrs.
 const (
@@ -88,6 +93,9 @@ type PanePlacement struct {
 	// SynchronizedPanes, when true, causes the pane border to be rendered
 	// with a distinct marker (*) to indicate that synchronize-panes is active.
 	SynchronizedPanes bool
+	// PaneIndex is the zero-based index of this pane, used when expanding
+	// the pane-border-format string (#{pane_index}).
+	PaneIndex int
 }
 
 // Theme configures visual aspects of the composed frame.
@@ -95,6 +103,16 @@ type Theme struct {
 	// BorderLines is the pane-border-lines option value ("single", "double",
 	// "heavy", "simple", or "padded"). An empty string disables border drawing.
 	BorderLines string
+
+	// PaneBorderStatus controls whether and where a label is shown on pane
+	// borders. Accepted values: "off" (default, no label), "top" (label on the
+	// horizontal border above each pane), "bottom" (label on the horizontal
+	// border below each pane).
+	PaneBorderStatus string
+
+	// PaneBorderFormat is the format string expanded for each pane's border
+	// label. Defaults to "#{pane_index}" when empty.
+	PaneBorderFormat string
 }
 
 // Config holds all dependencies for a [Renderer].
@@ -191,6 +209,9 @@ func (r *renderer) Compose(panes []PanePlacement, overlays []Overlay) CellGrid {
 		r.drawBorders(&grid, panes, paneRows, cols)
 	}
 
+	// Overlay border labels when pane-border-status is "top" or "bottom".
+	r.drawBorderLabels(&grid, panes, paneRows, cols)
+
 	// Draw synchronize-panes border markers (*) at the right and bottom edges
 	// of each pane that has SynchronizedPanes set, using a yellow colour.
 	syncBorderCell := Cell{Char: '*', Fg: ColorIndexed | 3}
@@ -250,6 +271,88 @@ func (r *renderer) Compose(panes []PanePlacement, overlays []Overlay) CellGrid {
 	}
 
 	return grid
+}
+
+// drawBorderLabels overlays a format-expanded label on the top or bottom
+// horizontal border of each pane, as configured by Theme.PaneBorderStatus.
+//
+// "top" places the label on the horizontal border row immediately above the
+// pane (rect.Y - 1); "bottom" places it on the pane's own bottom border row
+// (rect.Y + rect.Height - 1). The label is centered in the interior of the
+// border (pane width minus the two vertical border columns on each side) and
+// padded with the BorderSet horizontal character.
+func (r *renderer) drawBorderLabels(grid *CellGrid, panes []PanePlacement, paneRows, cols int) {
+	status := r.cfg.Theme.PaneBorderStatus
+	if status != "top" && status != "bottom" {
+		return
+	}
+
+	fmtStr := r.cfg.Theme.PaneBorderFormat
+	if fmtStr == "" {
+		fmtStr = "#{pane_index}"
+	}
+
+	bs := BorderSetForName(r.cfg.Theme.BorderLines)
+
+	for _, pp := range panes {
+		rect := pp.Rect
+
+		var targetRow int
+		if status == "top" {
+			targetRow = rect.Y - 1
+		} else {
+			targetRow = rect.Y + rect.Height - 1
+		}
+
+		if targetRow < 0 || targetRow >= paneRows {
+			continue
+		}
+
+		ctx := format.MapContext{"pane_index": strconv.Itoa(pp.PaneIndex)}
+		label, _ := format.Expand(fmtStr, ctx)
+
+		// Available interior width: exclude the vertical border columns on each side.
+		maxWidth := rect.Width - 2
+		if maxWidth <= 0 {
+			continue
+		}
+
+		// Truncate label to fit.
+		runes := []rune(label)
+		if len(runes) > maxWidth {
+			runes = runes[:maxWidth]
+		}
+		labelLen := len(runes)
+
+		// Center the label within maxWidth.
+		totalPad := maxWidth - labelLen
+		leftPad := totalPad / 2
+
+		startCol := rect.X + 1
+
+		// Left horizontal padding.
+		for j := 0; j < leftPad; j++ {
+			col := startCol + j
+			if col >= 0 && col < cols {
+				grid.Cells[targetRow*cols+col] = Cell{Char: bs.Horizontal}
+			}
+		}
+
+		// Label characters.
+		for j, ch := range runes {
+			col := startCol + leftPad + j
+			if col >= 0 && col < cols {
+				grid.Cells[targetRow*cols+col] = Cell{Char: ch}
+			}
+		}
+
+		// Right horizontal padding.
+		rightStart := startCol + leftPad + labelLen
+		rightEnd := rect.X + rect.Width - 1 // exclusive: stop before vertical border
+		for col := rightStart; col < rightEnd && col < cols; col++ {
+			grid.Cells[targetRow*cols+col] = Cell{Char: bs.Horizontal}
+		}
+	}
 }
 
 // drawBorders draws pane border characters into grid using the BorderSet

@@ -28,6 +28,12 @@ pane under the cursor, drag on a border resizes panes, and scroll-wheel events
 are forwarded to the active pane. When `mouse` is `off` (the default), all
 mouse escape sequences are forwarded to the active pane unchanged.
 
+Pane borders are drawn using the `pane-border-lines` window option (`single`,
+`double`, `heavy`, `simple`, `padded`). Set `pane-border-status` to `top` or
+`bottom` to display a label on the horizontal border above or below each pane.
+The label text is controlled by `pane-border-format` (default `#{pane_index}`)
+and is expanded using the same `#{...}` format-string syntax used elsewhere.
+
 ## Usage
 
 ```
