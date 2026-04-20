@@ -132,6 +132,14 @@ type OptionEntry struct {
 	Value string
 }
 
+// BufferEntry is a name-size pair returned by ListBuffers.
+type BufferEntry struct {
+	// Name is the buffer name.
+	Name string
+	// Size is the number of bytes in the buffer.
+	Size int
+}
+
 // Mutator is the write interface that command handlers use to modify server
 // state. It is a separate interface from Server so that command tests can
 // stub only the write-side methods they exercise.
@@ -174,6 +182,14 @@ type Mutator interface {
 	DisplayMessage(clientID, msg string) error
 	SendKeys(paneID int, keys []string) error
 	RunShell(cmd string, background bool) (string, error)
+
+	// Buffer mutations.
+	SetBuffer(name, data string) error
+	DeleteBuffer(name string) error
+	LoadBuffer(name, path string) error
+	SaveBuffer(name, path string) error
+	PasteBuffer(name string, paneID int) error
+	ListBuffers() []BufferEntry
 }
 
 // ─── Argument types ───────────────────────────────────────────────────────────

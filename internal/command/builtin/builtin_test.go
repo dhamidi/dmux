@@ -1,6 +1,7 @@
 package builtin_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -44,6 +45,15 @@ type testBackend struct {
 	}
 	shellOutput string
 	shellErr    error
+
+	// Buffer recording.
+	buffers       map[string]string
+	loadedBuffers []struct{ name, path string }
+	savedBuffers  []struct{ name, path string }
+	pastedBuffers []struct {
+		name   string
+		paneID int
+	}
 }
 
 // ─── command.Server (read) implementation ────────────────────────────────────
@@ -206,6 +216,57 @@ func (b *testBackend) SendKeys(paneID int, keys []string) error {
 
 func (b *testBackend) RunShell(cmd string, background bool) (string, error) {
 	return b.shellOutput, b.shellErr
+}
+
+func (b *testBackend) SetBuffer(name, data string) error {
+	if b.buffers == nil {
+		b.buffers = make(map[string]string)
+	}
+	if name == "" {
+		name = fmt.Sprintf("buffer%d", len(b.buffers))
+	}
+	b.buffers[name] = data
+	return nil
+}
+
+func (b *testBackend) DeleteBuffer(name string) error {
+	if _, ok := b.buffers[name]; !ok {
+		return fmt.Errorf("buffer %q not found", name)
+	}
+	delete(b.buffers, name)
+	return nil
+}
+
+func (b *testBackend) LoadBuffer(name, path string) error {
+	b.loadedBuffers = append(b.loadedBuffers, struct{ name, path string }{name, path})
+	return nil
+}
+
+func (b *testBackend) SaveBuffer(name, path string) error {
+	if _, ok := b.buffers[name]; !ok {
+		return fmt.Errorf("buffer %q not found", name)
+	}
+	b.savedBuffers = append(b.savedBuffers, struct{ name, path string }{name, path})
+	return nil
+}
+
+func (b *testBackend) PasteBuffer(name string, paneID int) error {
+	if _, ok := b.buffers[name]; !ok {
+		return fmt.Errorf("buffer %q not found", name)
+	}
+	b.pastedBuffers = append(b.pastedBuffers, struct {
+		name   string
+		paneID int
+	}{name, paneID})
+	return nil
+}
+
+func (b *testBackend) ListBuffers() []command.BufferEntry {
+	var out []command.BufferEntry
+	for name, data := range b.buffers {
+		out = append(out, command.BufferEntry{Name: name, Size: len(data)})
+	}
+	return out
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
