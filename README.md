@@ -9,7 +9,13 @@ VT parser, and a Go codebase instead of C.
 ## Status
 
 Skeleton. The directory layout, package boundaries, and design notes are in
-place. Implementation is not.
+place. Implementation is progressing.
+
+`internal/command/builtin` now contains ~28 built-in commands covering session,
+window, pane, client, key-binding, option, scripting, and UI categories.
+Each command handler receives a `*command.Ctx` and interacts with the server
+exclusively through its `Server` (read) and `Mutator` (write) interfaces — no
+builtin file imports any other internal package.
 
 ## Design
 

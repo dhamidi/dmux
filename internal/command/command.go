@@ -114,6 +114,68 @@ type Server interface {
 	ClientStore
 }
 
+// KeyBinding is a key-to-command binding entry returned by Server.ListKeyBindings.
+type KeyBinding struct {
+	// Table is the name of the key table, e.g. "root" or "prefix".
+	Table string
+	// Key is the string representation of the key, e.g. "C-b".
+	Key string
+	// Command is the bound command text.
+	Command string
+}
+
+// OptionEntry is a name-value pair returned by Server.ListOptions.
+type OptionEntry struct {
+	// Name is the option name.
+	Name string
+	// Value is the option value as a string.
+	Value string
+}
+
+// Mutator is the write interface that command handlers use to modify server
+// state. It is a separate interface from Server so that command tests can
+// stub only the write-side methods they exercise.
+type Mutator interface {
+	// Session mutations.
+	NewSession(name string) (SessionView, error)
+	KillSession(id string) error
+	RenameSession(id, name string) error
+
+	// Client mutations.
+	AttachClient(clientID, sessionID string) error
+	DetachClient(clientID string) error
+	SwitchClient(clientID, sessionID string) error
+
+	// Window mutations.
+	NewWindow(sessionID, name string) (WindowView, error)
+	KillWindow(sessionID, windowID string) error
+	RenameWindow(sessionID, windowID, name string) error
+	SelectWindow(sessionID, windowID string) error
+
+	// Pane mutations.
+	SplitWindow(sessionID, windowID string) (PaneView, error)
+	KillPane(paneID int) error
+	SelectPane(sessionID, windowID string, paneID int) error
+
+	// Key binding mutations.
+	BindKey(table, key, cmd string) error
+	UnbindKey(table, key string) error
+	ListKeyBindings(table string) []KeyBinding
+
+	// Option mutations.
+	SetOption(scope, name, value string) error
+	UnsetOption(scope, name string) error
+	ListOptions(scope string) []OptionEntry
+
+	// Server control.
+	KillServer() error
+
+	// UI / output.
+	DisplayMessage(clientID, msg string) error
+	SendKeys(paneID int, keys []string) error
+	RunShell(cmd string, background bool) (string, error)
+}
+
 // ─── Argument types ───────────────────────────────────────────────────────────
 
 // ArgSpec describes the flags and positional arguments a command accepts.
@@ -181,8 +243,11 @@ type Target struct {
 // use value types or interfaces defined in this package, so handlers can be
 // tested without a live server.
 type Ctx struct {
-	// Server provides access to sessions and clients.
+	// Server provides read access to sessions and clients.
 	Server Server
+	// Mutator provides write access to server state. It may be nil when
+	// the command is dispatched in a read-only context (e.g. some tests).
+	Mutator Mutator
 	// Client is the client that originated the command.
 	// The zero ClientView indicates a non-client-originated command.
 	Client ClientView
@@ -256,10 +321,15 @@ func (r *Registry) List() []*Spec {
 
 // Dispatch looks up name, parses rawArgs, resolves the target, and calls the
 // handler. It uses store for target resolution and passes q as Ctx.Queue.
-func (r *Registry) Dispatch(name string, rawArgs []string, store Server, client ClientView, q *Queue) Result {
+func (r *Registry) Dispatch(name string, rawArgs []string, store Server, client ClientView, q *Queue, mut ...Mutator) Result {
 	spec := r.Lookup(name)
 	if spec == nil {
 		return Errorf("unknown command: %s", name)
+	}
+
+	var m Mutator
+	if len(mut) > 0 {
+		m = mut[0]
 	}
 
 	// Auto-inject -t into ArgSpec.Options when the command takes a target.
@@ -288,11 +358,12 @@ func (r *Registry) Dispatch(name string, rawArgs []string, store Server, client 
 	}
 
 	ctx := &Ctx{
-		Server: store,
-		Client: client,
-		Target: target,
-		Args:   parsed,
-		Queue:  q,
+		Server:  store,
+		Mutator: m,
+		Client:  client,
+		Target:  target,
+		Args:    parsed,
+		Queue:   q,
 	}
 	return spec.Run(ctx)
 }
@@ -318,8 +389,8 @@ func Lookup(name string) *Spec { return Default.Lookup(name) }
 func List() []*Spec { return Default.List() }
 
 // Dispatch is a package-level convenience that delegates to Default.Dispatch.
-func Dispatch(name string, rawArgs []string, store Server, client ClientView, q *Queue) Result {
-	return Default.Dispatch(name, rawArgs, store, client, q)
+func Dispatch(name string, rawArgs []string, store Server, client ClientView, q *Queue, mut ...Mutator) Result {
+	return Default.Dispatch(name, rawArgs, store, client, q, mut...)
 }
 
 // ─── Argument parsing ─────────────────────────────────────────────────────────
