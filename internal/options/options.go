@@ -10,6 +10,7 @@ const (
 	Int                 // int value
 	Bool                // bool value
 	Strings             // []string value
+	Style               // style string, e.g. "bg=green,fg=black"
 )
 
 // Value holds one option value. Only the field matching Kind is valid.
@@ -24,6 +25,8 @@ type Value struct {
 func (v Value) String() string {
 	switch v.Kind {
 	case String:
+		return v.Str
+	case Style:
 		return v.Str
 	case Int:
 		return fmt.Sprintf("%d", v.Integer)
@@ -121,6 +124,13 @@ func toValue(kind Kind, v interface{}) Value {
 		case nil:
 			return Value{Kind: Strings}
 		}
+	case Style:
+		switch x := v.(type) {
+		case string:
+			return Value{Kind: Style, Str: x}
+		case nil:
+			return Value{Kind: Style}
+		}
 	}
 	panic(fmt.Sprintf("options: toValue: cannot convert %T to kind %v", v, kind))
 }
@@ -199,6 +209,16 @@ func (s *Store) GetBool(name string) (bool, bool) {
 		return false, false
 	}
 	return v.Flag, true
+}
+
+// GetStyle returns the style string value of name, or ("", false) if not found
+// or not a Style kind.
+func (s *Store) GetStyle(name string) (string, bool) {
+	v, ok := s.Get(name)
+	if !ok || v.Kind != Style {
+		return "", false
+	}
+	return v.Str, true
 }
 
 // GetStrings returns the []string value of name, or (nil, false) if not found

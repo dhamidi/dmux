@@ -1,9 +1,11 @@
 package status
 
 import (
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/dhamidi/dmux/internal/options"
 	"github.com/dhamidi/dmux/internal/style"
 )
 
@@ -42,6 +44,75 @@ type Options interface {
 	StatusFormat(n int) string
 	// StatusLineCount returns the total number of configured status lines.
 	StatusLineCount() int
+	// StatusStyle returns the style string for the entire status line.
+	StatusStyle() string
+	// StatusLeftStyle returns the style string for the left-hand segment.
+	StatusLeftStyle() string
+	// StatusRightStyle returns the style string for the right-hand segment.
+	StatusRightStyle() string
+	// WindowStatusStyle returns the style string for inactive window entries.
+	WindowStatusStyle() string
+	// WindowStatusCurrentStyle returns the style string for the current window entry.
+	WindowStatusCurrentStyle() string
+}
+
+// StoreOptions wraps an *options.Store and implements the Options interface
+// by reading option values from the store.
+type StoreOptions struct {
+	Store *options.Store
+}
+
+func (o *StoreOptions) StatusLeft() string {
+	v, _ := o.Store.GetString("status-left")
+	return v
+}
+
+func (o *StoreOptions) StatusRight() string {
+	v, _ := o.Store.GetString("status-right")
+	return v
+}
+
+func (o *StoreOptions) StatusFormat(n int) string {
+	key := fmt.Sprintf("status-format-%d", n)
+	v, _ := o.Store.GetString(key)
+	return v
+}
+
+func (o *StoreOptions) StatusLineCount() int {
+	count := 0
+	for i := 0; ; i++ {
+		key := fmt.Sprintf("status-format-%d", i)
+		if _, ok := o.Store.GetString(key); !ok {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func (o *StoreOptions) StatusStyle() string {
+	v, _ := o.Store.GetStyle("status-style")
+	return v
+}
+
+func (o *StoreOptions) StatusLeftStyle() string {
+	v, _ := o.Store.GetStyle("status-left-style")
+	return v
+}
+
+func (o *StoreOptions) StatusRightStyle() string {
+	v, _ := o.Store.GetStyle("status-right-style")
+	return v
+}
+
+func (o *StoreOptions) WindowStatusStyle() string {
+	v, _ := o.Store.GetStyle("window-status-style")
+	return v
+}
+
+func (o *StoreOptions) WindowStatusCurrentStyle() string {
+	v, _ := o.Store.GetStyle("window-status-current-style")
+	return v
 }
 
 // Cell is a single display cell in a status line.

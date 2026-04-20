@@ -54,9 +54,14 @@ type stubOptions struct {
 	formats []string
 }
 
-func (o *stubOptions) StatusLeft() string        { return o.left }
-func (o *stubOptions) StatusRight() string       { return o.right }
-func (o *stubOptions) StatusLineCount() int      { return len(o.formats) }
+func (o *stubOptions) StatusLeft() string              { return o.left }
+func (o *stubOptions) StatusRight() string             { return o.right }
+func (o *stubOptions) StatusLineCount() int            { return len(o.formats) }
+func (o *stubOptions) StatusStyle() string             { return "" }
+func (o *stubOptions) StatusLeftStyle() string         { return "" }
+func (o *stubOptions) StatusRightStyle() string        { return "" }
+func (o *stubOptions) WindowStatusStyle() string       { return "" }
+func (o *stubOptions) WindowStatusCurrentStyle() string { return "" }
 func (o *stubOptions) StatusFormat(n int) string {
 	if n < len(o.formats) {
 		return o.formats[n]
