@@ -9,7 +9,19 @@
 // operates purely on LeafIDs — it does not import package pane and
 // does not know what a pane is.
 //
-// Public surface:
+// LeafID is a plain int type; callers map LeafIDs to their concrete pane
+// objects. The layout package has zero imports of other internal/* packages
+// and can be compiled, tested, and reasoned about in complete isolation.
+//
+// # Types
+//
+//	type LeafID    int                 // opaque identifier for a leaf pane
+//	type Direction int                 // Horizontal or Vertical
+//	type Edge      int                 // EdgeTop, EdgeBottom, EdgeLeft, EdgeRight
+//	type Rect      struct{ X, Y, Width, Height int }
+//	type Preset    int                 // PresetEvenHorizontal, PresetEvenVertical, …
+//
+// # Public surface
 //
 //	New(cols, rows int, first LeafID) *Tree
 //	(*Tree).Split(leaf LeafID, dir Direction) (new LeafID)
