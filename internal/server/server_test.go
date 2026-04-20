@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"bytes"
 	"io"
 	"net"
 	"os"
@@ -9,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dhamidi/dmux/internal/keys"
+	"github.com/dhamidi/dmux/internal/layout"
+	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/server"
 	"github.com/dhamidi/dmux/internal/session"
@@ -465,6 +469,99 @@ func TestMsgStdinKeyBinding(t *testing.T) {
 	// The auto-created session is "0"; new-session creates "1".
 	if !strings.Contains(string(outMsg.Data), "1:") {
 		t.Fatalf("expected session '1' in list-sessions output, got: %q", outMsg.Data)
+	}
+	clientConn.SetDeadline(time.Time{}) //nolint:errcheck
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}
+
+// testFakePane is a minimal session.Pane for use in TestRenderLoop.
+// Snapshot returns a fixed 3×2 grid with distinct characters.
+type testFakePane struct{}
+
+func (f *testFakePane) Title() string                               { return "" }
+func (f *testFakePane) Resize(cols, rows int) error                 { return nil }
+func (f *testFakePane) Close() error                                { return nil }
+func (f *testFakePane) CaptureContent(history bool) ([]byte, error) { return nil, nil }
+func (f *testFakePane) Respawn(shell string) error                  { return nil }
+func (f *testFakePane) SendKey(key keys.Key) error                  { return nil }
+func (f *testFakePane) Write(data []byte) error                     { return nil }
+func (f *testFakePane) Snapshot() pane.CellGrid {
+	return pane.CellGrid{
+		Rows: 2, Cols: 3,
+		Cells: []pane.Cell{
+			{Char: 'A'}, {Char: 'B'}, {Char: 'C'},
+			{Char: 'D'}, {Char: 'E'}, {Char: 'F'},
+		},
+	}
+}
+
+// TestRenderLoop verifies that after a client attaches to a session containing
+// a pane, the render goroutine sends a MsgStdout whose payload begins with the
+// ANSI cursor-home + erase-display sequence ("\x1b[H\x1b[2J").
+func TestRenderLoop(t *testing.T) {
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	// Build initial server state: one session with a window and a fake pane.
+	state := session.NewServer()
+	sess := session.NewSession(session.SessionID("$1"), "test-sess", state.Options)
+	paneID := session.PaneID(1)
+	win := session.NewWindow(session.WindowID("@1"), "main", sess.Options)
+	win.AddPane(paneID, &testFakePane{})
+	win.Layout = layout.New(3, 2, paneID)
+	sess.AddWindow(win)
+	state.AddSession(sess)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		State:    state,
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+
+	sendHandshake(t, clientConn)
+
+	// Give the server time to enter clientLoop.
+	time.Sleep(10 * time.Millisecond)
+
+	// Attach the client to the test session. attach-session produces no
+	// command output, but markDirty is called afterwards, which triggers
+	// renderLoop to compose and send the frame.
+	cm := proto.CommandMsg{Argv: []string{"attach-session", "-t", "test-sess"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write attach-session: %v", err)
+	}
+
+	// Read the MsgStdout emitted by renderLoop.
+	if err := clientConn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	msgType, payload, err := proto.ReadMsg(clientConn)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if msgType != proto.MsgStdout {
+		t.Fatalf("expected MsgStdout, got %s", msgType)
+	}
+	var sm proto.StdoutMsg
+	if err := sm.Decode(payload); err != nil {
+		t.Fatalf("decode StdoutMsg: %v", err)
+	}
+	if !bytes.HasPrefix(sm.Data, []byte("\x1b[H\x1b[2J")) {
+		t.Fatalf("expected ANSI clear/home prefix, got: %q", sm.Data)
 	}
 	clientConn.SetDeadline(time.Time{}) //nolint:errcheck
 

@@ -15,6 +15,7 @@ import (
 	_ "github.com/dhamidi/dmux/internal/command/builtin"
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/proto"
+	"github.com/dhamidi/dmux/internal/render"
 	"github.com/dhamidi/dmux/internal/session"
 )
 
@@ -51,6 +52,11 @@ type Config struct {
 	// for redraw. Tests use this hook to observe redraw scheduling
 	// without a full rendering layer.
 	OnDirty func(id session.ClientID)
+
+	// State, if non-nil, is used as the initial server state instead of
+	// creating a new empty Server. Primarily useful in tests that need
+	// to pre-populate sessions, windows, or panes.
+	State *session.Server
 }
 
 // clientDecoder bundles a write-side buffer with the keys.Decoder that reads
@@ -67,19 +73,20 @@ func newClientDecoder() *clientDecoder {
 
 // srv is the running server state.
 type srv struct {
-	cfg      Config
-	state    *session.Server
-	store    command.Server
-	mutator  command.Mutator
-	queue    *command.Queue
-	log      *log.Logger
-	mu       sync.Mutex
-	conns    map[session.ClientID]*clientConn
-	decoders map[session.ClientID]*clientDecoder
-	nextID   uint64
-	done     chan struct{}
-	once     sync.Once // ensures done is closed at most once
-	wg       sync.WaitGroup
+	cfg        Config
+	state      *session.Server
+	store      command.Server
+	mutator    command.Mutator
+	queue      *command.Queue
+	log        *log.Logger
+	mu         sync.Mutex
+	conns      map[session.ClientID]*clientConn
+	decoders   map[session.ClientID]*clientDecoder
+	prevFrames map[session.ClientID]render.CellGrid
+	nextID     uint64
+	done       chan struct{}
+	once       sync.Once // ensures done is closed at most once
+	wg         sync.WaitGroup
 }
 
 // clientConn is the server-side view of one connected client.
@@ -103,12 +110,17 @@ func Run(cfg Config) error {
 	}
 
 	s := &srv{
-		cfg:      cfg,
-		state:    session.NewServer(),
-		log:      log.New(cfg.Log, "server: ", 0),
-		conns:    make(map[session.ClientID]*clientConn),
-		decoders: make(map[session.ClientID]*clientDecoder),
-		done:     make(chan struct{}),
+		cfg:        cfg,
+		log:        log.New(cfg.Log, "server: ", 0),
+		conns:      make(map[session.ClientID]*clientConn),
+		decoders:   make(map[session.ClientID]*clientDecoder),
+		prevFrames: make(map[session.ClientID]render.CellGrid),
+		done:       make(chan struct{}),
+	}
+	if cfg.State != nil {
+		s.state = cfg.State
+	} else {
+		s.state = session.NewServer()
 	}
 	s.store = newServerStore(s.state)
 	s.mutator = newServerMutator(s.state)
@@ -248,11 +260,15 @@ func (s *srv) serveConn(nc net.Conn) {
 		delete(s.conns, client.ID)
 		delete(s.decoders, client.ID)
 		s.state.DetachClient(client.ID)
+		close(cc.dirty)
 		s.mu.Unlock()
 		s.log.Printf("client %s detached", client.ID)
 	}()
 
-	// Step 4: message loop
+	// Step 4: start per-client render goroutine, then enter message loop.
+	s.wg.Add(1)
+	go s.renderLoop(cc)
+
 	s.clientLoop(cc)
 }
 
@@ -460,5 +476,72 @@ func (s *srv) markDirty(cc *clientConn) {
 	}
 	if s.cfg.OnDirty != nil {
 		s.cfg.OnDirty(cc.id)
+	}
+}
+
+// renderPaneAdapter adapts a session.Pane to the render.Pane interface,
+// bridging the pane.CellGrid and render.CellGrid types.
+type renderPaneAdapter struct {
+	p    session.Pane
+	rect render.Rect
+}
+
+func (a *renderPaneAdapter) Bounds() render.Rect { return a.rect }
+
+func (a *renderPaneAdapter) Snapshot() render.CellGrid {
+	snap := a.p.Snapshot()
+	cells := make([]render.Cell, len(snap.Cells))
+	for i, c := range snap.Cells {
+		cells[i] = render.Cell{Char: c.Char}
+	}
+	return render.CellGrid{Rows: snap.Rows, Cols: snap.Cols, Cells: cells}
+}
+
+// renderLoop runs as a per-client goroutine and sends a full-repaint
+// MsgStdout to the client each time cc.dirty signals a redraw. It exits
+// when cc.dirty is closed (on client disconnect).
+func (s *srv) renderLoop(cc *clientConn) {
+	defer s.wg.Done()
+	for range cc.dirty {
+		s.mu.Lock()
+		client := cc.client
+		if client.Session == nil || client.Session.Current == nil {
+			s.mu.Unlock()
+			continue
+		}
+		win := client.Session.Current.Window
+		if win.Layout == nil || len(win.Panes) == 0 {
+			s.mu.Unlock()
+			continue
+		}
+
+		cols := client.Size.Cols
+		rows := client.Size.Rows
+		if cols <= 0 {
+			cols = 80
+		}
+		if rows <= 0 {
+			rows = 24
+		}
+
+		placements := make([]render.PanePlacement, 0, len(win.Panes))
+		for id, p := range win.Panes {
+			rect := win.Layout.Rect(id)
+			if rect.Width == 0 || rect.Height == 0 {
+				continue
+			}
+			placements = append(placements, render.PanePlacement{
+				Pane: &renderPaneAdapter{p: p, rect: rect},
+				Rect: rect,
+			})
+		}
+		s.mu.Unlock()
+
+		r := render.New(render.Config{Rows: rows, Cols: cols})
+		grid := r.Compose(placements, nil)
+		ansiBytes := render.EncodeANSI(grid)
+
+		msg := proto.StdoutMsg{Data: ansiBytes}
+		_ = proto.WriteMsg(cc.netConn, proto.MsgStdout, msg.Encode())
 	}
 }
