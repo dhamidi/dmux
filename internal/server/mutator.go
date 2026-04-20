@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/dhamidi/dmux/internal/command"
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
+	"github.com/dhamidi/dmux/internal/options"
 	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/session"
@@ -320,23 +322,107 @@ func (m *serverMutator) BindKey(table, keyStr, cmd string) error {
 }
 
 func (m *serverMutator) UnbindKey(table, key string) error {
-	return errStub("unbind-key")
+	t, ok := m.state.KeyTables.Get(table)
+	if !ok {
+		return fmt.Errorf("unbind-key: table %q not found", table)
+	}
+	k, err := keys.Parse(key)
+	if err != nil {
+		return fmt.Errorf("unbind-key: %w", err)
+	}
+	t.Unbind(k)
+	return nil
 }
 
 func (m *serverMutator) ListKeyBindings(table string) []command.KeyBinding {
-	return nil
+	var out []command.KeyBinding
+	collect := func(name string, t *keys.Table) {
+		t.Each(func(k keys.Key, cmd keys.BoundCommand) {
+			out = append(out, command.KeyBinding{
+				Table:   name,
+				Key:     k.String(),
+				Command: fmt.Sprintf("%v", cmd),
+			})
+		})
+	}
+	if table != "" {
+		if t, ok := m.state.KeyTables.Get(table); ok {
+			collect(table, t)
+		}
+		return out
+	}
+	for _, name := range m.state.KeyTables.Names() {
+		t, _ := m.state.KeyTables.Get(name)
+		collect(name, t)
+	}
+	return out
+}
+
+// resolveOptionStore maps a scope string to the appropriate *options.Store.
+// Scope formats: "server", "session:<id>", "window:<sessionID>:<windowID>".
+func (m *serverMutator) resolveOptionStore(scope string) (*options.Store, error) {
+	parts := strings.SplitN(scope, ":", 3)
+	switch parts[0] {
+	case "server":
+		return m.state.Options, nil
+	case "session":
+		if len(parts) < 2 {
+			return nil, fmt.Errorf("session scope requires session ID")
+		}
+		sess, ok := m.state.Sessions[session.SessionID(parts[1])]
+		if !ok {
+			return nil, fmt.Errorf("session %q not found", parts[1])
+		}
+		return sess.Options, nil
+	case "window":
+		if len(parts) < 3 {
+			return nil, fmt.Errorf("window scope requires session ID and window ID")
+		}
+		sess, ok := m.state.Sessions[session.SessionID(parts[1])]
+		if !ok {
+			return nil, fmt.Errorf("session %q not found", parts[1])
+		}
+		for _, wl := range sess.Windows {
+			if wl.Window.ID == session.WindowID(parts[2]) {
+				return wl.Window.Options, nil
+			}
+		}
+		return nil, fmt.Errorf("window %q not found in session %q", parts[2], parts[1])
+	default:
+		return nil, fmt.Errorf("unrecognised scope %q", scope)
+	}
 }
 
 func (m *serverMutator) SetOption(scope, name, value string) error {
-	return errStub("set-option")
+	store, err := m.resolveOptionStore(scope)
+	if err != nil {
+		return fmt.Errorf("set-option: %w", err)
+	}
+	if _, ok := store.Get(name); !ok {
+		store.Register(name, options.String, "")
+	}
+	return store.Set(name, value)
 }
 
 func (m *serverMutator) UnsetOption(scope, name string) error {
-	return errStub("unset-option")
+	store, err := m.resolveOptionStore(scope)
+	if err != nil {
+		return fmt.Errorf("unset-option: %w", err)
+	}
+	store.Unset(name)
+	return nil
 }
 
 func (m *serverMutator) ListOptions(scope string) []command.OptionEntry {
-	return nil
+	store, err := m.resolveOptionStore(scope)
+	if err != nil {
+		return nil
+	}
+	var out []command.OptionEntry
+	store.Each(func(name string, value options.Value) {
+		out = append(out, command.OptionEntry{Name: name, Value: value.String()})
+	})
+	return out
 }
 
 func (m *serverMutator) KillServer() error {
