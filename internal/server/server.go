@@ -123,7 +123,15 @@ func Run(cfg Config) error {
 		s.state = session.NewServer()
 	}
 	s.store = newServerStore(s.state)
-	s.mutator = newServerMutator(s.state, s.triggerDone)
+	s.mutator = newServerMutator(s.state, s.triggerDone,
+		func(id session.ClientID) (*clientConn, bool) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			cc, ok := s.conns[id]
+			return cc, ok
+		},
+		func(cc *clientConn) { s.markDirty(cc) },
+	)
 	s.queue = command.NewQueue()
 
 	if err := loadDefaultBindings(s.mutator); err != nil {

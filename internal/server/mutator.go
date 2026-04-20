@@ -7,6 +7,7 @@ import (
 
 	"github.com/dhamidi/dmux/internal/command"
 	"github.com/dhamidi/dmux/internal/keys"
+	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/session"
 )
 
@@ -19,12 +20,21 @@ type serverMutator struct {
 	nextSessionID uint64
 	nextWindowID  uint64
 	shutdown      func()
+	getConn       func(session.ClientID) (*clientConn, bool)
+	markDirty     func(*clientConn)
 }
 
 // newServerMutator returns a command.Mutator backed by state.
 // shutdown is called by KillServer to trigger a graceful shutdown.
-func newServerMutator(state *session.Server, shutdown func()) command.Mutator {
-	return &serverMutator{state: state, shutdown: shutdown}
+// getConn and markDirty provide access to the live connection map for
+// operations that need to write directly to a client's network connection.
+func newServerMutator(state *session.Server, shutdown func(), getConn func(session.ClientID) (*clientConn, bool), markDirty func(*clientConn)) command.Mutator {
+	return &serverMutator{
+		state:     state,
+		shutdown:  shutdown,
+		getConn:   getConn,
+		markDirty: markDirty,
+	}
 }
 
 func errStub(method string) error {
@@ -81,11 +91,24 @@ func (m *serverMutator) AttachClient(clientID, sessionID string) error {
 }
 
 func (m *serverMutator) DetachClient(clientID string) error {
-	return errStub("detach-client")
+	if _, ok := m.state.Clients[session.ClientID(clientID)]; !ok {
+		return fmt.Errorf("detach-client: client %q not found", clientID)
+	}
+	m.state.DetachClient(session.ClientID(clientID))
+	return nil
 }
 
 func (m *serverMutator) SwitchClient(clientID, sessionID string) error {
-	return errStub("switch-client")
+	client, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("switch-client: client %q not found", clientID)
+	}
+	targetSession, ok := m.state.Sessions[session.SessionID(sessionID)]
+	if !ok {
+		return fmt.Errorf("switch-client: session %q not found", sessionID)
+	}
+	client.Session = targetSession
+	return nil
 }
 
 func (m *serverMutator) NewWindow(sessionID, name string) (command.WindowView, error) {
@@ -168,7 +191,16 @@ func (m *serverMutator) KillServer() error {
 }
 
 func (m *serverMutator) DisplayMessage(clientID, msg string) error {
-	return errStub("display-message")
+	cc, ok := m.getConn(session.ClientID(clientID))
+	if !ok {
+		return fmt.Errorf("display-message: client %q not found", clientID)
+	}
+	encoded := proto.StdoutMsg{Data: []byte(msg + "\r\n")}.Encode()
+	if err := proto.WriteMsg(cc.netConn, proto.MsgStdout, encoded); err != nil {
+		return fmt.Errorf("display-message: %w", err)
+	}
+	m.markDirty(cc)
+	return nil
 }
 
 func (m *serverMutator) SendKeys(paneID int, keys []string) error {
