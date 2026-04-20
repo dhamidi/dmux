@@ -5,6 +5,7 @@ import (
 
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/modes"
+	"github.com/dhamidi/dmux/internal/style"
 )
 
 // Line is a row of display cells from the scrollback buffer.
@@ -41,11 +42,32 @@ type searchState struct {
 	forward bool
 }
 
+// matchRange is the location of one query occurrence in the scrollback buffer.
+// Row is the line index; StartCol and EndCol are column indices (cell positions).
+type matchRange struct {
+	row, startCol, endCol int
+}
+
+// CopyStyles holds the style strings for copy-mode highlights.
+// Each field is a tmux-compatible style string (e.g. "fg=red,bg=black").
+// An empty string means no extra styling is applied.
+type CopyStyles struct {
+	// ModeStyle is applied to the selection range and cursor cell.
+	// When empty the default AttrReverse highlight is used.
+	ModeStyle string
+	// MatchStyle is applied to non-current search match cells.
+	MatchStyle string
+	// CurrentMatchStyle is applied to the current (active) search match cells.
+	CurrentMatchStyle string
+	// MarkStyle is applied to all cells on the marked line.
+	MarkStyle string
+}
+
 // Mode implements [modes.PaneMode] for copy-mode.
 //
-// It maintains cursor position, an optional selection anchor, and
-// search state. All mutations go through [Mode.Command]; [Mode.Key]
-// maps raw key events to Command calls.
+// It maintains cursor position, an optional selection anchor, search
+// state, and optional match/mark highlighting. All mutations go through
+// [Mode.Command]; [Mode.Key] maps raw key events to Command calls.
 type Mode struct {
 	sb         Scrollback
 	curRow     int // cursor row in Lines() (0 = top)
@@ -53,12 +75,17 @@ type Mode struct {
 	viewOffset int // first row of Lines() shown in the viewport
 	selAnchor  *pos
 	search     searchState
+
+	styles        CopyStyles
+	searchMatches []matchRange // match positions in the current viewport
+	currentMatch  int         // index into searchMatches for the active match
+	markRow       int         // row of the mark line; -1 when no mark is set
 }
 
 // New creates a new Mode backed by sb.
 // The cursor starts on the last (most recent) line of the scrollback.
 func New(sb Scrollback) *Mode {
-	m := &Mode{sb: sb}
+	m := &Mode{sb: sb, markRow: -1}
 	if lines := sb.Lines(); len(lines) > 0 {
 		m.curRow = len(lines) - 1
 		h := sb.Height()
@@ -74,6 +101,9 @@ func (m *Mode) CursorRow() int { return m.curRow }
 
 // CursorCol returns the cursor's column index.
 func (m *Mode) CursorCol() int { return m.curCol }
+
+// ViewOffset returns the index of the first visible row of Lines().
+func (m *Mode) ViewOffset() int { return m.viewOffset }
 
 // SelectionAnchor returns the anchor (row, col) when a selection is
 // active, or (-1, -1) when there is none.
@@ -102,7 +132,10 @@ func inSelection(lineIdx, col int, start, end pos) bool {
 
 // Render draws the visible portion of the scrollback onto dst.
 // The viewport is adjusted so that the cursor is always on-screen.
-// Cursor and active selection are highlighted using AttrReverse.
+// Highlights are applied in priority order (lowest to highest):
+//  1. Mark-line style (MarkStyle) on the marked row.
+//  2. Search match style (MatchStyle / CurrentMatchStyle) on match cells.
+//  3. Selection and cursor (AttrReverse XOR, tmux-compatible).
 func (m *Mode) Render(dst modes.Canvas) {
 	size := dst.Size()
 	lines := m.sb.Lines()
@@ -116,6 +149,9 @@ func (m *Mode) Render(dst modes.Canvas) {
 	if m.viewOffset < 0 {
 		m.viewOffset = 0
 	}
+
+	// Refresh search match positions for the current viewport.
+	m.populateMatches(size.Rows)
 
 	hasSelection := m.selAnchor != nil
 	var selStart, selEnd pos
@@ -136,6 +172,22 @@ func (m *Mode) Render(dst modes.Canvas) {
 			}
 			if c.Char == 0 {
 				c.Char = ' '
+			}
+			// Apply mark-line style (lowest priority highlight).
+			if m.markRow >= 0 && lineIdx == m.markRow {
+				c = applyCopyStyle(c, m.styles.MarkStyle)
+			}
+			// Apply search match highlight (before selection/cursor so
+			// that selection and cursor always take visual priority).
+			for idx, mr := range m.searchMatches {
+				if lineIdx == mr.row && col >= mr.startCol && col < mr.endCol {
+					if idx == m.currentMatch {
+						c = applyCopyStyle(c, m.styles.CurrentMatchStyle)
+					} else {
+						c = applyCopyStyle(c, m.styles.MatchStyle)
+					}
+					break
+				}
 			}
 			// Apply selection highlight.
 			if hasSelection && inSelection(lineIdx, col, selStart, selEnd) {
@@ -279,6 +331,10 @@ func (m *Mode) Command(name string) modes.Outcome {
 		m.doSearch(m.search.query, m.search.forward)
 	case "search-reverse":
 		m.doSearch(m.search.query, !m.search.forward)
+	case "set-mark":
+		m.markRow = m.curRow
+	case "clear-mark":
+		m.markRow = -1
 	case "cancel":
 		return modes.CloseMode()
 	}
@@ -401,6 +457,115 @@ func (m *Mode) doSearch(query string, forward bool) {
 			}
 		}
 	}
+}
+
+// SetStyles configures the highlight style strings used during rendering.
+func (m *Mode) SetStyles(s CopyStyles) {
+	m.styles = s
+}
+
+// MarkRow returns the index of the marked line, or -1 when no mark is set.
+func (m *Mode) MarkRow() int { return m.markRow }
+
+// populateMatches scans the current viewport for all occurrences of the
+// search query and stores them in m.searchMatches. It also sets m.currentMatch
+// to the index of the first match on m.curRow (the match the cursor is on).
+// viewHeight is the number of visible rows (dst canvas height).
+func (m *Mode) populateMatches(viewHeight int) {
+	m.searchMatches = m.searchMatches[:0]
+	query := m.search.query
+	if query == "" {
+		m.currentMatch = 0
+		return
+	}
+	qRunes := []rune(query)
+	qLen := len(qRunes)
+	if qLen == 0 {
+		m.currentMatch = 0
+		return
+	}
+	lines := m.sb.Lines()
+	m.currentMatch = -1
+
+	for r := m.viewOffset; r < m.viewOffset+viewHeight && r < len(lines); r++ {
+		line := lines[r]
+		// Build a rune slice for the line so that column indices are correct.
+		lineRunes := make([]rune, len(line))
+		for i, c := range line {
+			ch := c.Char
+			if ch == 0 {
+				ch = ' '
+			}
+			lineRunes[i] = ch
+		}
+		// Scan for all occurrences of qRunes.
+		for start := 0; start+qLen <= len(lineRunes); start++ {
+			if runesHavePrefix(lineRunes[start:], qRunes) {
+				idx := len(m.searchMatches)
+				m.searchMatches = append(m.searchMatches, matchRange{
+					row:      r,
+					startCol: start,
+					endCol:   start + qLen,
+				})
+				// Mark the first match on the cursor row as the current match.
+				if r == m.curRow && m.currentMatch < 0 {
+					m.currentMatch = idx
+				}
+			}
+		}
+	}
+	if m.currentMatch < 0 {
+		m.currentMatch = 0
+	}
+}
+
+// runesHavePrefix reports whether text starts with the rune slice prefix.
+func runesHavePrefix(text, prefix []rune) bool {
+	if len(text) < len(prefix) {
+		return false
+	}
+	for i, r := range prefix {
+		if text[i] != r {
+			return false
+		}
+	}
+	return true
+}
+
+// applyCopyStyle overlays the attributes from styleStr onto cell c.
+// The style string uses tmux-compatible syntax (e.g. "fg=red,bg=black,bold").
+// Returns c unchanged when styleStr is empty.
+func applyCopyStyle(c modes.Cell, styleStr string) modes.Cell {
+	if styleStr == "" {
+		return c
+	}
+	st := style.Parse(styleStr)
+	if st.HasFg {
+		c.Fg = modes.Color(st.Fg)
+		c.FgR, c.FgG, c.FgB = st.FgR, st.FgG, st.FgB
+	}
+	if st.HasBg {
+		c.Bg = modes.Color(st.Bg)
+		c.BgR, c.BgG, c.BgB = st.BgR, st.BgG, st.BgB
+	}
+	// Map style package attribute bits to modes attribute bits.
+	// The two packages use different bit positions for the same flags.
+	if st.Attrs&style.AttrBold != 0 {
+		c.Attrs |= modes.AttrBold
+	}
+	if st.Attrs&style.AttrUnderscore != 0 {
+		c.Attrs |= modes.AttrUnderline
+	}
+	if st.Attrs&style.AttrBlink != 0 {
+		c.Attrs |= modes.AttrBlink
+	}
+	if st.Attrs&style.AttrReverse != 0 {
+		c.Attrs |= modes.AttrReverse
+	}
+	if st.Attrs&style.AttrDim != 0 {
+		c.Attrs |= modes.AttrDim
+	}
+	return c
 }
 
 // lineContains reports whether the text of line contains query.

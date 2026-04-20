@@ -116,6 +116,21 @@ colour inherit the window style value. Both options accept the standard tmux
 colour syntax (`fg=<colour>,bg=<colour>`) with named ANSI colours, `colourN`
 indexed colours, and `#rrggbb` hex values.
 
+**Copy mode** highlights are controlled by four style options:
+
+- `mode-style`: applied to the selection range and cursor cell (uses
+  `AttrReverse` by default when no style is explicitly set).
+- `copy-mode-match-style`: applied to non-current search match cells after
+  a `/`-search or `SetSearch` call.
+- `copy-mode-current-match-style`: applied to the active (current) search
+  match — the match the cursor is sitting on.
+- `copy-mode-mark-style`: applied to all cells on the line pinned with the
+  `set-mark` command. The mark is cleared with `clear-mark`.
+
+All four options accept the standard style syntax. Match and mark styles are
+applied before selection and cursor highlights so that the selection and cursor
+always take visual priority over match/mark colouring.
+
 ## Usage
 
 ```

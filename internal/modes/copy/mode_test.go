@@ -546,3 +546,153 @@ func TestRender_CursorInSelection_DoubleReverseCancels(t *testing.T) {
 		t.Errorf("cursor==anchor col %d: double-reverse should cancel, but AttrReverse is set", cursorCol)
 	}
 }
+
+// ---- search match / mark style rendering -----------------------------------
+
+// TestRender_MatchStyle applies MatchStyle and verifies non-current match cells
+// carry the expected background colour.
+func TestRender_MatchStyle(t *testing.T) {
+	// Three lines; "banana" appears on rows 1 and 3 (indices 1, 3).
+	sb := &stubScrollback{
+		lines:  makeLines("apple", "banana", "cherry", "banana"),
+		width:  80,
+		height: 10,
+	}
+	m := copymode.New(sb) // cursor starts at row 3 (last "banana")
+	m.SetStyles(copymode.CopyStyles{
+		MatchStyle:        "bg=blue",
+		CurrentMatchStyle: "bg=red",
+	})
+	m.SetSearch("banana", true) // advances cursor to next match
+
+	canvas := newTestCanvas(10, 10)
+	m.Render(canvas)
+
+	// Determine which row the cursor ended up on (that's the current match row).
+	curRow := m.CursorRow()
+	// Find a non-current match row: the other "banana" row.
+	var nonCurrentRow int
+	if curRow == 1 {
+		nonCurrentRow = 3
+	} else {
+		nonCurrentRow = 1
+	}
+
+	// Cells at "banana" on nonCurrentRow (cols 0..5) should have bg=blue.
+	// blue is render.ColorIndexed|4.
+	for col := 0; col < 6; col++ {
+		viewRow := nonCurrentRow - m.ViewOffset()
+		if viewRow < 0 || viewRow >= 10 {
+			continue // not in viewport
+		}
+		cell := canvas.At(col, viewRow)
+		if cell.Bg == 0 {
+			t.Errorf("non-current match row %d col %d: want bg=blue set, got Bg=0", nonCurrentRow, col)
+		}
+	}
+}
+
+// TestRender_CurrentMatchStyle verifies that cells on the current match row
+// carry CurrentMatchStyle and not MatchStyle.
+func TestRender_CurrentMatchStyle(t *testing.T) {
+	sb := &stubScrollback{
+		lines:  makeLines("foo", "hello world", "bar"),
+		width:  80,
+		height: 10,
+	}
+	m := copymode.New(sb)
+	m.SetStyles(copymode.CopyStyles{
+		MatchStyle:        "bg=blue",
+		CurrentMatchStyle: "bg=green",
+	})
+	m.Command("history-top")
+	m.SetSearch("hello", true) // cursor moves to row 1
+
+	canvas := newTestCanvas(10, 10)
+	m.Render(canvas)
+
+	// Row 1, cols 0..4 ("hello") should have bg=green (current match).
+	for col := 0; col < 5; col++ {
+		cell := canvas.At(col, 1)
+		if cell.Bg == 0 {
+			t.Errorf("current match col %d: want bg set (green), got Bg=0", col)
+		}
+	}
+}
+
+// TestRender_MarkStyle verifies that all cells on the mark row carry MarkStyle.
+func TestRender_MarkStyle(t *testing.T) {
+	sb := newStub("first line", "second line", "third line")
+	m := copymode.New(sb)
+	m.SetStyles(copymode.CopyStyles{
+		MarkStyle: "bg=yellow",
+	})
+	m.Command("history-top") // cursor at row 0
+	m.Command("set-mark")    // mark row = 0
+
+	canvas := newTestCanvas(3, 10)
+	m.Render(canvas)
+
+	// Row 0 cells should carry the yellow background.
+	for col := 0; col < 10; col++ {
+		cell := canvas.At(col, 0)
+		if cell.Bg == 0 {
+			t.Errorf("mark row col %d: want bg=yellow set, got Bg=0", col)
+		}
+	}
+	// Row 1 should NOT carry the mark style.
+	for col := 0; col < 10; col++ {
+		cell := canvas.At(col, 1)
+		if cell.Bg != 0 {
+			t.Errorf("non-mark row 1 col %d: bg should not be set, got Bg=%d", col, cell.Bg)
+		}
+	}
+}
+
+// TestRender_ClearMark verifies that clear-mark removes the mark highlight.
+func TestRender_ClearMark(t *testing.T) {
+	sb := newStub("line0", "line1")
+	m := copymode.New(sb)
+	m.SetStyles(copymode.CopyStyles{MarkStyle: "bg=yellow"})
+	m.Command("history-top")
+	m.Command("set-mark")
+	m.Command("clear-mark")
+
+	if got := m.MarkRow(); got != -1 {
+		t.Errorf("after clear-mark: want MarkRow=-1, got %d", got)
+	}
+
+	canvas := newTestCanvas(2, 5)
+	m.Render(canvas)
+
+	// No cell should have a background set.
+	for row := 0; row < 2; row++ {
+		for col := 0; col < 5; col++ {
+			cell := canvas.At(col, row)
+			if cell.Bg != 0 {
+				t.Errorf("after clear-mark row %d col %d: unexpected Bg=%d", row, col, cell.Bg)
+			}
+		}
+	}
+}
+
+// TestRender_NoMatchStyle_NoColorChange ensures that when MatchStyle and
+// CurrentMatchStyle are empty, match cells carry no colour change.
+func TestRender_NoMatchStyle_NoColorChange(t *testing.T) {
+	sb := newStub("apple", "banana")
+	m := copymode.New(sb)
+	// No styles set (zero value CopyStyles).
+	m.Command("history-top")
+	m.SetSearch("banana", true)
+
+	canvas := newTestCanvas(2, 10)
+	m.Render(canvas)
+
+	// Row 1 cols 0..5 ("banana"): no colour change because MatchStyle is "".
+	for col := 0; col < 6; col++ {
+		cell := canvas.At(col, 1)
+		if cell.Fg != 0 || cell.Bg != 0 {
+			t.Errorf("no-style match col %d: expected Fg=0 Bg=0, got Fg=%d Bg=%d", col, cell.Fg, cell.Bg)
+		}
+	}
+}
