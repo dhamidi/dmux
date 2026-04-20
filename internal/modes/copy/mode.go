@@ -84,8 +84,25 @@ func (m *Mode) SelectionAnchor() (row, col int) {
 	return m.selAnchor.row, m.selAnchor.col
 }
 
+// inSelection reports whether the cell at (lineIdx, col) in the scrollback
+// buffer falls within the normalised selection range [start, end] (inclusive,
+// multi-line).
+func inSelection(lineIdx, col int, start, end pos) bool {
+	if lineIdx < start.row || lineIdx > end.row {
+		return false
+	}
+	if lineIdx == start.row && col < start.col {
+		return false
+	}
+	if lineIdx == end.row && col > end.col {
+		return false
+	}
+	return true
+}
+
 // Render draws the visible portion of the scrollback onto dst.
 // The viewport is adjusted so that the cursor is always on-screen.
+// Cursor and active selection are highlighted using AttrReverse.
 func (m *Mode) Render(dst modes.Canvas) {
 	size := dst.Size()
 	lines := m.sb.Lines()
@@ -98,6 +115,12 @@ func (m *Mode) Render(dst modes.Canvas) {
 	}
 	if m.viewOffset < 0 {
 		m.viewOffset = 0
+	}
+
+	hasSelection := m.selAnchor != nil
+	var selStart, selEnd pos
+	if hasSelection {
+		selStart, selEnd = m.selectionRange()
 	}
 
 	for row := 0; row < size.Rows; row++ {
@@ -113,6 +136,17 @@ func (m *Mode) Render(dst modes.Canvas) {
 			}
 			if c.Char == 0 {
 				c.Char = ' '
+			}
+			// Apply selection highlight.
+			if hasSelection && inSelection(lineIdx, col, selStart, selEnd) {
+				c.Attrs ^= modes.AttrReverse
+			}
+			// Apply cursor highlight (on top of selection).
+			// When the cursor is inside the selection the two ^= operations
+			// cancel out, leaving the cursor cell un-reversed — the expected
+			// tmux-compatible behaviour.
+			if row == m.curRow-m.viewOffset && col == m.curCol {
+				c.Attrs ^= modes.AttrReverse
 			}
 			dst.Set(col, row, c)
 		}

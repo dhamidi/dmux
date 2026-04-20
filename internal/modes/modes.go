@@ -11,9 +11,35 @@ import (
 //	Rect{X, Y, Width, Height int}
 type Rect = layout.Rect
 
-// Cell is a single terminal display cell.
+// SGR attribute flags for Cell.Attrs.
+const (
+	AttrBold      uint8 = 1 << 0
+	AttrReverse   uint8 = 1 << 1
+	AttrUnderline uint8 = 1 << 2
+	AttrBlink     uint8 = 1 << 3
+	AttrDim       uint8 = 1 << 4
+)
+
+// Color is an 8-bit terminal color index (0–255) or one of the sentinel
+// values ColorDefault (terminal default) and ColorRGB (use R,G,B fields).
+type Color uint16
+
+const (
+	ColorDefault Color = 0      // terminal's default color
+	ColorIndexed  Color = 0x100 // sentinel: use low byte as 256-color index
+	ColorRGB      Color = 0x200 // sentinel: use R,G,B fields
+)
+
+// Cell is a single terminal display cell with styling.
 type Cell struct {
-	Char rune // displayed character; 0 is treated as a space
+	Char  rune  // displayed character; 0 is treated as a space
+	Fg    Color // foreground color; ColorDefault means inherit
+	Bg    Color // background color; ColorDefault means inherit
+	Attrs uint8 // bitmask of Attr* constants
+	// FgR, FgG, FgB are meaningful only when Fg == ColorRGB.
+	FgR, FgG, FgB uint8
+	// BgR, BgG, BgB are meaningful only when Bg == ColorRGB.
+	BgR, BgG, BgB uint8
 }
 
 // Size represents the dimensions of a rectangular area in character cells.

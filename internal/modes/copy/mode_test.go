@@ -387,6 +387,7 @@ func (c *testCanvas) Set(col, row int, cell modes.Cell) {
 		c.cells[row][col] = cell
 	}
 }
+func (c *testCanvas) At(col, row int) modes.Cell { return c.cells[row][col] }
 
 func TestRender_Basic(t *testing.T) {
 	sb := newStub("abc", "def")
@@ -440,5 +441,108 @@ func TestRender_ViewportScrolls(t *testing.T) {
 				t.Errorf("viewport cell[%d][%d]: want %q, got %q", row, col, wantCh, got)
 			}
 		}
+	}
+}
+
+// ---- highlight rendering ---------------------------------------------------
+
+// TestRender_NoSelection_NoHighlightOutsideCursor verifies that without an
+// active selection, only the cursor cell carries AttrReverse.
+func TestRender_NoSelection_NoHighlightOutsideCursor(t *testing.T) {
+	sb := newStub("hello")
+	m := copymode.New(sb)
+	m.Command("history-top")
+	m.Command("start-of-line") // cursor at (row=0, col=0)
+
+	canvas := newTestCanvas(1, 5)
+	m.Render(canvas)
+
+	cursorCol := m.CursorCol()
+	for col := 0; col < 5; col++ {
+		cell := canvas.At(col, 0)
+		hasReverse := cell.Attrs&modes.AttrReverse != 0
+		if col == cursorCol {
+			if !hasReverse {
+				t.Errorf("cursor col %d: want AttrReverse set", col)
+			}
+		} else {
+			if hasReverse {
+				t.Errorf("non-cursor col %d: AttrReverse should not be set", col)
+			}
+		}
+	}
+}
+
+// TestRender_CursorHighlighted verifies that the cursor cell has AttrReverse.
+func TestRender_CursorHighlighted(t *testing.T) {
+	sb := newStub("hello")
+	m := copymode.New(sb)
+	m.Command("history-top")
+	m.Command("cursor-right") // cursor at col 1
+
+	canvas := newTestCanvas(1, 5)
+	m.Render(canvas)
+
+	col := m.CursorCol() // should be 1
+	row := m.CursorRow() - 0 // viewOffset is 0
+	cell := canvas.At(col, row)
+	if cell.Attrs&modes.AttrReverse == 0 {
+		t.Errorf("cursor cell (%d,%d): want AttrReverse set, got Attrs=%d", col, row, cell.Attrs)
+	}
+}
+
+// TestRender_SelectionHighlighted verifies that cells within the selection
+// range carry AttrReverse.
+func TestRender_SelectionHighlighted(t *testing.T) {
+	sb := newStub("hello")
+	m := copymode.New(sb)
+	m.Command("history-top")
+	m.Command("start-of-line")      // cursor at col 0
+	m.Command("begin-selection")    // anchor at (0,0)
+	m.Command("cursor-right")       // cursor at col 1
+	m.Command("cursor-right")       // cursor at col 2
+
+	canvas := newTestCanvas(1, 5)
+	m.Render(canvas)
+
+	// Columns 0..2 should be selected; cursor is at col 2.
+	// col 0 and 1: selected but not cursor → AttrReverse set.
+	// col 2: cursor AND selected → double XOR cancels → AttrReverse NOT set (tmux behaviour).
+	for col := 0; col <= 1; col++ {
+		cell := canvas.At(col, 0)
+		if cell.Attrs&modes.AttrReverse == 0 {
+			t.Errorf("selected col %d: want AttrReverse set, got Attrs=%d", col, cell.Attrs)
+		}
+	}
+	// Columns beyond selection should not be highlighted.
+	for col := 3; col < 5; col++ {
+		cell := canvas.At(col, 0)
+		if cell.Attrs&modes.AttrReverse != 0 {
+			t.Errorf("col %d outside selection: AttrReverse should not be set", col)
+		}
+	}
+}
+
+// TestRender_CursorInSelection_DoubleReverseCancels verifies the tmux-compatible
+// behaviour: when the cursor is inside the selection, the two ^= AttrReverse
+// operations cancel out, so the cursor cell appears un-reversed.
+// This is intentional — it matches how tmux distinguishes the cursor from the
+// selection highlight.
+func TestRender_CursorInSelection_DoubleReverseCancels(t *testing.T) {
+	sb := newStub("hello")
+	m := copymode.New(sb)
+	m.Command("history-top")
+	m.Command("start-of-line")   // cursor at col 0
+	m.Command("begin-selection") // anchor at col 0 == cursor → zero-length selection start
+
+	canvas := newTestCanvas(1, 5)
+	m.Render(canvas)
+
+	// cursor == anchor: both selection and cursor apply AttrReverse to the
+	// same cell, so the two XORs cancel and the cell is NOT reversed.
+	cursorCol := m.CursorCol()
+	cell := canvas.At(cursorCol, 0)
+	if cell.Attrs&modes.AttrReverse != 0 {
+		t.Errorf("cursor==anchor col %d: double-reverse should cancel, but AttrReverse is set", cursorCol)
 	}
 }

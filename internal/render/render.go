@@ -2,9 +2,35 @@ package render
 
 import "github.com/dhamidi/dmux/internal/layout"
 
-// Cell is a single display cell in a composed frame.
+// SGR attribute flags for Cell.Attrs.
+const (
+	AttrBold      uint8 = 1 << 0
+	AttrReverse   uint8 = 1 << 1
+	AttrUnderline uint8 = 1 << 2
+	AttrBlink     uint8 = 1 << 3
+	AttrDim       uint8 = 1 << 4
+)
+
+// Color is an 8-bit terminal color index (0–255) or one of the sentinel
+// values ColorDefault (terminal default) and ColorRGB (use R,G,B fields).
+type Color uint16
+
+const (
+	ColorDefault Color = 0      // terminal's default color
+	ColorIndexed  Color = 0x100 // sentinel: use low byte as 256-color index
+	ColorRGB      Color = 0x200 // sentinel: use R,G,B fields
+)
+
+// Cell is a single display cell in a composed frame with styling.
 type Cell struct {
-	Char rune // displayed character; 0 means empty (treated as space)
+	Char  rune  // displayed character; 0 means empty (treated as space)
+	Fg    Color // foreground color; ColorDefault means inherit
+	Bg    Color // background color; ColorDefault means inherit
+	Attrs uint8 // bitmask of Attr* constants
+	// FgR, FgG, FgB are meaningful only when Fg == ColorRGB.
+	FgR, FgG, FgB uint8
+	// BgR, BgG, BgB are meaningful only when Bg == ColorRGB.
+	BgR, BgG, BgB uint8
 }
 
 // CellGrid is a rectangular grid of [Cell] values in row-major order.
