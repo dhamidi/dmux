@@ -97,6 +97,10 @@ func Run(cfg Config) error {
 	s.mutator = newServerMutator(s.state)
 	s.queue = command.NewQueue()
 
+	if err := loadDefaultBindings(s.mutator); err != nil {
+		return fmt.Errorf("load default bindings: %w", err)
+	}
+
 	s.wg.Add(1)
 	go s.acceptLoop()
 
@@ -207,6 +211,19 @@ func (s *srv) serveConn(nc net.Conn) {
 	s.mu.Unlock()
 
 	s.log.Printf("client %s attached (tty=%s term=%s)", client.ID, client.TTY, client.Term)
+
+	// S6: auto-create an initial session when the first client attaches to a
+	// server that has no sessions (mirrors tmux's startup behaviour).
+	s.mu.Lock()
+	noSessions := len(s.state.Sessions) == 0
+	s.mu.Unlock()
+
+	if noSessions {
+		view, err := s.mutator.NewSession("") // name defaults to "0"
+		if err == nil {
+			_ = s.mutator.AttachClient(string(cc.id), view.ID)
+		}
+	}
 
 	defer func() {
 		s.mu.Lock()

@@ -3,6 +3,8 @@ package server
 import (
 	"testing"
 
+	"github.com/dhamidi/dmux/internal/keys"
+	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/session"
 )
 
@@ -14,6 +16,9 @@ func (p *mockPane) Resize(_, _ int) error                 { return nil }
 func (p *mockPane) Close() error                          { return nil }
 func (p *mockPane) CaptureContent(_ bool) ([]byte, error) { return nil, nil }
 func (p *mockPane) Respawn(_ string) error                { return nil }
+func (p *mockPane) SendKey(_ keys.Key) error              { return nil }
+func (p *mockPane) Write(_ []byte) error                  { return nil }
+func (p *mockPane) Snapshot() pane.CellGrid               { return pane.CellGrid{} }
 
 // helpers
 

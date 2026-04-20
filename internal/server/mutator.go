@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/dhamidi/dmux/internal/command"
+	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/session"
 )
 
@@ -26,7 +27,16 @@ func errStub(method string) error {
 }
 
 func (m *serverMutator) NewSession(name string) (command.SessionView, error) {
-	return command.SessionView{}, errStub("new-session")
+	if name == "" {
+		name = fmt.Sprintf("%d", len(m.state.Sessions))
+	}
+	id := session.SessionID(fmt.Sprintf("$%d", len(m.state.Sessions)+1))
+	sess := session.NewSession(id, name, m.state.Options)
+	m.state.AddSession(sess)
+	return command.SessionView{
+		ID:   string(id),
+		Name: name,
+	}, nil
 }
 
 func (m *serverMutator) KillSession(id string) error {
@@ -38,7 +48,11 @@ func (m *serverMutator) RenameSession(id, name string) error {
 }
 
 func (m *serverMutator) AttachClient(clientID, sessionID string) error {
-	return errStub("attach-client")
+	c, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("attach-client: client %q not found", clientID)
+	}
+	return m.state.AttachClient(c, session.SessionID(sessionID))
 }
 
 func (m *serverMutator) DetachClient(clientID string) error {
@@ -89,8 +103,18 @@ func (m *serverMutator) RespawnPane(paneID int, shell string) error {
 	return errStub("respawn-pane")
 }
 
-func (m *serverMutator) BindKey(table, key, cmd string) error {
-	return errStub("bind-key")
+func (m *serverMutator) BindKey(table, keyStr, cmd string) error {
+	k, err := keys.Parse(keyStr)
+	if err != nil {
+		return fmt.Errorf("bind-key: %w", err)
+	}
+	t, ok := m.state.KeyTables.Get(table)
+	if !ok {
+		t = keys.NewTable()
+		m.state.KeyTables.Register(table, t)
+	}
+	t.Bind(k, cmd)
+	return nil
 }
 
 func (m *serverMutator) UnbindKey(table, key string) error {

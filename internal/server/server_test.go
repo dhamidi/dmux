@@ -336,6 +336,64 @@ func TestCommandDispatch(t *testing.T) {
 	}
 }
 
+// TestAutoCreateInitialSession verifies that the server automatically creates
+// a session when the first client attaches to a server with no sessions (S6).
+func TestAutoCreateInitialSession(t *testing.T) {
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+
+	sendHandshake(t, clientConn)
+
+	// Give the server time to process the identify sequence and auto-create a session.
+	time.Sleep(20 * time.Millisecond)
+
+	// Verify via list-sessions that exactly one session was created.
+	cm := proto.CommandMsg{Argv: []string{"list-sessions"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write list-sessions: %v", err)
+	}
+	if err := clientConn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	msgType, payload, err := proto.ReadMsg(clientConn)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if msgType != proto.MsgStdout {
+		t.Fatalf("expected MsgStdout, got %s", msgType)
+	}
+	var sm proto.StdoutMsg
+	if err := sm.Decode(payload); err != nil {
+		t.Fatalf("decode StdoutMsg: %v", err)
+	}
+	// The auto-created session is named "0".
+	if !strings.Contains(string(sm.Data), "0:") {
+		t.Fatalf("expected auto-created session '0' in list-sessions output, got: %q", sm.Data)
+	}
+	clientConn.SetDeadline(time.Time{}) //nolint:errcheck
+
+	sigs <- fakeSignal("SIGTERM")
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}
+
 // TestClientShutdownRequest verifies that a client sending MsgShutdown
 // triggers server shutdown without an external signal.
 func TestClientShutdownRequest(t *testing.T) {
