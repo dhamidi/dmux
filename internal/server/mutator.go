@@ -1729,7 +1729,81 @@ func (m *serverMutator) EnterChooseTree(clientID, sessionID, windowID string) er
 }
 
 func (m *serverMutator) EnterCustomizeMode(clientID string) error {
-	return errStub("customize-mode")
+	client, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("customize-mode: client %q not found", clientID)
+	}
+
+	// Snapshot client terminal size for the overlay rectangle.
+	rows, cols := 24, 80
+	if client.Size.Rows > 0 {
+		rows = client.Size.Rows
+	}
+	if client.Size.Cols > 0 {
+		cols = client.Size.Cols
+	}
+
+	// Collect options: server first, then active session and window.
+	var opts []modes.CustomizeOptionEntry
+	if m.state.Options != nil {
+		m.state.Options.Each(func(name string, val options.Value) {
+			opts = append(opts, modes.CustomizeOptionEntry{
+				Scope: "server",
+				Name:  name,
+				Value: val.String(),
+			})
+		})
+	}
+	if client.Session != nil {
+		sessScope := "session:" + string(client.Session.ID)
+		if client.Session.Options != nil {
+			client.Session.Options.Each(func(name string, val options.Value) {
+				opts = append(opts, modes.CustomizeOptionEntry{
+					Scope: sessScope,
+					Name:  name,
+					Value: val.String(),
+				})
+			})
+		}
+		if client.Session.Current != nil && client.Session.Current.Window.Options != nil {
+			winScope := "window:" + string(client.Session.ID) + ":" + string(client.Session.Current.Window.ID)
+			client.Session.Current.Window.Options.Each(func(name string, val options.Value) {
+				opts = append(opts, modes.CustomizeOptionEntry{
+					Scope: winScope,
+					Name:  name,
+					Value: val.String(),
+				})
+			})
+		}
+	}
+
+	// Collect key bindings from all tables.
+	var bindings []modes.CustomizeBindingEntry
+	for _, tableName := range m.state.KeyTables.Names() {
+		t, ok := m.state.KeyTables.Get(tableName)
+		if !ok {
+			continue
+		}
+		t.Each(func(k keys.Key, cmd keys.BoundCommand) {
+			bindings = append(bindings, modes.CustomizeBindingEntry{
+				Table:   tableName,
+				Key:     k.String(),
+				Command: fmt.Sprintf("%v", cmd),
+			})
+		})
+	}
+
+	setOption := func(scope, name, value string) error {
+		return m.SetOption(scope, name, value)
+	}
+	bindKeyFn := func(table, key, cmd string) error {
+		return m.BindKey(table, key, cmd)
+	}
+
+	rect := modes.Rect{X: 0, Y: 0, Width: cols, Height: rows}
+	overlay := modes.NewCustomizeOverlay(rect, opts, bindings, setOption, bindKeyFn)
+	m.PushClientOverlay(clientID, overlay)
+	return nil
 }
 
 // chooseBufferClientOverlay wraps a treemode.Mode for the choose-buffer
