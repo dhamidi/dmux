@@ -1290,7 +1290,42 @@ func (m *serverMutator) MovePane(srcSessionID, srcWindowID string, srcPaneID int
 }
 
 func (m *serverMutator) SlicePane(sessionID, windowID string, paneID int) (command.PaneView, error) {
-	return command.PaneView{}, errStub("slice-pane")
+	win, err := m.findWindow(sessionID, windowID)
+	if err != nil {
+		return command.PaneView{}, fmt.Errorf("slice-pane: %w", err)
+	}
+
+	targetID := session.PaneID(paneID)
+	if _, ok := win.Panes[targetID]; !ok {
+		return command.PaneView{}, fmt.Errorf("slice-pane: pane %d not found in window %q", paneID, windowID)
+	}
+
+	newPaneID := win.Layout.Split(targetID, layout.Vertical)
+
+	p, err := m.newPane(pane.Config{ID: newPaneID})
+	if err != nil {
+		return command.PaneView{}, fmt.Errorf("slice-pane: creating pane: %w", err)
+	}
+
+	win.AddPane(newPaneID, p)
+
+	// Notify PTY of dimension changes for all panes in the window.
+	for id, wp := range win.Panes {
+		r := win.Layout.Rect(id)
+		if r.Width > 0 && r.Height > 0 {
+			_ = wp.Resize(r.Width, r.Height)
+		}
+	}
+
+	if m.watchPane != nil {
+		m.watchPane(int(newPaneID))
+	}
+
+	m.RunHook("after-slice-pane")
+	return command.PaneView{
+		ID:    int(newPaneID),
+		Title: p.Title(),
+	}, nil
 }
 
 func (m *serverMutator) RespawnWindow(sessionID, windowID, shell, dir string) error {
