@@ -31,8 +31,9 @@ func runRespawnWindow(ctx *command.Ctx) command.Result {
 		shell = ctx.Args.Positional[0]
 	}
 	dir := ctx.Args.Option("c")
+	kill := ctx.Args.Flag("k")
 
-	if err := ctx.Mutator.RespawnWindow(ctx.Target.Session.ID, ctx.Target.Window.ID, shell, dir); err != nil {
+	if err := ctx.Mutator.RespawnWindow(ctx.Target.Session.ID, ctx.Target.Window.ID, shell, dir, kill, false); err != nil {
 		return command.Errorf("respawn-window: %v", err)
 	}
 	return command.OK()

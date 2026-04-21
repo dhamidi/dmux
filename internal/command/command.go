@@ -346,9 +346,11 @@ type Mutator interface {
 	// rectangular region of an existing pane's snapshot.
 	SlicePane(sessionID, windowID string, paneID int) (PaneView, error)
 
-	// RespawnWindow relaunches the shell or a given command in all dead panes
-	// of the target window, optionally killing live panes first.
-	RespawnWindow(sessionID, windowID, shell, dir string) error
+	// RespawnWindow relaunches the shell or a given command in all panes of
+	// the target window. If kill is false and any pane's process is still
+	// alive, it returns an error. If keepHistory is false, scrollback is
+	// cleared before each pane is respawned.
+	RespawnWindow(sessionID, windowID, shell, dir string, kill bool, keepHistory bool) error
 
 	// ClearHistory discards the scrollback buffer of a pane.
 	// If visibleToo is true the visible screen is also erased.

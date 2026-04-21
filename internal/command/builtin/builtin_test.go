@@ -168,6 +168,7 @@ type testBackend struct {
 	respawnedWindows []struct {
 		sessionID, windowID string
 		shell, dir          string
+		kill, keepHistory   bool
 	}
 	clearedHistoryPanes []struct {
 		paneID     int
@@ -701,11 +702,12 @@ func (b *testBackend) SlicePane(sessionID, windowID string, paneID int) (command
 	return command.PaneView{ID: 99, Title: "slice"}, nil
 }
 
-func (b *testBackend) RespawnWindow(sessionID, windowID, shell, dir string) error {
+func (b *testBackend) RespawnWindow(sessionID, windowID, shell, dir string, kill bool, keepHistory bool) error {
 	b.respawnedWindows = append(b.respawnedWindows, struct {
 		sessionID, windowID string
 		shell, dir          string
-	}{sessionID, windowID, shell, dir})
+		kill, keepHistory   bool
+	}{sessionID, windowID, shell, dir, kill, keepHistory})
 	return nil
 }
 

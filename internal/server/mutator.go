@@ -1328,8 +1328,49 @@ func (m *serverMutator) SlicePane(sessionID, windowID string, paneID int) (comma
 	}, nil
 }
 
-func (m *serverMutator) RespawnWindow(sessionID, windowID, shell, dir string) error {
-	return errStub("respawn-window")
+func (m *serverMutator) RespawnWindow(sessionID, windowID, shell, dir string, kill bool, keepHistory bool) error {
+	sess, ok := m.state.Sessions[session.SessionID(sessionID)]
+	if !ok {
+		return fmt.Errorf("respawn-window: session %q not found", sessionID)
+	}
+
+	var win *session.Window
+	for _, wl := range sess.Windows {
+		if wl.Window.ID == session.WindowID(windowID) {
+			win = wl.Window
+			break
+		}
+	}
+	if win == nil {
+		return fmt.Errorf("respawn-window: window %q not found in session %q", windowID, sessionID)
+	}
+
+	// If -k is not set, fail early if any pane's process is still alive.
+	if !kill {
+		for _, p := range win.Panes {
+			pid := p.ShellPID()
+			if pid > 0 {
+				proc, findErr := os.FindProcess(pid)
+				alive := findErr == nil && proc.Signal(syscall.Signal(0)) == nil
+				if alive {
+					return fmt.Errorf("pane still active")
+				}
+			}
+		}
+	}
+
+	// Respawn each pane in the window.
+	for _, p := range win.Panes {
+		if !keepHistory {
+			p.ClearHistory()
+		}
+		if err := p.Respawn(shell); err != nil {
+			return fmt.Errorf("respawn-window: %w", err)
+		}
+	}
+
+	m.markSessionDirty(sess)
+	return nil
 }
 
 // ─── Pane pipe / clear operations ────────────────────────────────────────────
