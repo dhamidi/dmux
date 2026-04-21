@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/dhamidi/dmux/internal/command"
 	"github.com/dhamidi/dmux/internal/control"
@@ -16,6 +17,7 @@ import (
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/modes"
 	copymode "github.com/dhamidi/dmux/internal/modes/copy"
+	displaypanes "github.com/dhamidi/dmux/internal/modes/displaypanes"
 	menumode "github.com/dhamidi/dmux/internal/modes/menu"
 	popupmode "github.com/dhamidi/dmux/internal/modes/popup"
 	promptmode "github.com/dhamidi/dmux/internal/modes/prompt"
@@ -1877,8 +1879,109 @@ func (m *serverMutator) DisplayMenu(clientID string, items []command.MenuEntry) 
 	return nil
 }
 
+// displayPanesClientOverlay wraps a *displaypanes.Mode and intercepts
+// SelectPaneCommand outcomes, calling onSelect and returning CloseMode so the
+// server's overlay dispatch loop pops the overlay automatically.
+type displayPanesClientOverlay struct {
+	mode     *displaypanes.Mode
+	onSelect func(paneNumber int)
+}
+
+func (d *displayPanesClientOverlay) Rect() modes.Rect                      { return d.mode.Rect() }
+func (d *displayPanesClientOverlay) Render(dst []modes.Cell)               { d.mode.Render(dst) }
+func (d *displayPanesClientOverlay) CaptureFocus() bool                    { return d.mode.CaptureFocus() }
+func (d *displayPanesClientOverlay) Close()                                { d.mode.Close() }
+func (d *displayPanesClientOverlay) Mouse(ev keys.MouseEvent) modes.Outcome { return d.mode.Mouse(ev) }
+
+func (d *displayPanesClientOverlay) Key(k keys.Key) modes.Outcome {
+	outcome := d.mode.Key(k)
+	if outcome.Kind == modes.KindCommand {
+		if cmd, ok := outcome.Cmd.(displaypanes.SelectPaneCommand); ok && d.onSelect != nil {
+			d.onSelect(cmd.PaneNumber)
+		}
+		return modes.CloseMode()
+	}
+	return outcome
+}
+
 func (m *serverMutator) DisplayPanes(clientID string) error {
-	return errStub("display-panes")
+	client, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("display-panes: client %q not found", clientID)
+	}
+	if client.Session == nil {
+		return fmt.Errorf("display-panes: client %q has no attached session", clientID)
+	}
+	if client.Session.Current == nil {
+		return fmt.Errorf("display-panes: client %q has no current window", clientID)
+	}
+
+	win := client.Session.Current.Window
+	sessID := string(client.Session.ID)
+	winID := string(win.ID)
+
+	// Collect visible panes from the layout tree, assigning numbers 0–9.
+	var paneInfos []displaypanes.PaneInfo
+	number := 0
+	for leafID := range win.Layout.Leaves() {
+		if number > 9 {
+			break
+		}
+		r := win.Layout.Rect(leafID)
+		if r.Width == 0 || r.Height == 0 {
+			continue // hidden (e.g. behind a zoomed pane)
+		}
+		paneInfos = append(paneInfos, displaypanes.PaneInfo{
+			ID:     fmt.Sprintf("%d", int(leafID)),
+			Number: number,
+			Bounds: modes.Rect{X: r.X, Y: r.Y, Width: r.Width, Height: r.Height},
+		})
+		number++
+	}
+
+	// Client terminal size for the overlay bounds.
+	rows, cols := 24, 80
+	if client.Size.Rows > 0 {
+		rows = client.Size.Rows
+	}
+	if client.Size.Cols > 0 {
+		cols = client.Size.Cols
+	}
+	bounds := modes.Rect{X: 0, Y: 0, Width: cols, Height: rows}
+
+	// Read display-panes-time option (milliseconds).
+	durationMs := 1000
+	if m.state.Options != nil {
+		if d, ok := m.state.Options.GetInt("display-panes-time"); ok {
+			durationMs = d
+		}
+	}
+
+	// onSelect resolves the pane number to a pane ID and calls SelectPane.
+	onSelect := func(paneNumber int) {
+		for _, pi := range paneInfos {
+			if pi.Number == paneNumber {
+				paneID, err := strconv.Atoi(pi.ID)
+				if err == nil {
+					m.SelectPane(sessID, winID, paneID) //nolint:errcheck
+				}
+				return
+			}
+		}
+	}
+
+	// scheduleTimeout arranges auto-dismissal after durationMs milliseconds.
+	scheduleTimeout := func(dismiss func()) {
+		time.AfterFunc(time.Duration(durationMs)*time.Millisecond, func() {
+			dismiss()
+			m.PopClientOverlay(clientID)
+		})
+	}
+
+	mode := displaypanes.New(bounds, paneInfos, scheduleTimeout)
+	overlay := &displayPanesClientOverlay{mode: mode, onSelect: onSelect}
+	m.PushClientOverlay(clientID, overlay)
+	return nil
 }
 
 func (m *serverMutator) CommandPrompt(clientID, promptStr, initialValue string) error {
