@@ -454,6 +454,26 @@ func (s *srv) serveConn(nc net.Conn) {
 		return
 	}
 
+	// Resolve the client's username from the environment sent during IDENTIFY.
+	client.UserName = client.Env["USER"]
+
+	// Step 2b: ACL enforcement.
+	s.mu.Lock()
+	denyAll := s.state.ACLDenyAll
+	aclAllow, hasACL := s.state.ACL[client.UserName]
+	_, hasWrite := s.state.ACLWriteAccess[client.UserName]
+	s.mu.Unlock()
+
+	if denyAll || (hasACL && !aclAllow) {
+		em := proto.ExitMsg{Code: 1}
+		_ = proto.WriteMsg(nc, proto.MsgExit, em.Encode())
+		s.log.Printf("access denied for user %q", client.UserName)
+		return
+	}
+	if hasACL && aclAllow && !hasWrite {
+		client.Readonly = true
+	}
+
 	// Step 3: register client
 	cc := &clientConn{
 		id:      client.ID,
@@ -635,7 +655,11 @@ func (s *srv) clientLoop(cc *clientConn) {
 			s.mu.Lock()
 			clientView, _ := s.store.GetClient(string(cc.client.ID))
 			s.mu.Unlock()
-			result := command.Dispatch(cm.Argv[0], cm.Argv[1:], s.store, clientView, s.queue, s.mutator)
+			mut := s.mutator
+			if cc.client.Readonly {
+				mut = &readOnlyMutator{Mutator: s.mutator}
+			}
+			result := command.Dispatch(cm.Argv[0], cm.Argv[1:], s.store, clientView, s.queue, mut)
 			s.queue.Drain()
 			if result.ControlMode {
 				cc.controlMode = true
@@ -1464,3 +1488,138 @@ func statusAttrsToRenderAttrs(sAttrs uint16) uint16 {
 	}
 	return r
 }
+
+// ─── Read-only mutator ────────────────────────────────────────────────────────
+
+// errReadOnly is returned by readOnlyMutator for any state-mutating operation.
+var errReadOnly = fmt.Errorf("permission denied: read-only connection")
+
+// readOnlyMutator wraps a command.Mutator and blocks all state-mutating
+// operations. Read-only query methods (CapturePane, ListKeyBindings,
+// ListOptions, ListBuffers, ListEnvironment, ShowMessages, ListHooks,
+// FindWindow) delegate to the underlying mutator.
+type readOnlyMutator struct {
+	command.Mutator // delegates read-only methods to the underlying mutator
+}
+
+func (m *readOnlyMutator) NewSession(name string) (command.SessionView, error) {
+	return command.SessionView{}, errReadOnly
+}
+func (m *readOnlyMutator) KillSession(id string) error { return errReadOnly }
+func (m *readOnlyMutator) RenameSession(id, name string) error { return errReadOnly }
+
+func (m *readOnlyMutator) AttachClient(clientID, sessionID string) error { return errReadOnly }
+func (m *readOnlyMutator) DetachClient(clientID string) error             { return errReadOnly }
+func (m *readOnlyMutator) SwitchClient(clientID, sessionID string) error  { return errReadOnly }
+
+func (m *readOnlyMutator) NewWindow(sessionID, name string) (command.WindowView, error) {
+	return command.WindowView{}, errReadOnly
+}
+func (m *readOnlyMutator) KillWindow(sessionID, windowID string) error              { return errReadOnly }
+func (m *readOnlyMutator) RenameWindow(sessionID, windowID, name string) error      { return errReadOnly }
+func (m *readOnlyMutator) SelectWindow(sessionID, windowID string) error            { return errReadOnly }
+
+func (m *readOnlyMutator) SplitWindow(sessionID, windowID string) (command.PaneView, error) {
+	return command.PaneView{}, errReadOnly
+}
+func (m *readOnlyMutator) KillPane(paneID int) error                                   { return errReadOnly }
+func (m *readOnlyMutator) SelectPane(sessionID, windowID string, paneID int) error     { return errReadOnly }
+func (m *readOnlyMutator) ResizePane(paneID int, direction string, amount int) error   { return errReadOnly }
+func (m *readOnlyMutator) RespawnPane(paneID int, shell string, kill bool, keepHistory bool) error {
+	return errReadOnly
+}
+
+func (m *readOnlyMutator) BindKey(table, key, cmd string) error   { return errReadOnly }
+func (m *readOnlyMutator) UnbindKey(table, key string) error      { return errReadOnly }
+
+func (m *readOnlyMutator) SetOption(scope, name, value string) error { return errReadOnly }
+func (m *readOnlyMutator) UnsetOption(scope, name string) error      { return errReadOnly }
+
+func (m *readOnlyMutator) KillServer() error { return errReadOnly }
+
+func (m *readOnlyMutator) DisplayMessage(clientID, msg string) error          { return errReadOnly }
+func (m *readOnlyMutator) SendKeys(paneID int, keys []string) error           { return errReadOnly }
+func (m *readOnlyMutator) RunShell(cmd string, background bool) (string, error) {
+	return "", errReadOnly
+}
+
+func (m *readOnlyMutator) SetBuffer(name, data string) error          { return errReadOnly }
+func (m *readOnlyMutator) DeleteBuffer(name string) error             { return errReadOnly }
+func (m *readOnlyMutator) LoadBuffer(name, path string) error         { return errReadOnly }
+func (m *readOnlyMutator) SaveBuffer(name, path string) error         { return errReadOnly }
+func (m *readOnlyMutator) PasteBuffer(name string, paneID int) error  { return errReadOnly }
+
+func (m *readOnlyMutator) ApplyLayout(sessionID, windowID, layoutSpec string) error { return errReadOnly }
+func (m *readOnlyMutator) RotateWindow(sessionID, windowID string, forward bool) error { return errReadOnly }
+func (m *readOnlyMutator) ResizeWindow(sessionID, windowID string, cols, rows int) error {
+	return errReadOnly
+}
+
+func (m *readOnlyMutator) MoveWindow(sessionID, windowID string, newIndex int) error { return errReadOnly }
+func (m *readOnlyMutator) SwapWindows(sessionID, aWindowID, bWindowID string) error  { return errReadOnly }
+func (m *readOnlyMutator) LinkWindow(srcSessionID, srcWindowID, dstSessionID string, index int, afterIndex, beforeIndex, selectWin, killExisting bool) error {
+	return errReadOnly
+}
+func (m *readOnlyMutator) UnlinkWindow(sessionID, windowID string, kill bool) error { return errReadOnly }
+
+func (m *readOnlyMutator) SwapPane(sessionID, windowID string, paneA, paneB int) error { return errReadOnly }
+func (m *readOnlyMutator) BreakPane(sessionID, windowID string, paneID int) (command.WindowView, error) {
+	return command.WindowView{}, errReadOnly
+}
+func (m *readOnlyMutator) JoinPane(srcSessionID, srcWindowID string, srcPaneID int, dstSessionID, dstWindowID string) error {
+	return errReadOnly
+}
+
+func (m *readOnlyMutator) SetEnvironment(scope, name, value string, remove bool) error { return errReadOnly }
+
+func (m *readOnlyMutator) LockServer() error              { return errReadOnly }
+func (m *readOnlyMutator) LockClient(clientID string) error { return errReadOnly }
+func (m *readOnlyMutator) WaitFor(channel string) error   { return errReadOnly }
+func (m *readOnlyMutator) SignalChannel(channel string)   {} // no-op: void method
+
+func (m *readOnlyMutator) EnterCopyMode(clientID string, scrollback bool) error  { return errReadOnly }
+func (m *readOnlyMutator) EnterChooseTree(clientID, sessionID, windowID string) error { return errReadOnly }
+func (m *readOnlyMutator) EnterCustomizeMode(clientID string) error               { return errReadOnly }
+func (m *readOnlyMutator) EnterChooseBuffer(clientID, windowID string, items []command.ChooserItem, template string) error {
+	return errReadOnly
+}
+func (m *readOnlyMutator) EnterChooseClient(clientID, windowID string, items []command.ChooserItem, template string) error {
+	return errReadOnly
+}
+func (m *readOnlyMutator) EnterClockMode(clientID string, paneID int) error { return errReadOnly }
+func (m *readOnlyMutator) DisplayPopup(clientID, cmdStr, title string, cols, rows int) error {
+	return errReadOnly
+}
+func (m *readOnlyMutator) DisplayMenu(clientID string, items []command.MenuEntry) error { return errReadOnly }
+func (m *readOnlyMutator) DisplayPanes(clientID string) error                           { return errReadOnly }
+func (m *readOnlyMutator) CommandPrompt(clientID, prompt, initialValue string) error    { return errReadOnly }
+func (m *readOnlyMutator) ConfirmBefore(clientID, prompt, cmdStr string) error          { return errReadOnly }
+
+func (m *readOnlyMutator) SetHook(event, cmd string) error { return errReadOnly }
+func (m *readOnlyMutator) RunHook(event string)            {} // no-op: void method
+
+func (m *readOnlyMutator) RefreshClient(clientID string) error                               { return errReadOnly }
+func (m *readOnlyMutator) ResizeClient(clientID string, cols, rows int) error                { return errReadOnly }
+func (m *readOnlyMutator) SuspendClient(clientID string) error                               { return errReadOnly }
+func (m *readOnlyMutator) SetClientFeatures(clientID, featuresStr string) error              { return errReadOnly }
+func (m *readOnlyMutator) RequestClientClipboard(clientID string) error                      { return errReadOnly }
+func (m *readOnlyMutator) AddClientSubscription(clientID, name, notify, format string) error { return errReadOnly }
+func (m *readOnlyMutator) ScrollClientViewport(clientID string, dx, dy int) error            { return errReadOnly }
+
+func (m *readOnlyMutator) SetServerAccess(username string, allow, write bool) error { return errReadOnly }
+func (m *readOnlyMutator) DenyAllClients() error                                    { return errReadOnly }
+
+func (m *readOnlyMutator) PipePane(paneID int, shellCmd string, inFlag, outFlag, onceFlag bool) error {
+	return errReadOnly
+}
+func (m *readOnlyMutator) MovePane(srcSessionID, srcWindowID string, srcPaneID int, dstSessionID, dstWindowID string) error {
+	return errReadOnly
+}
+func (m *readOnlyMutator) SlicePane(sessionID, windowID string, paneID int) (command.PaneView, error) {
+	return command.PaneView{}, errReadOnly
+}
+func (m *readOnlyMutator) RespawnWindow(sessionID, windowID, shell, dir string, kill bool, keepHistory bool) error {
+	return errReadOnly
+}
+func (m *readOnlyMutator) ClearHistory(paneID int, visibleToo bool) error { return errReadOnly }
+func (m *readOnlyMutator) ClearPane(paneID int) error                     { return errReadOnly }

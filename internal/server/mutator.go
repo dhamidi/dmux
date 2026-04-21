@@ -2574,11 +2574,8 @@ func (m *serverMutator) ScrollClientViewport(clientID string, dx, dy int) error 
 
 // SetServerAccess records an ACL entry for username on the server.
 // allow=true grants access; allow=false denies it. write=true additionally
-// grants write access.
-//
-// TODO: enforce this ACL in the connection-accept loop (server.Run) by
-// looking up the connecting user's Unix username in m.state.ACL before
-// accepting the connection.
+// grants write access. The ACL is enforced in the connection-accept loop
+// (server.Run) by looking up the connecting user's username in m.state.ACL.
 func (m *serverMutator) SetServerAccess(username string, allow, write bool) error {
 	if username == "" {
 		return fmt.Errorf("server-access: username must not be empty")
@@ -2593,9 +2590,8 @@ func (m *serverMutator) SetServerAccess(username string, allow, write bool) erro
 }
 
 // DenyAllClients sets a flag that causes the server to reject all new
-// incoming connections.
-//
-// TODO: enforce m.state.ACLDenyAll in the connection-accept loop (server.Run).
+// incoming connections. The flag is enforced in the connection-accept loop
+// (server.Run).
 func (m *serverMutator) DenyAllClients() error {
 	m.state.ACLDenyAll = true
 	return nil

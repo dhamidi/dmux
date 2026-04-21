@@ -2028,3 +2028,240 @@ func TestOverlayRendered(t *testing.T) {
 		t.Fatal("Run() did not return within timeout after SIGTERM")
 	}
 }
+
+// sendHandshakeAs writes a VERSION + IDENTIFY sequence to conn, reporting the
+// connecting client as having the given Unix username via the USER env variable.
+func sendHandshakeAs(t *testing.T, conn net.Conn, username string) {
+	t.Helper()
+
+	if err := proto.WriteMsg(conn, proto.MsgVersion, (proto.VersionMsg{Version: 1}).Encode()); err != nil {
+		t.Fatalf("sendHandshakeAs: write VERSION: %v", err)
+	}
+
+	msgs := []struct {
+		t proto.MsgType
+		p []byte
+	}{
+		{proto.MsgIdentifyFlags, (proto.IdentifyFlagsMsg{Flags: 0}).Encode()},
+		{proto.MsgIdentifyTerm, (proto.IdentifyTermMsg{Term: "xterm-256color"}).Encode()},
+		{proto.MsgIdentifyTTYName, (proto.IdentifyTTYNameMsg{TTYName: "/dev/pts/0"}).Encode()},
+		{proto.MsgIdentifyCWD, (proto.IdentifyCWDMsg{CWD: "/tmp"}).Encode()},
+		{proto.MsgIdentifyEnviron, (proto.IdentifyEnvironMsg{Pairs: []string{
+			"TERM=xterm-256color",
+			"HOME=/home/" + username,
+			"USER=" + username,
+		}}).Encode()},
+		{proto.MsgIdentifyClientPID, (proto.IdentifyClientPIDMsg{PID: 9999}).Encode()},
+		{proto.MsgIdentifyFeatures, (proto.IdentifyFeaturesMsg{Features: 0}).Encode()},
+		{proto.MsgIdentifyDone, (proto.IdentifyDoneMsg{}).Encode()},
+	}
+	for _, m := range msgs {
+		if err := proto.WriteMsg(conn, m.t, m.p); err != nil {
+			t.Fatalf("sendHandshakeAs: write %s: %v", m.t, err)
+		}
+	}
+}
+
+// readNextMsg reads one message from conn with a 2-second deadline.
+func readNextMsg(t *testing.T, conn net.Conn) (proto.MsgType, []byte) {
+	t.Helper()
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("readNextMsg: set deadline: %v", err)
+	}
+	defer conn.SetDeadline(time.Time{}) //nolint:errcheck
+	msgType, payload, err := proto.ReadMsg(conn)
+	if err != nil {
+		t.Fatalf("readNextMsg: %v", err)
+	}
+	return msgType, payload
+}
+
+// TestACLDenyAll verifies that DenyAllClients causes subsequent connection
+// attempts to receive an EXIT message and be rejected.
+func TestACLDenyAll(t *testing.T) {
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	st := session.NewServer()
+	st.ACLDenyAll = true
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		State:    st,
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+
+	sendHandshakeAs(t, clientConn, "alice")
+
+	// The server should respond with EXIT(1).
+	msgType, payload := readNextMsg(t, clientConn)
+	if msgType != proto.MsgExit {
+		t.Fatalf("expected MsgExit, got %s", msgType)
+	}
+	var em proto.ExitMsg
+	if err := em.Decode(payload); err != nil {
+		t.Fatalf("decode EXIT: %v", err)
+	}
+	if em.Code != 1 {
+		t.Fatalf("expected exit code 1, got %d", em.Code)
+	}
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}
+
+// TestACLDenyUser verifies that SetServerAccess(user, false, false) rejects
+// connections from that user with an EXIT message.
+func TestACLDenyUser(t *testing.T) {
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	st := session.NewServer()
+	st.ACL["bob"] = false
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		State:    st,
+	})
+
+	// bob should be rejected.
+	bobConn := pl.dial()
+	defer bobConn.Close()
+	sendHandshakeAs(t, bobConn, "bob")
+
+	msgType, payload := readNextMsg(t, bobConn)
+	if msgType != proto.MsgExit {
+		t.Fatalf("expected MsgExit for bob, got %s", msgType)
+	}
+	var em proto.ExitMsg
+	if err := em.Decode(payload); err != nil {
+		t.Fatalf("decode EXIT: %v", err)
+	}
+	if em.Code != 1 {
+		t.Fatalf("expected exit code 1 for bob, got %d", em.Code)
+	}
+
+	// alice (not in ACL) should be accepted normally.
+	aliceConn := pl.dial()
+	defer aliceConn.Close()
+	sendHandshakeAs(t, aliceConn, "alice")
+
+	// Give the server time to process the identify sequence and set up the session.
+	time.Sleep(20 * time.Millisecond)
+
+	if err := aliceConn.SetDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	cm := proto.CommandMsg{Argv: []string{"list-sessions"}}
+	if err := proto.WriteMsg(aliceConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write list-sessions: %v", err)
+	}
+	// Confirm we can read a response without io.EOF (which would indicate the
+	// server closed the connection).
+	mt, _, err := proto.ReadMsg(aliceConn)
+	if err != nil {
+		t.Fatalf("alice: read response: %v", err)
+	}
+	if mt == proto.MsgExit {
+		t.Fatal("alice: unexpectedly received EXIT after list-sessions")
+	}
+	aliceConn.SetDeadline(time.Time{}) //nolint:errcheck
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}
+
+// TestACLReadOnly verifies that SetServerAccess(user, true, false) accepts a
+// connection but mutating commands return a permission-denied error.
+func TestACLReadOnly(t *testing.T) {
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	st := session.NewServer()
+	// carol has read access but no write access.
+	st.ACL["carol"] = true
+	// ACLWriteAccess intentionally not set for carol.
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		State:    st,
+	})
+
+	carolConn := pl.dial()
+	defer carolConn.Close()
+	sendHandshakeAs(t, carolConn, "carol")
+
+	// Give the server time to process the identify sequence and set up the session.
+	time.Sleep(20 * time.Millisecond)
+
+	if err := carolConn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+
+	// A mutating command (new-session) should be rejected with permission denied.
+	cm := proto.CommandMsg{Argv: []string{"new-session", "-s", "ro-test"}}
+	if err := proto.WriteMsg(carolConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write new-session: %v", err)
+	}
+
+	// Read messages until we find a MsgStdout containing the error.
+	found := false
+	for i := 0; i < 10; i++ {
+		mt, p, err := proto.ReadMsg(carolConn)
+		if err != nil {
+			t.Fatalf("read response: %v", err)
+		}
+		if mt == proto.MsgExit {
+			t.Fatal("read-only client received EXIT instead of error message")
+		}
+		if mt == proto.MsgStdout {
+			var sm proto.StdoutMsg
+			if err := sm.Decode(p); err != nil {
+				t.Fatalf("decode StdoutMsg: %v", err)
+			}
+			if strings.Contains(string(sm.Data), "permission denied") {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected 'permission denied' error for read-only client, not received")
+	}
+	carolConn.SetDeadline(time.Time{}) //nolint:errcheck
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}
