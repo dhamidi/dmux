@@ -14,6 +14,9 @@ import (
 type Config struct {
 	// Prompt is the label rendered before the editable input field.
 	Prompt string
+	// Initial is pre-populated text placed in the input buffer at construction.
+	// The cursor is positioned at the end of the initial text.
+	Initial string
 	// Template is a %-escape template applied to the input on confirm.
 	// Every occurrence of %% in Template is replaced with the confirmed
 	// input string. If Template is empty, the raw input is used.
@@ -58,9 +61,12 @@ type CommandMode struct {
 // The caller owns the returned *CommandMode and is responsible for
 // storing any history updates after the overlay closes.
 func NewCommand(rect modes.Rect, cfg Config) *CommandMode {
+	buf := []rune(cfg.Initial)
 	return &CommandMode{
 		cfg:     cfg,
 		rect:    rect,
+		buf:     buf,
+		cursor:  len(buf),
 		history: append([]string(nil), cfg.History...),
 		histIdx: -1,
 	}

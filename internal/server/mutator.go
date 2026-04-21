@@ -16,6 +16,7 @@ import (
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/modes"
 	copymode "github.com/dhamidi/dmux/internal/modes/copy"
+	promptmode "github.com/dhamidi/dmux/internal/modes/prompt"
 	treemode "github.com/dhamidi/dmux/internal/modes/tree"
 	"github.com/dhamidi/dmux/internal/options"
 	"github.com/dhamidi/dmux/internal/parse"
@@ -1750,8 +1751,51 @@ func (m *serverMutator) DisplayPanes(clientID string) error {
 	return errStub("display-panes")
 }
 
-func (m *serverMutator) CommandPrompt(clientID, prompt, initialValue string) error {
-	return errStub("command-prompt")
+func (m *serverMutator) CommandPrompt(clientID, promptStr, initialValue string) error {
+	client, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("command-prompt: client %q not found", clientID)
+	}
+
+	rows, cols := 24, 80
+	if client.Size.Rows > 0 {
+		rows = client.Size.Rows
+	}
+	if client.Size.Cols > 0 {
+		cols = client.Size.Cols
+	}
+
+	if promptStr == "" {
+		promptStr = ":"
+	}
+
+	store := m.store
+	queue := m.queue
+	mut := command.Mutator(m)
+
+	onConfirm := func(input string) {
+		cmds, err := parse.Parse(input)
+		if err != nil || len(cmds) == 0 {
+			return
+		}
+		for _, c := range cmds {
+			c := c
+			var nilClientView command.ClientView
+			queue.EnqueueFunc(c.Name, func() {
+				command.Dispatch(c.Name, c.Args, store, nilClientView, queue, mut)
+			})
+		}
+	}
+
+	rect := modes.Rect{X: 0, Y: rows - 1, Width: cols, Height: 1}
+	mode := promptmode.NewCommand(rect, promptmode.Config{
+		Prompt:    promptStr,
+		Initial:   initialValue,
+		OnConfirm: onConfirm,
+	})
+
+	m.PushClientOverlay(clientID, mode)
+	return nil
 }
 
 func (m *serverMutator) ConfirmBefore(clientID, prompt, cmd string) error {
