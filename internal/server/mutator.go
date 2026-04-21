@@ -16,6 +16,7 @@ import (
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/modes"
 	copymode "github.com/dhamidi/dmux/internal/modes/copy"
+	popupmode "github.com/dhamidi/dmux/internal/modes/popup"
 	promptmode "github.com/dhamidi/dmux/internal/modes/prompt"
 	treemode "github.com/dhamidi/dmux/internal/modes/tree"
 	"github.com/dhamidi/dmux/internal/options"
@@ -1740,8 +1741,92 @@ func (m *serverMutator) EnterClockMode(clientID string, paneID int) error {
 }
 
 func (m *serverMutator) DisplayPopup(clientID, cmd, title string, cols, rows int) error {
-	return errStub("display-popup")
+	client, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("display-popup: client %q not found", clientID)
+	}
+
+	// Use client terminal size for centering.
+	clientRows, clientCols := 24, 80
+	if client.Size.Rows > 0 {
+		clientRows = client.Size.Rows
+	}
+	if client.Size.Cols > 0 {
+		clientCols = client.Size.Cols
+	}
+
+	// Clamp popup dimensions to fit within the client terminal.
+	if cols > clientCols {
+		cols = clientCols
+	}
+	if rows > clientRows {
+		rows = clientRows
+	}
+
+	// Center the popup.
+	x := (clientCols - cols) / 2
+	y := (clientRows - rows) / 2
+
+	rect := modes.Rect{X: x, Y: y, Width: cols, Height: rows}
+
+	newPaneFn := m.newPane
+	factory := func(innerRows, innerCols int, command string) (popupmode.Pane, error) {
+		if command == "" || newPaneFn == nil {
+			return &nullPopupPane{}, nil
+		}
+		p, err := newPaneFn(pane.Config{ID: session.PaneID(0)})
+		if err != nil {
+			return nil, err
+		}
+		_ = p.Resize(innerCols, innerRows)
+		return newSessionPaneAsPopupPane(p), nil
+	}
+
+	mode, err := popupmode.New(rect, cmd, false, factory)
+	if err != nil {
+		return fmt.Errorf("display-popup: %w", err)
+	}
+
+	m.PushClientOverlay(clientID, mode)
+	return nil
 }
+
+// sessionPaneAsPopupPane adapts session.Pane to popup.Pane.
+// session.Pane lacks SendMouse; we delegate to the underlying pane.Pane if
+// the concrete type supports it, otherwise we silently ignore mouse events.
+type sessionPaneAsPopupPane struct {
+	session.Pane
+	ms mouseSenderer
+}
+
+type mouseSenderer interface {
+	SendMouse(ev keys.MouseEvent) error
+}
+
+func newSessionPaneAsPopupPane(p session.Pane) *sessionPaneAsPopupPane {
+	a := &sessionPaneAsPopupPane{Pane: p}
+	if ms, ok := p.(mouseSenderer); ok {
+		a.ms = ms
+	}
+	return a
+}
+
+func (a *sessionPaneAsPopupPane) SendMouse(ev keys.MouseEvent) error {
+	if a.ms != nil {
+		return a.ms.SendMouse(ev)
+	}
+	return nil
+}
+
+// nullPopupPane is a no-op pane used when no subprocess command is given.
+type nullPopupPane struct{}
+
+func (n *nullPopupPane) Write(_ []byte) error                  { return nil }
+func (n *nullPopupPane) SendKey(_ keys.Key) error              { return nil }
+func (n *nullPopupPane) SendMouse(_ keys.MouseEvent) error     { return nil }
+func (n *nullPopupPane) Resize(_, _ int) error                 { return nil }
+func (n *nullPopupPane) Snapshot() pane.CellGrid               { return pane.CellGrid{} }
+func (n *nullPopupPane) Close() error                          { return nil }
 
 func (m *serverMutator) DisplayMenu(clientID string, items []command.MenuEntry) error {
 	return errStub("display-menu")
