@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/modes"
 	copymode "github.com/dhamidi/dmux/internal/modes/copy"
+	treemode "github.com/dhamidi/dmux/internal/modes/tree"
 	"github.com/dhamidi/dmux/internal/options"
 	"github.com/dhamidi/dmux/internal/parse"
 	"github.com/dhamidi/dmux/internal/pane"
@@ -1611,8 +1613,113 @@ func (m *serverMutator) EnterCopyMode(clientID string, _ bool) error {
 	return nil
 }
 
+// treeClientOverlay wraps a treemode.Mode as a modes.ClientOverlay that
+// covers the full client screen.
+type treeClientOverlay struct {
+	mode *treemode.Mode
+	rows int
+	cols int
+}
+
+func (o *treeClientOverlay) Rect() modes.Rect {
+	return modes.Rect{X: 0, Y: 0, Width: o.cols, Height: o.rows}
+}
+
+func (o *treeClientOverlay) Render(dst []modes.Cell) {
+	canvas := &gridCanvas{rows: o.rows, cols: o.cols, cells: dst}
+	o.mode.Render(canvas)
+}
+
+func (o *treeClientOverlay) Key(k keys.Key) modes.Outcome { return o.mode.Key(k) }
+func (o *treeClientOverlay) Mouse(ev keys.MouseEvent) modes.Outcome { return o.mode.Mouse(ev) }
+func (o *treeClientOverlay) CaptureFocus() bool { return true }
+func (o *treeClientOverlay) Close()             { o.mode.Close() }
+
 func (m *serverMutator) EnterChooseTree(clientID, sessionID, windowID string) error {
-	return errStub("choose-tree")
+	client, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("choose-tree: client %q not found", clientID)
+	}
+
+	// Build a tree snapshot from all sessions, windows, and panes.
+	var nodes []treemode.TreeNode
+	for _, sess := range m.state.Sessions {
+		sessNode := treemode.TreeNode{
+			Kind: treemode.KindSession,
+			ID:   "s:" + string(sess.ID),
+			Name: sess.Name,
+		}
+		for _, wl := range sess.Windows {
+			win := wl.Window
+			winNode := treemode.TreeNode{
+				Kind: treemode.KindWindow,
+				ID:   "w:" + string(sess.ID) + ":" + string(win.ID),
+				Name: fmt.Sprintf("%d: %s", wl.Index, win.Name),
+			}
+			for paneID := range win.Panes {
+				paneNode := treemode.TreeNode{
+					Kind: treemode.KindPane,
+					ID:   fmt.Sprintf("p:%s:%s:%d", sess.ID, win.ID, int(paneID)),
+					Name: fmt.Sprintf("%%%d", int(paneID)),
+				}
+				winNode.Children = append(winNode.Children, paneNode)
+			}
+			sessNode.Children = append(sessNode.Children, winNode)
+		}
+		nodes = append(nodes, sessNode)
+	}
+
+	// Snapshot the client terminal size for the overlay rectangle.
+	rows, cols := 24, 80
+	if client.Size.Rows > 0 {
+		rows = client.Size.Rows
+	}
+	if client.Size.Cols > 0 {
+		cols = client.Size.Cols
+	}
+
+	// onSelect is called when the user presses Enter on a tree entry.
+	onSelect := func(id string) {
+		parts := strings.SplitN(id, ":", 4)
+		if len(parts) == 0 {
+			return
+		}
+		switch parts[0] {
+		case "s":
+			if len(parts) < 2 {
+				return
+			}
+			m.SwitchClient(clientID, parts[1]) //nolint:errcheck
+		case "w":
+			if len(parts) < 3 {
+				return
+			}
+			sID, wID := parts[1], parts[2]
+			if client.Session == nil || string(client.Session.ID) != sID {
+				m.SwitchClient(clientID, sID) //nolint:errcheck
+			}
+			m.SelectWindow(sID, wID) //nolint:errcheck
+		case "p":
+			if len(parts) < 4 {
+				return
+			}
+			sID, wID, pIDStr := parts[1], parts[2], parts[3]
+			pID, err := strconv.Atoi(pIDStr)
+			if err != nil {
+				return
+			}
+			if client.Session == nil || string(client.Session.ID) != sID {
+				m.SwitchClient(clientID, sID) //nolint:errcheck
+			}
+			m.SelectWindow(sID, wID) //nolint:errcheck
+			m.SelectPane(sID, wID, pID) //nolint:errcheck
+		}
+	}
+
+	mode := treemode.New(nodes, onSelect, nil)
+	overlay := &treeClientOverlay{mode: mode, rows: rows, cols: cols}
+	m.PushClientOverlay(clientID, overlay)
+	return nil
 }
 
 func (m *serverMutator) EnterCustomizeMode(clientID string) error {
