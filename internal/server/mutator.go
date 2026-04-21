@@ -2357,7 +2357,43 @@ func (m *serverMutator) CommandPrompt(clientID, promptStr, initialValue string) 
 }
 
 func (m *serverMutator) ConfirmBefore(clientID, prompt, cmd string) error {
-	return errStub("confirm-before")
+	client, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("confirm-before: client %q not found", clientID)
+	}
+
+	rows, cols := 24, 80
+	if client.Size.Rows > 0 {
+		rows = client.Size.Rows
+	}
+	if client.Size.Cols > 0 {
+		cols = client.Size.Cols
+	}
+
+	store := m.store
+	queue := m.queue
+	mut := command.Mutator(m)
+
+	onYes := func() {
+		cmds, err := parse.Parse(cmd)
+		if err != nil || len(cmds) == 0 {
+			return
+		}
+		for _, c := range cmds {
+			c := c
+			var nilClientView command.ClientView
+			queue.EnqueueFunc(c.Name, func() {
+				command.Dispatch(c.Name, c.Args, store, nilClientView, queue, mut)
+			})
+		}
+	}
+
+	displayPrompt := prompt + " (y/n)"
+	rect := modes.Rect{X: 0, Y: rows - 1, Width: cols, Height: 1}
+	mode := promptmode.NewConfirm(rect, displayPrompt, onYes, nil)
+
+	m.PushClientOverlay(clientID, mode)
+	return nil
 }
 
 // ─── Hook mutations ───────────────────────────────────────────────────────────
