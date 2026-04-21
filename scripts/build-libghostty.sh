@@ -12,6 +12,17 @@
 #     cross-compilation from Linux because it relies on `xcrun` to locate the
 #     Apple SDK. Run this script on macOS to build those targets.
 #
+# CI: The GitHub Actions workflow .github/workflows/vendor-darwin-libs.yml runs
+#     this script on a macos-latest runner and commits the resulting .a files back
+#     to the repository automatically. Trigger it manually (workflow_dispatch) or
+#     let the weekly schedule handle refreshes when the Ghostty commit changes.
+#
+# Manual darwin build (macOS host with Xcode + Zig required):
+#   bash scripts/build-libghostty.sh darwin
+#   git add lib/ghostty/darwin-aarch64/lib/libghostty-vt.a \
+#           lib/ghostty/darwin-x86_64/lib/libghostty-vt.a
+#   git commit -m "chore: vendor darwin libghostty-vt.a static libraries"
+#
 # Usage:
 #   bash scripts/build-libghostty.sh              # build all targets (skips macOS on Linux)
 #   bash scripts/build-libghostty.sh linux         # build only Linux targets
@@ -148,5 +159,8 @@ done
 echo ""
 echo "==> Build complete. Artifacts are in ${LIB_ROOT}/"
 if [ "$HOST_OS" != "Darwin" ]; then
-  echo "    NOTE: macOS targets were skipped. Run on macOS with Xcode to build darwin-* libs."
+  echo "    NOTE: macOS targets were skipped (requires macOS host with Xcode)."
+  echo "          To vendor darwin libraries, trigger the GitHub Actions workflow:"
+  echo "          .github/workflows/vendor-darwin-libs.yml (workflow_dispatch)"
+  echo "          or run this script on a macOS host."
 fi

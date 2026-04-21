@@ -1,0 +1,72 @@
+name: Vendor Darwin libghostty-vt Libraries
+
+# Build macOS static libraries for libghostty-vt and commit them back to the
+# repository. Triggered manually or on a schedule so libraries can be refreshed
+# whenever the vendored Ghostty commit changes.
+#
+# The build runs on a single macos-latest (arm64) runner that cross-compiles
+# both darwin-aarch64 and darwin-x86_64 using Zig as the C compiler. This works
+# because Ghostty's Zig build system handles both Apple Silicon and Intel when
+# running on an Apple Silicon host (both targets share the same Xcode SDK).
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to commit the vendored libraries to"
+        required: false
+        default: "main"
+  schedule:
+    # Weekly on Monday 03:00 UTC — keeps libraries fresh when Ghostty updates
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: write
+
+jobs:
+  build-darwin-libs:
+    name: Build darwin-aarch64 and darwin-x86_64
+    runs-on: macos-latest  # Apple Silicon (arm64)
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || 'main' }}
+          # Use a token with write access so the push step works
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Zig
+        run: |
+          brew install zig
+          zig version
+
+      - name: Build darwin static libraries
+        run: bash scripts/build-libghostty.sh darwin
+
+      - name: Verify libraries were produced
+        run: |
+          echo "==> darwin-aarch64"
+          ls -lh lib/ghostty/darwin-aarch64/lib/libghostty-vt.a
+          echo "==> darwin-x86_64"
+          ls -lh lib/ghostty/darwin-x86_64/lib/libghostty-vt.a
+
+      - name: Commit and push vendored libraries
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add lib/ghostty/darwin-aarch64/lib/libghostty-vt.a \
+                  lib/ghostty/darwin-x86_64/lib/libghostty-vt.a
+
+          # Skip the commit if nothing changed (libraries already up-to-date)
+          if git diff --cached --quiet; then
+            echo "==> Libraries are already up-to-date; nothing to commit."
+          else
+            git commit -m "chore: vendor darwin libghostty-vt.a static libraries
+
+Built from Ghostty commit recorded in scripts/build-libghostty.sh.
+Platforms: darwin-aarch64, darwin-x86_64."
+            git push origin ${{ github.event.inputs.branch || 'main' }}
+            echo "==> Libraries committed and pushed."
+          fi

@@ -168,8 +168,8 @@ Each package has a `doc.go` describing its boundary, public surface, and what
 ## Building
 
 Pre-compiled static libraries for libghostty-vt are vendored under `lib/ghostty/`
-for Linux (x86_64 and aarch64) and Windows (x86_64 and aarch64). Build using the
-provided Makefile:
+for all supported platforms (Linux, macOS, and Windows — x86_64 and aarch64). Build
+using the provided Makefile:
 
 ```sh
 # Build for the current platform (no Zig or CMake required)
@@ -178,6 +178,8 @@ make build
 # Cross-compile using Zig as the C compiler
 make build-linux-amd64
 make build-linux-arm64
+make build-darwin-amd64
+make build-darwin-arm64
 make build-windows-amd64
 make build-windows-arm64
 
@@ -188,10 +190,22 @@ make build-all
 make test
 ```
 
-**macOS:** The Darwin libraries (`lib/ghostty/darwin-*/lib/libghostty-vt.a`) must be
-built on a macOS host with Xcode installed, because Ghostty's build system relies on
-`xcrun` to locate the Apple SDK and does not support cross-compilation from Linux.
-Run `make rebuild-libs` on macOS to populate those directories.
+The darwin libraries (`lib/ghostty/darwin-*/lib/libghostty-vt.a`) are kept
+up-to-date by the **Vendor Darwin libghostty-vt Libraries** GitHub Actions
+workflow (`.github/workflows/vendor-darwin-libs.yml`), which runs on a macOS
+runner and commits the compiled artifacts back to the repository. The workflow
+can be triggered manually via `workflow_dispatch` whenever the vendored Ghostty
+commit changes, or it runs automatically on a weekly schedule.
+
+To refresh the darwin libraries manually (requires a macOS host with Xcode and
+Zig installed):
+
+```sh
+bash scripts/build-libghostty.sh darwin
+git add lib/ghostty/darwin-aarch64/lib/libghostty-vt.a \
+        lib/ghostty/darwin-x86_64/lib/libghostty-vt.a
+git commit -m "chore: vendor darwin libghostty-vt.a static libraries"
+```
 
 ## External dependencies
 
