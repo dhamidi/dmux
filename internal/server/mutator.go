@@ -1732,8 +1732,99 @@ func (m *serverMutator) EnterCustomizeMode(clientID string) error {
 	return errStub("customize-mode")
 }
 
+// chooseBufferClientOverlay wraps a treemode.Mode for the choose-buffer
+// command. It adds buffer-delete ('d') support on top of the standard tree
+// mode key handling.
+type chooseBufferClientOverlay struct {
+	mode     *treemode.Mode
+	mutator  *serverMutator
+	rows     int
+	cols     int
+	items    []treemode.ChooserItem
+	onSelect func(string)
+}
+
+func (o *chooseBufferClientOverlay) Rect() modes.Rect {
+	return modes.Rect{X: 0, Y: 0, Width: o.cols, Height: o.rows}
+}
+
+func (o *chooseBufferClientOverlay) Render(dst []modes.Cell) {
+	canvas := &gridCanvas{rows: o.rows, cols: o.cols, cells: dst}
+	o.mode.Render(canvas)
+}
+
+func (o *chooseBufferClientOverlay) Key(k keys.Key) modes.Outcome {
+	// 'd' in normal mode deletes the currently selected buffer.
+	if k.Code == keys.KeyCode('d') && !o.mode.Searching() {
+		selected := o.mode.SelectedID()
+		if selected != "" {
+			o.mutator.DeleteBuffer(selected) //nolint:errcheck
+			for i, item := range o.items {
+				if item.Value == selected {
+					o.items = append(o.items[:i], o.items[i+1:]...)
+					break
+				}
+			}
+			o.mode = treemode.NewChooser(o.items, o.onSelect, false)
+		}
+		return modes.Consumed()
+	}
+	return o.mode.Key(k)
+}
+
+func (o *chooseBufferClientOverlay) Mouse(ev keys.MouseEvent) modes.Outcome {
+	return o.mode.Mouse(ev)
+}
+
+func (o *chooseBufferClientOverlay) CaptureFocus() bool { return true }
+func (o *chooseBufferClientOverlay) Close()             { o.mode.Close() }
+
 func (m *serverMutator) EnterChooseBuffer(clientID, windowID string, items []command.ChooserItem, template string) error {
-	return errStub("choose-buffer")
+	client, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("choose-buffer: client %q not found", clientID)
+	}
+
+	// Snapshot the client terminal size for the overlay rectangle.
+	rows, cols := 24, 80
+	if client.Size.Rows > 0 {
+		rows = client.Size.Rows
+	}
+	if client.Size.Cols > 0 {
+		cols = client.Size.Cols
+	}
+
+	// Determine the active pane to paste into.
+	var activePaneID int
+	if client.Session != nil && client.Session.Current != nil {
+		activePaneID = int(client.Session.Current.Window.Active)
+	}
+
+	// Convert command.ChooserItem to treemode.ChooserItem.
+	treeItems := make([]treemode.ChooserItem, len(items))
+	for i, it := range items {
+		treeItems[i] = treemode.ChooserItem{
+			Display: it.Display,
+			Preview: it.Preview,
+			Value:   it.Value,
+		}
+	}
+
+	onSelect := func(name string) {
+		m.PasteBuffer(name, activePaneID) //nolint:errcheck
+	}
+
+	overlay := &chooseBufferClientOverlay{
+		mutator:  m,
+		rows:     rows,
+		cols:     cols,
+		items:    treeItems,
+		onSelect: onSelect,
+	}
+	overlay.mode = treemode.NewChooser(treeItems, onSelect, false)
+
+	m.PushClientOverlay(clientID, overlay)
+	return nil
 }
 
 func (m *serverMutator) EnterChooseClient(clientID, windowID string, items []command.ChooserItem, template string) error {
