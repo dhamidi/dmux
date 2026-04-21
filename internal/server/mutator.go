@@ -19,6 +19,7 @@ import (
 	clockmode "github.com/dhamidi/dmux/internal/modes/clock"
 	copymode "github.com/dhamidi/dmux/internal/modes/copy"
 	displaypanes "github.com/dhamidi/dmux/internal/modes/displaypanes"
+	lockmode "github.com/dhamidi/dmux/internal/modes/lock"
 	menumode "github.com/dhamidi/dmux/internal/modes/menu"
 	popupmode "github.com/dhamidi/dmux/internal/modes/popup"
 	promptmode "github.com/dhamidi/dmux/internal/modes/prompt"
@@ -77,6 +78,11 @@ type serverMutator struct {
 	// client by (dx, dy) cells and triggers a redraw. Wired to
 	// srv.scrollViewport by Run.
 	scrollViewportFn func(id session.ClientID, dx, dy int)
+
+	// lockVerifyFn, if non-nil, overrides the default passphrase-verification
+	// logic used by LockClient. Injected by tests to avoid executing real
+	// system commands.
+	lockVerifyFn func(passphrase string) bool
 }
 
 // newServerMutator returns a *serverMutator backed by state.
@@ -1524,13 +1530,53 @@ func (m *serverMutator) ShowMessages() []string {
 }
 
 func (m *serverMutator) LockServer() error {
-	// No real screen-lock mechanism in this implementation.
+	for id := range m.state.Clients {
+		if err := m.LockClient(string(id)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func (m *serverMutator) LockClient(clientID string) error {
-	// No real screen-lock mechanism in this implementation.
+	client, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("lock-client: unknown client %q", clientID)
+	}
+	rect := modes.Rect{
+		X:      0,
+		Y:      0,
+		Width:  client.Size.Cols,
+		Height: client.Size.Rows,
+	}
+	verify := m.buildLockVerifier()
+	ov := lockmode.New(rect, verify)
+	m.PushClientOverlay(clientID, ov)
 	return nil
+}
+
+// buildLockVerifier returns the passphrase-verification function used by
+// LockClient. If lockVerifyFn is set (e.g. in tests) it is returned directly.
+// Otherwise the function runs the lock-command option (default "lock -np")
+// with the passphrase piped to stdin and treats exit code 0 as success.
+func (m *serverMutator) buildLockVerifier() func(string) bool {
+	if m.lockVerifyFn != nil {
+		return m.lockVerifyFn
+	}
+
+	// Read lock-command option (default: "lock -np").
+	lockCmd := "lock -np"
+	if m.state.Options != nil {
+		if s, ok := m.state.Options.GetString("lock-command"); ok && s != "" {
+			lockCmd = s
+		}
+	}
+
+	return func(passphrase string) bool {
+		cmd := exec.Command("sh", "-c", lockCmd)
+		cmd.Stdin = strings.NewReader(passphrase + "\n")
+		return cmd.Run() == nil
+	}
 }
 
 func (m *serverMutator) WaitFor(channel string) error {
