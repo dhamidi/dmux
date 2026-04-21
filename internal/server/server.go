@@ -443,6 +443,7 @@ func (s *srv) serveConn(nc net.Conn) {
 		view, err := s.mutator.NewSession("") // name defaults to "0"
 		if err == nil {
 			_ = s.mutator.AttachClient(string(cc.id), view.ID)
+			s.markDirty(cc)
 		}
 	}
 
