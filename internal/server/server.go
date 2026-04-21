@@ -17,6 +17,7 @@ import (
 	"github.com/dhamidi/dmux/internal/format"
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
+	"github.com/dhamidi/dmux/internal/modes"
 	"github.com/dhamidi/dmux/internal/osinfo"
 	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
@@ -66,6 +67,12 @@ type Config struct {
 	// for redraw. Tests use this hook to observe redraw scheduling
 	// without a full rendering layer.
 	OnDirty func(id session.ClientID)
+
+	// OverlayPusher, if non-nil, is called after a client completes the
+	// identify handshake. It returns a ClientOverlay to push onto that
+	// client's overlay stack, or nil to push nothing. Intended for tests
+	// that need to inject an overlay without going through a command.
+	OverlayPusher func(clientID session.ClientID) modes.ClientOverlay
 
 	// State, if non-nil, is used as the initial server state instead of
 	// creating a new empty Server. Primarily useful in tests that need
@@ -119,6 +126,15 @@ type clientConn struct {
 	dirty       chan struct{}     // buffered(1); written to when a redraw is needed
 	dragBorder  *layout.BorderID // non-nil while a border drag is in progress
 	controlMode bool             // set when attach-session -C or new-session -C runs
+
+	// overlays is a stack of client-scoped overlays (menus, popups, prompts).
+	// The last element is on top and receives key events first.
+	// Access is protected by srv.mu.
+	overlays []modes.ClientOverlay
+
+	// paneOverlays holds per-pane modes (copy-mode, clock-mode) keyed by
+	// pane ID. Access is protected by srv.mu.
+	paneOverlays map[session.PaneID]modes.PaneMode
 }
 
 // Run starts the dmux server and blocks until shutdown.
@@ -188,6 +204,12 @@ func Run(cfg Config) error {
 		delete(s.prevFrames, id)
 		s.mu.Unlock()
 	}
+	sm.pushOverlayFn = func(id session.ClientID, ov modes.ClientOverlay) {
+		s.pushOverlay(id, ov)
+	}
+	sm.popOverlayFn = func(id session.ClientID) {
+		s.popOverlay(id)
+	}
 	s.mutator = sm
 
 	loadDefaultOptions(s)
@@ -229,6 +251,43 @@ func Run(cfg Config) error {
 // triggerDone closes s.done exactly once (idempotent).
 func (s *srv) triggerDone() {
 	s.once.Do(func() { close(s.done) })
+}
+
+// pushOverlay appends ov to the top of the overlay stack for the named client
+// and schedules a redraw. It is safe to call from any goroutine.
+func (s *srv) pushOverlay(clientID session.ClientID, ov modes.ClientOverlay) {
+	s.mu.Lock()
+	cc, ok := s.conns[clientID]
+	if ok {
+		cc.overlays = append(cc.overlays, ov)
+	}
+	s.mu.Unlock()
+	if ok {
+		s.markDirty(cc)
+	}
+}
+
+// popOverlay removes the topmost overlay from the named client's stack,
+// calls Close on it, and schedules a redraw. It is safe to call from any goroutine.
+func (s *srv) popOverlay(clientID session.ClientID) {
+	s.mu.Lock()
+	cc, ok := s.conns[clientID]
+	var popped modes.ClientOverlay
+	if ok && len(cc.overlays) > 0 {
+		n := len(cc.overlays)
+		popped = cc.overlays[n-1]
+		cc.overlays = cc.overlays[:n-1]
+	}
+	s.mu.Unlock()
+	if popped != nil {
+		popped.Close()
+		s.mu.Lock()
+		cc, ok = s.conns[clientID]
+		s.mu.Unlock()
+		if ok {
+			s.markDirty(cc)
+		}
+	}
 }
 
 // shutdown closes the listener and all client connections, then waits
@@ -317,6 +376,14 @@ func (s *srv) serveConn(nc net.Conn) {
 	s.mu.Unlock()
 
 	s.log.Printf("client %s attached (tty=%s term=%s)", client.ID, client.TTY, client.Term)
+
+	// If an OverlayPusher is configured (e.g. in tests), push the returned
+	// overlay onto the client's stack immediately after registration.
+	if s.cfg.OverlayPusher != nil {
+		if ov := s.cfg.OverlayPusher(client.ID); ov != nil {
+			s.pushOverlay(client.ID, ov)
+		}
+	}
 
 	// S6: auto-create an initial session when the first client attaches to a
 	// server that has no sessions (mirrors tmux's startup behaviour).
@@ -520,6 +587,39 @@ func (s *srv) clientLoop(cc *clientConn) {
 				if k.Code == keys.CodeMouse {
 					s.handleMouseEvent(cc, k.Mouse)
 					continue
+				}
+
+				// Route through the topmost focus-capturing overlay, if any.
+				s.mu.Lock()
+				var captureOverlay modes.ClientOverlay
+				if n := len(cc.overlays); n > 0 {
+					top := cc.overlays[n-1]
+					if top.CaptureFocus() {
+						captureOverlay = top
+					}
+				}
+				s.mu.Unlock()
+
+				if captureOverlay != nil {
+					outcome := captureOverlay.Key(k)
+					skipNormal := true
+					switch outcome.Kind {
+					case modes.KindCloseMode:
+						s.mu.Lock()
+						if n := len(cc.overlays); n > 0 {
+							popped := cc.overlays[n-1]
+							cc.overlays = cc.overlays[:n-1]
+							s.mu.Unlock()
+							popped.Close()
+						} else {
+							s.mu.Unlock()
+						}
+					case modes.KindPassthrough:
+						skipNormal = false
+					}
+					if skipNormal {
+						continue
+					}
 				}
 
 				s.mu.Lock()
@@ -814,11 +914,13 @@ func (s *srv) renderLoop(cc *clientConn) {
 			})
 		}
 
-		// Capture status-related values while holding the lock.
+		// Capture status-related values and overlay stack while holding the lock.
 		statusOn, _ := client.Session.Options.GetString("status")
 		sessionName := client.Session.Name
 		windowName := win.Name
 		sessOpts := client.Session.Options
+		overlayStack := make([]modes.ClientOverlay, len(cc.overlays))
+		copy(overlayStack, cc.overlays)
 		s.mu.Unlock()
 
 		// Build the status line when the status option is "on".
@@ -849,7 +951,11 @@ func (s *srv) renderLoop(cc *clientConn) {
 				PaneBorderFormat: borderFormat,
 			},
 		})
-		grid := r.Compose(placements, nil)
+		renderOverlays := make([]render.Overlay, len(overlayStack))
+		for i, ov := range overlayStack {
+			renderOverlays[i] = &overlayRenderAdapter{ov: ov}
+		}
+		grid := r.Compose(placements, renderOverlays)
 
 		// Look up the previous frame for this client and store the current one.
 		s.mu.Lock()
@@ -1067,6 +1173,33 @@ func (w *statusContextWrapper) Lookup(key string) (string, bool) {
 
 func (w *statusContextWrapper) Children(_ string) []format.Context {
 	return nil
+}
+
+// overlayRenderAdapter adapts a modes.ClientOverlay to the render.Overlay
+// interface, bridging the modes.Cell and render.Cell type mismatch.
+type overlayRenderAdapter struct {
+	ov modes.ClientOverlay
+}
+
+func (a *overlayRenderAdapter) Rect() render.Rect { return a.ov.Rect() }
+
+func (a *overlayRenderAdapter) Render(dst []render.Cell) {
+	modeCells := make([]modes.Cell, len(dst))
+	a.ov.Render(modeCells)
+	for i, c := range modeCells {
+		dst[i] = render.Cell{
+			Char:  c.Char,
+			Fg:    render.Color(c.Fg),
+			Bg:    render.Color(c.Bg),
+			Attrs: uint16(c.Attrs),
+			FgR:   c.FgR,
+			FgG:   c.FgG,
+			FgB:   c.FgB,
+			BgR:   c.BgR,
+			BgG:   c.BgG,
+			BgB:   c.BgB,
+		}
+	}
 }
 
 // renderStatusAdapter adapts *status.StatusLine to render.StatusLine,

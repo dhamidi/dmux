@@ -13,6 +13,7 @@ import (
 
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
+	"github.com/dhamidi/dmux/internal/modes"
 	"github.com/dhamidi/dmux/internal/options"
 	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
@@ -1699,5 +1700,343 @@ func TestActivityFlagClearedOnSelect(t *testing.T) {
 
 	if win.ActivityFlag {
 		t.Fatal("expected ActivityFlag to be cleared after select-window")
+	}
+}
+
+// ─── fakeOverlay ─────────────────────────────────────────────────────────────
+
+// fakeOverlay is a test-only modes.ClientOverlay that records received keys
+// and renders every cell as '#'. If closeKey is set, that key returns
+// modes.CloseMode(); all other keys return modes.Consumed().
+// keyCh is signaled (non-blocking) each time Key is called.
+// closedCh is signaled once when Close is called.
+type fakeOverlay struct {
+	mu           sync.Mutex
+	receivedKeys []keys.Key
+	closeKey     keys.KeyCode // if non-zero, that key triggers KindCloseMode
+	rect         modes.Rect
+	closed       bool
+	keyCh        chan struct{} // buffered; signaled on each Key call
+	closedCh     chan struct{} // closed once when Close is called
+	closeOnce    sync.Once
+}
+
+func newFakeOverlay(rect modes.Rect, closeKey keys.KeyCode) *fakeOverlay {
+	return &fakeOverlay{
+		rect:     rect,
+		closeKey: closeKey,
+		keyCh:    make(chan struct{}, 8),
+		closedCh: make(chan struct{}),
+	}
+}
+
+func (f *fakeOverlay) Rect() modes.Rect { return f.rect }
+
+func (f *fakeOverlay) Render(dst []modes.Cell) {
+	for i := range dst {
+		dst[i] = modes.Cell{Char: '#'}
+	}
+}
+
+func (f *fakeOverlay) Key(k keys.Key) modes.Outcome {
+	f.mu.Lock()
+	f.receivedKeys = append(f.receivedKeys, k)
+	closeMode := f.closeKey != 0 && k.Code == f.closeKey
+	f.mu.Unlock()
+	select {
+	case f.keyCh <- struct{}{}:
+	default:
+	}
+	if closeMode {
+		return modes.CloseMode()
+	}
+	return modes.Consumed()
+}
+
+func (f *fakeOverlay) Mouse(_ keys.MouseEvent) modes.Outcome { return modes.Consumed() }
+func (f *fakeOverlay) CaptureFocus() bool                    { return true }
+
+func (f *fakeOverlay) Close() {
+	f.mu.Lock()
+	f.closed = true
+	f.mu.Unlock()
+	f.closeOnce.Do(func() { close(f.closedCh) })
+}
+
+func (f *fakeOverlay) ReceivedKeys() []keys.Key {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]keys.Key, len(f.receivedKeys))
+	copy(out, f.receivedKeys)
+	return out
+}
+
+func (f *fakeOverlay) IsClosed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closed
+}
+
+// ─── Overlay tests ────────────────────────────────────────────────────────────
+
+// TestOverlayReceivesKey verifies that key events are routed to the active
+// overlay when it captures focus, instead of falling through to the key table.
+func TestOverlayReceivesKey(t *testing.T) {
+	state := session.NewServer()
+	sess := session.NewSession(session.SessionID("$1"), "ov-sess", state.Options)
+	paneID := session.PaneID(1)
+	activePaneCapture := &testCapturingPane{}
+	win := session.NewWindow(session.WindowID("@1"), "main", sess.Options)
+	win.AddPane(paneID, activePaneCapture)
+	win.Layout = layout.New(80, 24, paneID)
+	sess.AddWindow(win)
+	state.AddSession(sess)
+
+	overlay := newFakeOverlay(modes.Rect{X: 0, Y: 0, Width: 10, Height: 5}, 0)
+
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+	dirtyIDs := make(chan session.ClientID, 16)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		State:    state,
+		OverlayPusher: func(_ session.ClientID) modes.ClientOverlay {
+			return overlay
+		},
+		OnDirty: func(id session.ClientID) {
+			select {
+			case dirtyIDs <- id:
+			default:
+			}
+		},
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+	sendHandshake(t, clientConn)
+	time.Sleep(20 * time.Millisecond)
+
+	go func() {
+		for {
+			if _, _, err := proto.ReadMsg(clientConn); err != nil {
+				return
+			}
+		}
+	}()
+
+	cm := proto.CommandMsg{Argv: []string{"attach-session", "-t", "ov-sess"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write attach-session: %v", err)
+	}
+	select {
+	case <-dirtyIDs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnDirty not called after attach-session")
+	}
+
+	// Send keystroke 'a' as stdin.
+	stdinMsg := proto.StdinMsg{Data: []byte("a")}
+	if err := proto.WriteMsg(clientConn, proto.MsgStdin, stdinMsg.Encode()); err != nil {
+		t.Fatalf("write MsgStdin: %v", err)
+	}
+
+	// Wait for the overlay's Key method to be called rather than relying on
+	// OnDirty ordering, which can interleave with prior events.
+	select {
+	case <-overlay.keyCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("overlay did not receive key within timeout")
+	}
+
+	// The overlay should have received 'a'; the pane should not.
+	received := overlay.ReceivedKeys()
+	if len(received) == 0 {
+		t.Fatal("expected overlay to receive at least one key, got none")
+	}
+	if received[0].Code != keys.KeyCode('a') {
+		t.Errorf("expected overlay to receive key 'a' (code %d), got code %d", keys.KeyCode('a'), received[0].Code)
+	}
+	if written := activePaneCapture.Written(); len(written) != 0 {
+		t.Errorf("expected active pane to receive no input (overlay captures focus), got %q", written)
+	}
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}
+
+// TestOverlayCloseMode verifies that when an overlay returns KindCloseMode
+// for a key, the overlay is removed from the stack and Close is called on it.
+func TestOverlayCloseMode(t *testing.T) {
+	state := session.NewServer()
+	sess := session.NewSession(session.SessionID("$1"), "close-sess", state.Options)
+	paneID := session.PaneID(1)
+	win := session.NewWindow(session.WindowID("@1"), "main", sess.Options)
+	win.AddPane(paneID, &testFakePane{})
+	win.Layout = layout.New(80, 24, paneID)
+	sess.AddWindow(win)
+	state.AddSession(sess)
+
+	// Overlay returns KindCloseMode when 'q' is pressed.
+	overlay := newFakeOverlay(modes.Rect{X: 0, Y: 0, Width: 10, Height: 5}, keys.KeyCode('q'))
+
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+	dirtyIDs := make(chan session.ClientID, 16)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		State:    state,
+		OverlayPusher: func(_ session.ClientID) modes.ClientOverlay {
+			return overlay
+		},
+		OnDirty: func(id session.ClientID) {
+			select {
+			case dirtyIDs <- id:
+			default:
+			}
+		},
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+	sendHandshake(t, clientConn)
+	time.Sleep(20 * time.Millisecond)
+
+	go func() {
+		for {
+			if _, _, err := proto.ReadMsg(clientConn); err != nil {
+				return
+			}
+		}
+	}()
+
+	cm := proto.CommandMsg{Argv: []string{"attach-session", "-t", "close-sess"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write attach-session: %v", err)
+	}
+	select {
+	case <-dirtyIDs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnDirty not called after attach-session")
+	}
+
+	// Send 'q' to trigger CloseMode.
+	stdinMsg := proto.StdinMsg{Data: []byte("q")}
+	if err := proto.WriteMsg(clientConn, proto.MsgStdin, stdinMsg.Encode()); err != nil {
+		t.Fatalf("write MsgStdin: %v", err)
+	}
+
+	// Wait for the overlay's Key method to be called (which triggers Close).
+	select {
+	case <-overlay.keyCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("overlay did not receive key within timeout")
+	}
+
+	// Wait for Close to be called (closedCh is closed by Close()).
+	select {
+	case <-overlay.closedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected overlay.Close() to have been called after KindCloseMode")
+	}
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}
+
+// TestOverlayRendered verifies that the overlay's Render output is included
+// in the composed frame sent to the client.
+func TestOverlayRendered(t *testing.T) {
+	state := session.NewServer()
+	sess := session.NewSession(session.SessionID("$1"), "render-sess", state.Options)
+	paneID := session.PaneID(1)
+	win := session.NewWindow(session.WindowID("@1"), "main", sess.Options)
+	win.AddPane(paneID, &testFakePane{})
+	win.Layout = layout.New(80, 24, paneID)
+	sess.AddWindow(win)
+	state.AddSession(sess)
+
+	// The overlay renders '#' characters over a 10×5 region at the top-left.
+	overlay := newFakeOverlay(modes.Rect{X: 0, Y: 0, Width: 10, Height: 5}, 0)
+
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		State:    state,
+		OverlayPusher: func(_ session.ClientID) modes.ClientOverlay {
+			return overlay
+		},
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+	sendHandshake(t, clientConn)
+	time.Sleep(10 * time.Millisecond)
+
+	// Attach to trigger a render.
+	cm := proto.CommandMsg{Argv: []string{"attach-session", "-t", "render-sess"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, cm.Encode()); err != nil {
+		t.Fatalf("write attach-session: %v", err)
+	}
+
+	if err := clientConn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	msgType, payload, err := proto.ReadMsg(clientConn)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if msgType != proto.MsgStdout {
+		t.Fatalf("expected MsgStdout, got %s", msgType)
+	}
+	var sm proto.StdoutMsg
+	if err := sm.Decode(payload); err != nil {
+		t.Fatalf("decode StdoutMsg: %v", err)
+	}
+
+	// The composed frame should contain '#' from the overlay render.
+	if !bytes.ContainsRune(sm.Data, '#') {
+		preview := sm.Data
+		if len(preview) > 200 {
+			preview = preview[:200]
+		}
+		t.Fatalf("expected '#' from overlay in ANSI output, got: %q", preview)
+	}
+	clientConn.SetDeadline(time.Time{}) //nolint:errcheck
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
 	}
 }

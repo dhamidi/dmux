@@ -13,6 +13,7 @@ import (
 	"github.com/dhamidi/dmux/internal/control"
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
+	"github.com/dhamidi/dmux/internal/modes"
 	"github.com/dhamidi/dmux/internal/options"
 	"github.com/dhamidi/dmux/internal/parse"
 	"github.com/dhamidi/dmux/internal/pane"
@@ -46,6 +47,14 @@ type serverMutator struct {
 	// events is the server-wide event bus for publishing state-change events
 	// to control-mode clients. May be nil if no event bus is configured.
 	events *control.EventBus
+
+	// pushOverlayFn, if non-nil, pushes ov onto the named client's overlay stack.
+	// Wired to srv.pushOverlay by Run.
+	pushOverlayFn func(id session.ClientID, ov modes.ClientOverlay)
+
+	// popOverlayFn, if non-nil, removes the topmost overlay from the named
+	// client's overlay stack. Wired to srv.popOverlay by Run.
+	popOverlayFn func(id session.ClientID)
 }
 
 // newServerMutator returns a *serverMutator backed by state.
@@ -1508,6 +1517,24 @@ func (m *serverMutator) WaitFor(channel string) error {
 
 func (m *serverMutator) SignalChannel(channel string) {
 	m.state.Channels.Signal(channel)
+}
+
+// ─── Overlay lifecycle helpers ────────────────────────────────────────────────
+
+// PushClientOverlay pushes ov onto the named client's overlay stack and
+// triggers a redraw. It is the low-level helper called by Enter* methods.
+func (m *serverMutator) PushClientOverlay(clientID string, ov modes.ClientOverlay) {
+	if m.pushOverlayFn != nil {
+		m.pushOverlayFn(session.ClientID(clientID), ov)
+	}
+}
+
+// PopClientOverlay removes the topmost overlay from the named client's stack,
+// calls Close on it, and triggers a redraw.
+func (m *serverMutator) PopClientOverlay(clientID string) {
+	if m.popOverlayFn != nil {
+		m.popOverlayFn(session.ClientID(clientID))
+	}
 }
 
 // ─── Mode entry mutations ─────────────────────────────────────────────────────
