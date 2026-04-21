@@ -72,6 +72,11 @@ type serverMutator struct {
 	// popPaneOverlayFn, if non-nil, removes the PaneMode for the given client
 	// and pane. Wired to srv.popPaneOverlay by Run.
 	popPaneOverlayFn func(id session.ClientID, paneID session.PaneID)
+
+	// scrollViewportFn, if non-nil, shifts the viewport offset of the named
+	// client by (dx, dy) cells and triggers a redraw. Wired to
+	// srv.scrollViewport by Run.
+	scrollViewportFn func(id session.ClientID, dx, dy int)
 }
 
 // newServerMutator returns a *serverMutator backed by state.
@@ -2491,6 +2496,78 @@ func (m *serverMutator) SuspendClient(clientID string) error {
 		return fmt.Errorf("suspend-client: %v", err)
 	}
 	return proc.Signal(syscall.SIGTSTP)
+}
+
+// ─── refresh-client sub-features ─────────────────────────────────────────────
+
+// parseFeatureFlags converts a comma-separated list of feature-flag names into
+// a session.FeatureSet bitmask.  Unrecognised names are silently ignored.
+func parseFeatureFlags(s string) session.FeatureSet {
+	var fs session.FeatureSet
+	for _, part := range strings.Split(s, ",") {
+		switch strings.TrimSpace(strings.ToLower(part)) {
+		case "256", "256colour", "256-colour", "256color":
+			fs |= session.FeatureColour256
+		case "rgb", "truecolour", "truecolor", "16m", "colour16m":
+			fs |= session.FeatureColour16M
+		case "mouse-sgr", "mousesgr", "mouse":
+			fs |= session.FeatureMouseSGR
+		case "overlap", "overlapping-windows":
+			fs |= session.FeatureOverlap
+		}
+	}
+	return fs
+}
+
+// SetClientFeatures parses featuresStr (comma-separated feature names) into a
+// bitmask and stores it in the client's Features field.
+func (m *serverMutator) SetClientFeatures(clientID, featuresStr string) error {
+	c, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("refresh-client: client %q not found", clientID)
+	}
+	c.Features = parseFeatureFlags(featuresStr)
+	return nil
+}
+
+// RequestClientClipboard sends an OSC 52 clipboard query sequence to the named
+// client's terminal.  The terminal responds asynchronously; the response is
+// stored in Client.ClipboardData when it is received.
+func (m *serverMutator) RequestClientClipboard(clientID string) error {
+	cc, ok := m.getConn(session.ClientID(clientID))
+	if !ok {
+		return fmt.Errorf("refresh-client: client %q not connected", clientID)
+	}
+	// OSC 52 ; c ; ? ST — request clipboard selection "c".
+	query := proto.StdoutMsg{Data: []byte("\033]52;c;?\033\\")}
+	return proto.WriteMsg(cc.netConn, proto.MsgStdout, query.Encode())
+}
+
+// AddClientSubscription registers a named notification subscription on the
+// client.  When the event identified by notify fires, the server formats a
+// message using format and delivers it to the client.
+func (m *serverMutator) AddClientSubscription(clientID, name, notify, format string) error {
+	c, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("refresh-client: client %q not found", clientID)
+	}
+	if c.Subscriptions == nil {
+		c.Subscriptions = make(map[string]session.Subscription)
+	}
+	c.Subscriptions[name] = session.Subscription{Name: name, Notify: notify, Format: format}
+	return nil
+}
+
+// ScrollClientViewport shifts the client's viewport offset by (dx, dy) cells
+// and schedules a redraw.  Positive dy scrolls down; negative dy scrolls up.
+func (m *serverMutator) ScrollClientViewport(clientID string, dx, dy int) error {
+	if _, ok := m.state.Clients[session.ClientID(clientID)]; !ok {
+		return fmt.Errorf("refresh-client: client %q not found", clientID)
+	}
+	if m.scrollViewportFn != nil {
+		m.scrollViewportFn(session.ClientID(clientID), dx, dy)
+	}
+	return nil
 }
 
 // ─── Server access control ────────────────────────────────────────────────────

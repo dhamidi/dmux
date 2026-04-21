@@ -193,7 +193,14 @@ type testBackend struct {
 		clientID   string
 		cols, rows int
 	}
-	suspendedClients []string
+	suspendedClients       []string
+	setClientFeaturesCalls []struct{ clientID, features string }
+	requestClipboardCalls  []string
+	addSubscriptionCalls   []struct{ clientID, name, notify, format string }
+	scrollViewportCalls    []struct {
+		clientID string
+		dx, dy   int
+	}
 
 	// Server access control recording.
 	serverACLEntries []struct {
@@ -756,6 +763,29 @@ func (b *testBackend) ResizeClient(clientID string, cols, rows int) error {
 
 func (b *testBackend) SuspendClient(clientID string) error {
 	b.suspendedClients = append(b.suspendedClients, clientID)
+	return nil
+}
+
+func (b *testBackend) SetClientFeatures(clientID, features string) error {
+	b.setClientFeaturesCalls = append(b.setClientFeaturesCalls, struct{ clientID, features string }{clientID, features})
+	return nil
+}
+
+func (b *testBackend) RequestClientClipboard(clientID string) error {
+	b.requestClipboardCalls = append(b.requestClipboardCalls, clientID)
+	return nil
+}
+
+func (b *testBackend) AddClientSubscription(clientID, name, notify, format string) error {
+	b.addSubscriptionCalls = append(b.addSubscriptionCalls, struct{ clientID, name, notify, format string }{clientID, name, notify, format})
+	return nil
+}
+
+func (b *testBackend) ScrollClientViewport(clientID string, dx, dy int) error {
+	b.scrollViewportCalls = append(b.scrollViewportCalls, struct {
+		clientID string
+		dx, dy   int
+	}{clientID, dx, dy})
 	return nil
 }
 

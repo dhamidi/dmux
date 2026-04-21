@@ -91,11 +91,54 @@ func runRefreshClient(ctx *command.Ctx) command.Result {
 		return command.OK()
 	}
 
-	// -f flags: set client feature flags (stub).
-	// -l: request clipboard via OSC 52 (stub).
-	// -B name:notify:format: subscribe to notification (stub).
-	// -D/-U/-L/-R: scroll the client viewport (stub).
-	// These are accepted but not yet enforced; a full redraw is triggered.
+	// -f flags: set client feature flags.
+	if featureStr := ctx.Args.Option("f"); featureStr != "" {
+		if err := ctx.Mutator.SetClientFeatures(clientID, featureStr); err != nil {
+			return command.Errorf("refresh-client: %v", err)
+		}
+		return command.OK()
+	}
+
+	// -l: request clipboard content via OSC 52.
+	if ctx.Args.Flag("l") {
+		if err := ctx.Mutator.RequestClientClipboard(clientID); err != nil {
+			return command.Errorf("refresh-client: %v", err)
+		}
+		return command.OK()
+	}
+
+	// -B name:notify:format: subscribe to a named notification.
+	if subStr := ctx.Args.Option("B"); subStr != "" {
+		parts := strings.SplitN(subStr, ":", 3)
+		if len(parts) != 3 {
+			return command.Errorf("refresh-client: invalid -B value %q, expected name:notify:format", subStr)
+		}
+		if err := ctx.Mutator.AddClientSubscription(clientID, parts[0], parts[1], parts[2]); err != nil {
+			return command.Errorf("refresh-client: %v", err)
+		}
+		return command.OK()
+	}
+
+	// -D/-U/-L/-R: scroll the client viewport (default amount: 1 cell).
+	for _, dir := range []string{"D", "U", "L", "R"} {
+		if ctx.Args.Flag(dir) {
+			var dx, dy int
+			switch dir {
+			case "D":
+				dy = 1
+			case "U":
+				dy = -1
+			case "L":
+				dx = -1
+			case "R":
+				dx = 1
+			}
+			if err := ctx.Mutator.ScrollClientViewport(clientID, dx, dy); err != nil {
+				return command.Errorf("refresh-client: %v", err)
+			}
+			return command.OK()
+		}
+	}
 
 	// Default (and fallback): send a full redraw signal to the client.
 	if err := ctx.Mutator.RefreshClient(clientID); err != nil {

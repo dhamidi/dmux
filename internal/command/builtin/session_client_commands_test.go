@@ -89,6 +89,136 @@ func TestRefreshClient_InvalidSize_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestRefreshClient_FeatureFlag_SetsFeatures(t *testing.T) {
+	b := newBackend()
+	res := dispatch("refresh-client", []string{"-f", "256,RGB"}, b)
+	if res.Err != nil {
+		t.Fatalf("refresh-client -f returned error: %v", res.Err)
+	}
+	if len(b.setClientFeaturesCalls) != 1 {
+		t.Fatalf("expected 1 SetClientFeatures call, got %d", len(b.setClientFeaturesCalls))
+	}
+	got := b.setClientFeaturesCalls[0]
+	if got.clientID != "c1" {
+		t.Errorf("SetClientFeatures clientID = %q, want %q", got.clientID, "c1")
+	}
+	if got.features != "256,RGB" {
+		t.Errorf("SetClientFeatures features = %q, want %q", got.features, "256,RGB")
+	}
+}
+
+func TestRefreshClient_ClipboardFlag_RequestsClipboard(t *testing.T) {
+	b := newBackend()
+	res := dispatch("refresh-client", []string{"-l"}, b)
+	if res.Err != nil {
+		t.Fatalf("refresh-client -l returned error: %v", res.Err)
+	}
+	if len(b.requestClipboardCalls) != 1 {
+		t.Fatalf("expected 1 RequestClientClipboard call, got %d", len(b.requestClipboardCalls))
+	}
+	if b.requestClipboardCalls[0] != "c1" {
+		t.Errorf("RequestClientClipboard clientID = %q, want %q", b.requestClipboardCalls[0], "c1")
+	}
+}
+
+func TestRefreshClient_BFlag_RegistersSubscription(t *testing.T) {
+	b := newBackend()
+	res := dispatch("refresh-client", []string{"-B", "myalert:bell:Bell!"}, b)
+	if res.Err != nil {
+		t.Fatalf("refresh-client -B returned error: %v", res.Err)
+	}
+	if len(b.addSubscriptionCalls) != 1 {
+		t.Fatalf("expected 1 AddClientSubscription call, got %d", len(b.addSubscriptionCalls))
+	}
+	got := b.addSubscriptionCalls[0]
+	if got.clientID != "c1" || got.name != "myalert" || got.notify != "bell" || got.format != "Bell!" {
+		t.Errorf("AddClientSubscription = %+v, want {c1, myalert, bell, Bell!}", got)
+	}
+}
+
+func TestRefreshClient_BFlag_InvalidFormat_ReturnsError(t *testing.T) {
+	b := newBackend()
+	res := dispatch("refresh-client", []string{"-B", "no-colon"}, b)
+	if res.Err == nil {
+		t.Error("refresh-client -B with invalid value should return an error")
+	}
+}
+
+func TestRefreshClient_BFlag_ColonInFormat_ParsesCorrectly(t *testing.T) {
+	b := newBackend()
+	// Format field itself contains colons — only the first two are separators.
+	res := dispatch("refresh-client", []string{"-B", "a:b:fmt:with:colons"}, b)
+	if res.Err != nil {
+		t.Fatalf("refresh-client -B returned error: %v", res.Err)
+	}
+	if len(b.addSubscriptionCalls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(b.addSubscriptionCalls))
+	}
+	if b.addSubscriptionCalls[0].format != "fmt:with:colons" {
+		t.Errorf("format = %q, want %q", b.addSubscriptionCalls[0].format, "fmt:with:colons")
+	}
+}
+
+func TestRefreshClient_ScrollDown_CallsScrollViewport(t *testing.T) {
+	b := newBackend()
+	res := dispatch("refresh-client", []string{"-D"}, b)
+	if res.Err != nil {
+		t.Fatalf("refresh-client -D returned error: %v", res.Err)
+	}
+	if len(b.scrollViewportCalls) != 1 {
+		t.Fatalf("expected 1 ScrollClientViewport call, got %d", len(b.scrollViewportCalls))
+	}
+	got := b.scrollViewportCalls[0]
+	if got.dx != 0 || got.dy != 1 {
+		t.Errorf("ScrollClientViewport(%d, %d), want (0, 1)", got.dx, got.dy)
+	}
+}
+
+func TestRefreshClient_ScrollUp_CallsScrollViewport(t *testing.T) {
+	b := newBackend()
+	res := dispatch("refresh-client", []string{"-U"}, b)
+	if res.Err != nil {
+		t.Fatalf("refresh-client -U returned error: %v", res.Err)
+	}
+	if len(b.scrollViewportCalls) != 1 {
+		t.Fatalf("expected 1 ScrollClientViewport call, got %d", len(b.scrollViewportCalls))
+	}
+	got := b.scrollViewportCalls[0]
+	if got.dx != 0 || got.dy != -1 {
+		t.Errorf("ScrollClientViewport(%d, %d), want (0, -1)", got.dx, got.dy)
+	}
+}
+
+func TestRefreshClient_ScrollLeft_CallsScrollViewport(t *testing.T) {
+	b := newBackend()
+	res := dispatch("refresh-client", []string{"-L"}, b)
+	if res.Err != nil {
+		t.Fatalf("refresh-client -L returned error: %v", res.Err)
+	}
+	if len(b.scrollViewportCalls) != 1 {
+		t.Fatalf("expected 1 ScrollClientViewport call, got %d", len(b.scrollViewportCalls))
+	}
+	got := b.scrollViewportCalls[0]
+	if got.dx != -1 || got.dy != 0 {
+		t.Errorf("ScrollClientViewport(%d, %d), want (-1, 0)", got.dx, got.dy)
+	}
+}
+
+func TestRefreshClient_ScrollRight_CallsScrollViewport(t *testing.T) {
+	b := newBackend()
+	res := dispatch("refresh-client", []string{"-R"}, b)
+	if res.Err != nil {
+		t.Fatalf("refresh-client -R returned error: %v", res.Err)
+	}
+	if len(b.scrollViewportCalls) != 1 {
+		t.Fatalf("expected 1 ScrollClientViewport call, got %d", len(b.scrollViewportCalls))
+	}
+	got := b.scrollViewportCalls[0]
+	if got.dx != 1 || got.dy != 0 {
+		t.Errorf("ScrollClientViewport(%d, %d), want (1, 0)", got.dx, got.dy)
+	}
+}
+
 // ─── suspend-client tests ─────────────────────────────────────────────────────
 
 func TestSuspendClient_DefaultsToCallingClient(t *testing.T) {

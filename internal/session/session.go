@@ -620,6 +620,14 @@ func (w *Window) buildPaneContexts() []format.Context {
 	return out
 }
 
+// Subscription is a named notification subscription registered via
+// refresh-client -B name:notify:format.
+type Subscription struct {
+	Name   string
+	Notify string
+	Format string
+}
+
 // Client represents an attached terminal client. Session is nil when the
 // client is connected but not yet attached to a session.
 type Client struct {
@@ -652,6 +660,12 @@ type Client struct {
 	Written int64
 	// Discarded is the number of bytes discarded (e.g. when the client is slow).
 	Discarded int64
+	// Subscriptions holds named notification subscriptions registered via
+	// refresh-client -B name:notify:format.
+	Subscriptions map[string]Subscription
+	// ClipboardData holds the most recent clipboard content received via an
+	// OSC 52 response from the client terminal.
+	ClipboardData string
 }
 
 // NewClient creates a Client with sensible defaults. The Session field is nil

@@ -322,6 +322,19 @@ type Mutator interface {
 	ResizeClient(clientID string, cols, rows int) error
 	// SuspendClient sends SIGTSTP to the client process identified by clientID.
 	SuspendClient(clientID string) error
+	// SetClientFeatures sets the feature-flag bitmask for the client.
+	// featuresStr is a comma-separated list of feature names, e.g. "256,RGB".
+	SetClientFeatures(clientID, featuresStr string) error
+	// RequestClientClipboard sends an OSC 52 clipboard query to the client's
+	// terminal so the terminal will reply with its current clipboard contents.
+	RequestClientClipboard(clientID string) error
+	// AddClientSubscription registers a named notification subscription for
+	// the client. When the event named by notify fires, the server formats
+	// message using format and sends it to the client.
+	AddClientSubscription(clientID, name, notify, format string) error
+	// ScrollClientViewport shifts the client's viewport by dx columns and dy
+	// rows. Positive dy scrolls the view down; negative dy scrolls up.
+	ScrollClientViewport(clientID string, dx, dy int) error
 
 	// Server access control.
 	// SetServerAccess adds or updates an ACL entry: allow/deny username with

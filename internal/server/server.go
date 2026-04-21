@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"fmt"
+	"image"
 	"io"
 	"log"
 	"net"
@@ -136,6 +137,11 @@ type clientConn struct {
 	// paneOverlays holds per-pane modes (copy-mode, clock-mode) keyed by
 	// pane ID. Access is protected by srv.mu.
 	paneOverlays map[session.PaneID]modes.PaneMode
+
+	// viewportOffset is the cumulative scroll offset of this client's view,
+	// in character cells.  Positive X scrolls right; positive Y scrolls down.
+	// Access is protected by srv.mu.
+	viewportOffset image.Point
 }
 
 // Run starts the dmux server and blocks until shutdown.
@@ -236,6 +242,9 @@ func Run(cfg Config) error {
 	}
 	sm.popPaneOverlayFn = func(id session.ClientID, paneID session.PaneID) {
 		s.popPaneOverlay(id, paneID)
+	}
+	sm.scrollViewportFn = func(id session.ClientID, dx, dy int) {
+		s.scrollViewport(id, dx, dy)
 	}
 	s.mutator = sm
 
@@ -355,6 +364,21 @@ func (s *srv) popPaneOverlay(clientID session.ClientID, paneID session.PaneID) {
 		if ok {
 			s.markDirty(cc)
 		}
+	}
+}
+
+// scrollViewport shifts the viewport offset of the named client by (dx, dy)
+// cells and schedules a redraw.  It is safe to call from any goroutine.
+func (s *srv) scrollViewport(clientID session.ClientID, dx, dy int) {
+	s.mu.Lock()
+	cc, ok := s.conns[clientID]
+	if ok {
+		cc.viewportOffset.X += dx
+		cc.viewportOffset.Y += dy
+	}
+	s.mu.Unlock()
+	if ok {
+		s.markDirty(cc)
 	}
 }
 
@@ -1055,10 +1079,18 @@ func (s *srv) renderLoop(cc *clientConn) {
 		borderLines, _ := win.Options.GetString("pane-border-lines")
 		borderStatus, _ := win.Options.GetString("pane-border-status")
 		borderFormat, _ := win.Options.GetString("pane-border-format")
+		vpOffset := cc.viewportOffset
 		placements := make([]render.PanePlacement, 0, len(win.Panes))
 		for id, p := range win.Panes {
 			rect := win.Layout.Rect(id)
 			if rect.Width == 0 || rect.Height == 0 {
+				continue
+			}
+			// Apply viewport scroll: shift pane position by the client's
+			// viewport offset.  Panes scrolled entirely off-screen are skipped.
+			rect.X -= vpOffset.X
+			rect.Y -= vpOffset.Y
+			if rect.X+rect.Width <= 0 || rect.Y+rect.Height <= 0 {
 				continue
 			}
 			var paneFace render.Pane
