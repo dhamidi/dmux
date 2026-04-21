@@ -16,6 +16,7 @@ import (
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/modes"
 	copymode "github.com/dhamidi/dmux/internal/modes/copy"
+	menumode "github.com/dhamidi/dmux/internal/modes/menu"
 	popupmode "github.com/dhamidi/dmux/internal/modes/popup"
 	promptmode "github.com/dhamidi/dmux/internal/modes/prompt"
 	treemode "github.com/dhamidi/dmux/internal/modes/tree"
@@ -1829,7 +1830,51 @@ func (n *nullPopupPane) Snapshot() pane.CellGrid               { return pane.Cel
 func (n *nullPopupPane) Close() error                          { return nil }
 
 func (m *serverMutator) DisplayMenu(clientID string, items []command.MenuEntry) error {
-	return errStub("display-menu")
+	if _, ok := m.state.Clients[session.ClientID(clientID)]; !ok {
+		return fmt.Errorf("display-menu: client %q not found", clientID)
+	}
+
+	store := m.store
+	queue := m.queue
+	mut := command.Mutator(m)
+
+	menuItems := make([]menumode.MenuItem, len(items))
+	for i, entry := range items {
+		entry := entry
+		var mnemonic rune
+		if len(entry.Key) > 0 {
+			mnemonic = []rune(entry.Key)[0]
+		}
+		isSeparator := entry.Label == "" && entry.Key == "" && entry.Command == ""
+		onSelect := func() {
+			if entry.Command == "" {
+				return
+			}
+			cmds, err := parse.Parse(entry.Command)
+			if err != nil || len(cmds) == 0 {
+				return
+			}
+			for _, c := range cmds {
+				c := c
+				var nilClientView command.ClientView
+				queue.EnqueueFunc(c.Name, func() {
+					command.Dispatch(c.Name, c.Args, store, nilClientView, queue, mut)
+				})
+			}
+		}
+		menuItems[i] = menumode.MenuItem{
+			Label:     entry.Label,
+			Mnemonic:  mnemonic,
+			Separator: isSeparator,
+			Enabled:   !isSeparator,
+			OnSelect:  onSelect,
+		}
+	}
+
+	anchor := modes.Rect{X: 0, Y: 0}
+	mode := menumode.New(anchor, menuItems)
+	m.PushClientOverlay(clientID, mode)
+	return nil
 }
 
 func (m *serverMutator) DisplayPanes(clientID string) error {
