@@ -14,6 +14,7 @@ import (
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/modes"
+	copymode "github.com/dhamidi/dmux/internal/modes/copy"
 	"github.com/dhamidi/dmux/internal/options"
 	"github.com/dhamidi/dmux/internal/parse"
 	"github.com/dhamidi/dmux/internal/pane"
@@ -55,6 +56,14 @@ type serverMutator struct {
 	// popOverlayFn, if non-nil, removes the topmost overlay from the named
 	// client's overlay stack. Wired to srv.popOverlay by Run.
 	popOverlayFn func(id session.ClientID)
+
+	// pushPaneOverlayFn, if non-nil, registers a PaneMode for the given client
+	// and pane. Wired to srv.pushPaneOverlay by Run.
+	pushPaneOverlayFn func(id session.ClientID, paneID session.PaneID, mode modes.PaneMode)
+
+	// popPaneOverlayFn, if non-nil, removes the PaneMode for the given client
+	// and pane. Wired to srv.popPaneOverlay by Run.
+	popPaneOverlayFn func(id session.ClientID, paneID session.PaneID)
 }
 
 // newServerMutator returns a *serverMutator backed by state.
@@ -1539,8 +1548,67 @@ func (m *serverMutator) PopClientOverlay(clientID string) {
 
 // ─── Mode entry mutations ─────────────────────────────────────────────────────
 
-func (m *serverMutator) EnterCopyMode(clientID string, scrollback bool) error {
-	return errStub("copy-mode")
+// snapshotScrollback implements copy.Scrollback using the pane's live Snapshot.
+// Each call to Lines() returns a fresh snapshot from the underlying pane.
+type snapshotScrollback struct {
+	p session.Pane
+}
+
+func (s *snapshotScrollback) Lines() []copymode.Line {
+	grid := s.p.Snapshot()
+	if grid.Rows == 0 || grid.Cols == 0 {
+		return nil
+	}
+	lines := make([]copymode.Line, grid.Rows)
+	for row := 0; row < grid.Rows; row++ {
+		line := make(copymode.Line, grid.Cols)
+		for col := 0; col < grid.Cols; col++ {
+			c := grid.Cells[row*grid.Cols+col]
+			line[col] = modes.Cell{
+				Char:  c.Char,
+				Fg:    modes.Color(c.Fg),
+				Bg:    modes.Color(c.Bg),
+				Attrs: uint8(c.Attrs),
+				FgR:   c.FgR,
+				FgG:   c.FgG,
+				FgB:   c.FgB,
+				BgR:   c.BgR,
+				BgG:   c.BgG,
+				BgB:   c.BgB,
+			}
+		}
+		lines[row] = line
+	}
+	return lines
+}
+
+func (s *snapshotScrollback) Width() int {
+	return s.p.Snapshot().Cols
+}
+
+func (s *snapshotScrollback) Height() int {
+	return s.p.Snapshot().Rows
+}
+
+func (m *serverMutator) EnterCopyMode(clientID string, _ bool) error {
+	client, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("copy-mode: client %q not found", clientID)
+	}
+	if client.Session == nil || client.Session.Current == nil {
+		return fmt.Errorf("copy-mode: client %q has no active window", clientID)
+	}
+	win := client.Session.Current.Window
+	p, ok := win.Panes[win.Active]
+	if !ok {
+		return fmt.Errorf("copy-mode: no active pane in window %q", win.ID)
+	}
+	sb := &snapshotScrollback{p: p}
+	mode := copymode.New(sb)
+	if m.pushPaneOverlayFn != nil {
+		m.pushPaneOverlayFn(session.ClientID(clientID), win.Active, mode)
+	}
+	return nil
 }
 
 func (m *serverMutator) EnterChooseTree(clientID, sessionID, windowID string) error {

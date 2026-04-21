@@ -18,6 +18,7 @@ import (
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/modes"
+	copymode "github.com/dhamidi/dmux/internal/modes/copy"
 	"github.com/dhamidi/dmux/internal/osinfo"
 	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
@@ -210,6 +211,12 @@ func Run(cfg Config) error {
 	sm.popOverlayFn = func(id session.ClientID) {
 		s.popOverlay(id)
 	}
+	sm.pushPaneOverlayFn = func(id session.ClientID, paneID session.PaneID, mode modes.PaneMode) {
+		s.pushPaneOverlay(id, paneID, mode)
+	}
+	sm.popPaneOverlayFn = func(id session.ClientID, paneID session.PaneID) {
+		s.popPaneOverlay(id, paneID)
+	}
 	s.mutator = sm
 
 	loadDefaultOptions(s)
@@ -277,6 +284,47 @@ func (s *srv) popOverlay(clientID session.ClientID) {
 		n := len(cc.overlays)
 		popped = cc.overlays[n-1]
 		cc.overlays = cc.overlays[:n-1]
+	}
+	s.mu.Unlock()
+	if popped != nil {
+		popped.Close()
+		s.mu.Lock()
+		cc, ok = s.conns[clientID]
+		s.mu.Unlock()
+		if ok {
+			s.markDirty(cc)
+		}
+	}
+}
+
+// pushPaneOverlay registers mode as the active PaneMode for the given pane on
+// the given client, replacing any previous mode. It schedules a redraw.
+func (s *srv) pushPaneOverlay(clientID session.ClientID, paneID session.PaneID, mode modes.PaneMode) {
+	s.mu.Lock()
+	cc, ok := s.conns[clientID]
+	if ok {
+		if cc.paneOverlays == nil {
+			cc.paneOverlays = make(map[session.PaneID]modes.PaneMode)
+		}
+		cc.paneOverlays[paneID] = mode
+	}
+	s.mu.Unlock()
+	if ok {
+		s.markDirty(cc)
+	}
+}
+
+// popPaneOverlay removes the PaneMode for the given pane on the given client,
+// calls Close on it, and schedules a redraw.
+func (s *srv) popPaneOverlay(clientID session.ClientID, paneID session.PaneID) {
+	s.mu.Lock()
+	cc, ok := s.conns[clientID]
+	var popped modes.PaneMode
+	if ok && cc.paneOverlays != nil {
+		if mode, exists := cc.paneOverlays[paneID]; exists {
+			popped = mode
+			delete(cc.paneOverlays, paneID)
+		}
 	}
 	s.mu.Unlock()
 	if popped != nil {
@@ -622,6 +670,37 @@ func (s *srv) clientLoop(cc *clientConn) {
 					}
 				}
 
+				// Route key to pane mode (copy-mode, clock-mode) when active.
+				// Pane modes take priority over the key table and raw pane input.
+				s.mu.Lock()
+				var activePaneMode modes.PaneMode
+				var activePaneModeID session.PaneID
+				if cc.paneOverlays != nil && cc.client.Session != nil && cc.client.Session.Current != nil {
+					win := cc.client.Session.Current.Window
+					if mode, ok := cc.paneOverlays[win.Active]; ok {
+						activePaneMode = mode
+						activePaneModeID = win.Active
+					}
+				}
+				s.mu.Unlock()
+
+				if activePaneMode != nil {
+					outcome := activePaneMode.Key(k)
+					switch outcome.Kind {
+					case modes.KindCloseMode:
+						s.popPaneOverlay(cc.id, activePaneModeID)
+					case modes.KindCommand:
+						if copyCmd, ok := outcome.Cmd.(copymode.CopyCommand); ok {
+							s.mu.Lock()
+							s.state.Buffers.Push("", []byte(copyCmd.Text))
+							s.mu.Unlock()
+							s.popPaneOverlay(cc.id, activePaneModeID)
+						}
+					}
+					s.markDirty(cc)
+					continue
+				}
+
 				s.mu.Lock()
 				tableName := cc.client.KeyTable
 				if tableName == "" {
@@ -869,6 +948,60 @@ func (a *renderPaneAdapter) Snapshot() render.CellGrid {
 	return render.CellGrid{Rows: snap.Rows, Cols: snap.Cols, Cells: cells}
 }
 
+// paneModeAdapter implements render.Pane by rendering a PaneMode onto a
+// temporary canvas and returning the result as a CellGrid.
+type paneModeAdapter struct {
+	mode modes.PaneMode
+	rect render.Rect
+}
+
+func (a *paneModeAdapter) Bounds() render.Rect { return a.rect }
+
+func (a *paneModeAdapter) Snapshot() render.CellGrid {
+	rows := a.rect.Height
+	cols := a.rect.Width
+	if rows <= 0 || cols <= 0 {
+		return render.CellGrid{Rows: rows, Cols: cols}
+	}
+	canvas := &gridCanvas{
+		rows:  rows,
+		cols:  cols,
+		cells: make([]modes.Cell, rows*cols),
+	}
+	a.mode.Render(canvas)
+	renderCells := make([]render.Cell, len(canvas.cells))
+	for i, c := range canvas.cells {
+		renderCells[i] = render.Cell{
+			Char:  c.Char,
+			Fg:    render.Color(c.Fg),
+			Bg:    render.Color(c.Bg),
+			Attrs: uint16(c.Attrs),
+			FgR:   c.FgR,
+			FgG:   c.FgG,
+			FgB:   c.FgB,
+			BgR:   c.BgR,
+			BgG:   c.BgG,
+			BgB:   c.BgB,
+		}
+	}
+	return render.CellGrid{Rows: rows, Cols: cols, Cells: renderCells}
+}
+
+// gridCanvas implements modes.Canvas over a flat []modes.Cell slice.
+type gridCanvas struct {
+	rows, cols int
+	cells      []modes.Cell
+}
+
+func (c *gridCanvas) Size() modes.Size { return modes.Size{Rows: c.rows, Cols: c.cols} }
+
+func (c *gridCanvas) Set(col, row int, cell modes.Cell) {
+	if col < 0 || col >= c.cols || row < 0 || row >= c.rows {
+		return
+	}
+	c.cells[row*c.cols+col] = cell
+}
+
 // renderLoop runs as a per-client goroutine and sends a full-repaint
 // MsgStdout to the client each time cc.dirty signals a redraw. It exits
 // when cc.dirty is closed (on client disconnect).
@@ -906,8 +1039,17 @@ func (s *srv) renderLoop(cc *clientConn) {
 			if rect.Width == 0 || rect.Height == 0 {
 				continue
 			}
+			var paneFace render.Pane
+			if cc.paneOverlays != nil {
+				if mode, hasMode := cc.paneOverlays[id]; hasMode {
+					paneFace = &paneModeAdapter{mode: mode, rect: rect}
+				}
+			}
+			if paneFace == nil {
+				paneFace = &renderPaneAdapter{p: p, rect: rect}
+			}
 			placements = append(placements, render.PanePlacement{
-				Pane:              &renderPaneAdapter{p: p, rect: rect},
+				Pane:              paneFace,
 				Rect:              rect,
 				SynchronizedPanes: syncPanes,
 				PaneIndex:         int(id),
