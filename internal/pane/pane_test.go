@@ -1,6 +1,8 @@
 package pane_test
 
 import (
+	"bytes"
+	"os"
 	"testing"
 	"time"
 
@@ -332,5 +334,124 @@ func TestPane_Close_ReleasesTerminal(t *testing.T) {
 	}
 	if !ft.Closed() {
 		t.Error("terminal not closed after pane.Close")
+	}
+}
+
+// ─── Pipe attachment tests ────────────────────────────────────────────────────
+
+func TestPane_HasPipe_FalseInitially(t *testing.T) {
+	p, _, _, _, _ := newTestPane(t, 1)
+	if p.HasPipe() {
+		t.Error("HasPipe() = true on fresh pane, want false")
+	}
+}
+
+func TestPane_AttachPipe_StartsSubprocess(t *testing.T) {
+	p, _, _, _, _ := newTestPane(t, 1)
+	if err := p.AttachPipe("cat"); err != nil {
+		t.Fatalf("AttachPipe: %v", err)
+	}
+	if !p.HasPipe() {
+		t.Error("HasPipe() = false after AttachPipe, want true")
+	}
+}
+
+func TestPane_DetachPipe_StopsSubprocess(t *testing.T) {
+	p, _, _, _, _ := newTestPane(t, 1)
+	if err := p.AttachPipe("cat"); err != nil {
+		t.Fatalf("AttachPipe: %v", err)
+	}
+	if err := p.DetachPipe(); err != nil {
+		t.Fatalf("DetachPipe: %v", err)
+	}
+	if p.HasPipe() {
+		t.Error("HasPipe() = true after DetachPipe, want false")
+	}
+}
+
+func TestPane_DetachPipe_NoopWhenNoPipe(t *testing.T) {
+	p, _, _, _, _ := newTestPane(t, 1)
+	if err := p.DetachPipe(); err != nil {
+		t.Errorf("DetachPipe on pane without pipe returned error: %v", err)
+	}
+}
+
+// TestPane_AttachPipe_OutputArrivesInSubprocess verifies the end-to-end path:
+// bytes produced by the pane's PTY reach the pipe subprocess's stdin.
+//
+// To avoid a race with FakePTY (which returns io.EOF on empty buffer, causing
+// copyOutput to exit), we use a PTYFactory so that Respawn can restart
+// copyOutput AFTER AttachPipe has set pipeWriter. The new copyOutput goroutine
+// thus picks up the pre-loaded data with a live pipeWriter.
+func TestPane_AttachPipe_OutputArrivesInSubprocess(t *testing.T) {
+	tmp, err := os.CreateTemp("", "pane-pipe-test-*")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	tmp.Close()
+	defer os.Remove(tmp.Name())
+
+	data := []byte("pipe output test")
+
+	// The factory produces a FakePTY pre-loaded with test data.
+	var spawned *pty.FakePTY
+	spawnedFT := &pane.FakeTerminal{}
+	factory := func(_ string, _, _ int) (pty.PTY, error) {
+		fp2 := &pty.FakePTY{}
+		fp2.InjectOutput(data)
+		spawned = fp2
+		return fp2, nil
+	}
+
+	// Initial PTY is empty; copyOutput will exit quickly (no data).
+	fp := &pty.FakePTY{}
+	p, err := pane.New(pane.Config{
+		ID:         1,
+		PTY:        fp,
+		Term:       spawnedFT,
+		Keys:       &pane.FakeKeyEncoder{},
+		Mouse:      &pane.FakeMouseEncoder{},
+		PTYFactory: factory,
+	})
+	if err != nil {
+		t.Fatalf("pane.New: %v", err)
+	}
+	defer p.Close()
+
+	// Attach pipe BEFORE Respawn so pipeWriter is set when the new copyOutput starts.
+	shellCmd := "cat > " + tmp.Name()
+	if err := p.AttachPipe(shellCmd); err != nil {
+		t.Fatalf("AttachPipe: %v", err)
+	}
+
+	// Respawn: closes old (empty) PTY, starts a new one with data pre-loaded,
+	// and launches a fresh copyOutput goroutine that already sees pipeWriter.
+	if err := p.Respawn("sh"); err != nil {
+		t.Fatalf("Respawn: %v", err)
+	}
+
+	// Poll until the terminal has received the data (proves copyOutput ran).
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if bytes.Equal(spawnedFT.Written(), data) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !bytes.Equal(spawnedFT.Written(), data) {
+		t.Fatalf("terminal never received pane output; spawned PTY: %v", spawned)
+	}
+
+	// DetachPipe closes the subprocess's stdin → cat flushes and exits.
+	if err := p.DetachPipe(); err != nil {
+		t.Fatalf("DetachPipe: %v", err)
+	}
+
+	got, err := os.ReadFile(tmp.Name())
+	if err != nil {
+		t.Fatalf("read temp file: %v", err)
+	}
+	if !bytes.Contains(got, data) {
+		t.Errorf("pipe subprocess received %q, want it to contain %q", got, data)
 	}
 }

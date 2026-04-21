@@ -3,6 +3,7 @@ package pane
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sync"
@@ -161,6 +162,18 @@ type Pane interface {
 	// ClearScreen injects the ANSI erase-display sequence into the pane's
 	// pseudo-terminal, causing the visible area to be blanked.
 	ClearScreen() error
+
+	// HasPipe reports whether a pipe subprocess is currently attached.
+	HasPipe() bool
+
+	// AttachPipe starts shellCmd via "sh -c shellCmd" and routes PTY output
+	// to its stdin. Any previously attached pipe is stopped first.
+	// Returns an error if the subprocess cannot be started.
+	AttachPipe(shellCmd string) error
+
+	// DetachPipe stops any active pipe subprocess attached by [AttachPipe].
+	// It is a no-op if no pipe is attached.
+	DetachPipe() error
 }
 
 // Config holds the parameters for creating a new Pane.
@@ -206,6 +219,8 @@ type pane struct {
 
 	// pipeCmd is the subprocess started by pipe-pane, if any.
 	pipeCmd *exec.Cmd
+	// pipeWriter is the stdin pipe of pipeCmd; PTY output is teed to it.
+	pipeWriter io.WriteCloser
 	// pipeDone is closed when the pipe goroutines have all exited.
 	pipeDone chan struct{}
 
@@ -232,6 +247,7 @@ func New(cfg Config) (Pane, error) {
 
 // copyOutput reads bytes from the PTY and feeds them into the terminal
 // emulator until the PTY returns an error (typically io.EOF on close).
+// If a pipe subprocess is attached, output is also forwarded to its stdin.
 func (p *pane) copyOutput() {
 	defer close(p.done)
 	buf := make([]byte, 4096)
@@ -248,12 +264,99 @@ func (p *pane) copyOutput() {
 			if bytes.IndexByte(buf[:n], '\x07') >= 0 {
 				p.bellPending = true
 			}
+			w := p.pipeWriter
 			p.mu.Unlock()
+			if w != nil {
+				w.Write(buf[:n]) //nolint:errcheck // best-effort; pipe errors don't affect terminal
+			}
 		}
 		if err != nil {
 			return
 		}
 	}
+}
+
+// HasPipe reports whether a pipe subprocess is currently attached.
+func (p *pane) HasPipe() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.pipeCmd != nil
+}
+
+// AttachPipe starts shellCmd via "sh -c shellCmd" and routes future PTY
+// output to its stdin. Any previously attached pipe is stopped first.
+func (p *pane) AttachPipe(shellCmd string) error {
+	cmd := exec.Command("sh", "-c", shellCmd)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("attach-pipe: get stdin pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		stdin.Close() //nolint:errcheck
+		return fmt.Errorf("attach-pipe: start subprocess: %w", err)
+	}
+
+	done := make(chan struct{})
+	p.mu.Lock()
+	p.pipeCmd = cmd
+	p.pipeWriter = stdin
+	p.pipeDone = done
+	p.mu.Unlock()
+
+	// Reap the subprocess in the background; clean up pipe fields on exit.
+	go func() {
+		defer close(done)
+		_ = cmd.Wait()
+		p.mu.Lock()
+		if p.pipeCmd == cmd {
+			p.pipeCmd = nil
+			p.pipeWriter = nil
+			p.pipeDone = nil
+		}
+		p.mu.Unlock()
+	}()
+
+	return nil
+}
+
+// DetachPipe stops any active pipe subprocess. It is a no-op when no pipe
+// is attached. Stdin is closed first so the subprocess can flush before being
+// terminated; if the subprocess does not exit within 200 ms it is killed.
+func (p *pane) DetachPipe() error {
+	p.mu.Lock()
+	cmd := p.pipeCmd
+	w := p.pipeWriter
+	done := p.pipeDone
+	if cmd != nil {
+		p.pipeCmd = nil
+		p.pipeWriter = nil
+		p.pipeDone = nil
+	}
+	p.mu.Unlock()
+
+	if cmd == nil {
+		return nil
+	}
+
+	// Close stdin so the subprocess sees EOF and can flush buffered output.
+	if w != nil {
+		w.Close() //nolint:errcheck
+	}
+
+	// Give the subprocess a short window to exit cleanly after stdin closes.
+	if done != nil {
+		select {
+		case <-done:
+			// Subprocess exited on its own after stdin closed.
+		case <-time.After(200 * time.Millisecond):
+			// Timeout: force-kill and wait for the reaper goroutine.
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			<-done
+		}
+	}
+	return nil
 }
 
 // LastOutputAt returns the time of the most recent write to the terminal.
@@ -417,10 +520,11 @@ func (p *pane) ClearScreen() error {
 	return p.Write([]byte("\x1b[H\x1b[2J"))
 }
 
-// Close shuts down the pane: it closes the encoders and terminal
-// emulator, closes the PTY (which signals the child process), and
-// waits for the output-copy goroutine to exit.
+// Close shuts down the pane: it stops any attached pipe subprocess, closes
+// the encoders and terminal emulator, closes the PTY (which signals the child
+// process), and waits for the output-copy goroutine to exit.
 func (p *pane) Close() error {
+	p.DetachPipe() //nolint:errcheck
 	p.keyEnc.Close()
 	p.mouseEnc.Close()
 	p.term.Close()

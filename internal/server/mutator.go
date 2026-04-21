@@ -1375,8 +1375,45 @@ func (m *serverMutator) RespawnWindow(sessionID, windowID, shell, dir string, ki
 
 // ─── Pane pipe / clear operations ────────────────────────────────────────────
 
+// pipablePane is the subset of [pane.Pane] required by PipePane.
+// The concrete *pane.pane satisfies this; test fakes that need to support
+// piping must implement it too.
+type pipablePane interface {
+	HasPipe() bool
+	AttachPipe(shellCmd string) error
+	DetachPipe() error
+}
+
 func (m *serverMutator) PipePane(paneID int, shellCmd string, inFlag, outFlag, onceFlag bool) error {
-	return errStub("pipe-pane")
+	_, _, p, err := m.findPane(paneID)
+	if err != nil {
+		return fmt.Errorf("pipe-pane: %w", err)
+	}
+
+	pp, ok := p.(pipablePane)
+	if !ok {
+		return fmt.Errorf("pipe-pane: pane does not support piping")
+	}
+
+	// -o flag: only attach if the pane is not already piped.
+	if onceFlag && pp.HasPipe() {
+		return nil
+	}
+
+	// Stop any existing pipe (also handles toggle-off when shellCmd is empty).
+	if err := pp.DetachPipe(); err != nil {
+		return fmt.Errorf("pipe-pane: stop existing pipe: %w", err)
+	}
+
+	// Empty shellCmd means "disable pipe" (toggle behaviour).
+	if shellCmd == "" {
+		return nil
+	}
+
+	if err := pp.AttachPipe(shellCmd); err != nil {
+		return fmt.Errorf("pipe-pane: %w", err)
+	}
+	return nil
 }
 
 func (m *serverMutator) ClearHistory(paneID int, visibleToo bool) error {
