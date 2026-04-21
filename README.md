@@ -165,6 +165,34 @@ Tier 0  proto  pty  term  keys  options         foundation
 Each package has a `doc.go` describing its boundary, public surface, and what
 "in isolation" means for it.
 
+## Building
+
+Pre-compiled static libraries for libghostty-vt are vendored under `lib/ghostty/`
+for Linux (x86_64 and aarch64) and Windows (x86_64 and aarch64). Build using the
+provided Makefile:
+
+```sh
+# Build for the current platform (no Zig or CMake required)
+make build
+
+# Cross-compile using Zig as the C compiler
+make build-linux-amd64
+make build-linux-arm64
+make build-windows-amd64
+make build-windows-arm64
+
+# Build all cross-compilation targets
+make build-all
+
+# Run tests
+make test
+```
+
+**macOS:** The Darwin libraries (`lib/ghostty/darwin-*/lib/libghostty-vt.a`) must be
+built on a macOS host with Xcode installed, because Ghostty's build system relies on
+`xcrun` to locate the Apple SDK and does not support cross-compilation from Linux.
+Run `make rebuild-libs` on macOS to populate those directories.
+
 ## External dependencies
 
 - `github.com/mitchellh/go-libghostty` — Go bindings to libghostty-vt.

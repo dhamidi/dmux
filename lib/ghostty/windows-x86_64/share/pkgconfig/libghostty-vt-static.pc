@@ -1,0 +1,12 @@
+prefix=${pcfiledir}/../..
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: libghostty-vt-static
+URL: https://github.com/ghostty-org/ghostty
+Description: Ghostty VT terminal emulation library (static)
+Version: 0.1.0
+Cflags: -I${includedir}
+Libs: ${libdir}/ghostty-vt-static.lib
+Libs.private:
+Requires.private:

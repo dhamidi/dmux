@@ -1,8 +1,14 @@
-# Binaries
-/dmux
-/dmux.exe
-/cmd/dmux/dmux
-/cmd/dmux/dmux.exe
+# Build artifacts
+/build/
+/zig-out/
+/zig-cache/
+*.o
+*.d
+
+# Binaries (except vendored static libs)
+dmux
+dmux-*
+*.exe
 
 # Test binaries
 *.test
