@@ -1827,8 +1827,103 @@ func (m *serverMutator) EnterChooseBuffer(clientID, windowID string, items []com
 	return nil
 }
 
+// chooseClientClientOverlay wraps a treemode.Mode for the choose-client
+// command. It adds client-detach ('d') support on top of the standard tree
+// mode key handling.
+type chooseClientClientOverlay struct {
+	mode        *treemode.Mode
+	mutator     *serverMutator
+	callerID    string // the client that opened the overlay
+	rows        int
+	cols        int
+	items       []treemode.ChooserItem
+	onSelect    func(string)
+}
+
+func (o *chooseClientClientOverlay) Rect() modes.Rect {
+	return modes.Rect{X: 0, Y: 0, Width: o.cols, Height: o.rows}
+}
+
+func (o *chooseClientClientOverlay) Render(dst []modes.Cell) {
+	canvas := &gridCanvas{rows: o.rows, cols: o.cols, cells: dst}
+	o.mode.Render(canvas)
+}
+
+func (o *chooseClientClientOverlay) Key(k keys.Key) modes.Outcome {
+	// 'd' in normal mode detaches the currently selected client.
+	if k.Code == keys.KeyCode('d') && !o.mode.Searching() {
+		selected := o.mode.SelectedID()
+		if selected != "" {
+			o.mutator.DetachClient(selected) //nolint:errcheck
+			for i, item := range o.items {
+				if item.Value == selected {
+					o.items = append(o.items[:i], o.items[i+1:]...)
+					break
+				}
+			}
+			o.mode = treemode.NewChooser(o.items, o.onSelect, false)
+		}
+		return modes.Consumed()
+	}
+	return o.mode.Key(k)
+}
+
+func (o *chooseClientClientOverlay) Mouse(ev keys.MouseEvent) modes.Outcome {
+	return o.mode.Mouse(ev)
+}
+
+func (o *chooseClientClientOverlay) CaptureFocus() bool { return true }
+func (o *chooseClientClientOverlay) Close()             { o.mode.Close() }
+
 func (m *serverMutator) EnterChooseClient(clientID, windowID string, items []command.ChooserItem, template string) error {
-	return errStub("choose-client")
+	client, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("choose-client: client %q not found", clientID)
+	}
+
+	// Snapshot the client terminal size for the overlay rectangle.
+	rows, cols := 24, 80
+	if client.Size.Rows > 0 {
+		rows = client.Size.Rows
+	}
+	if client.Size.Cols > 0 {
+		cols = client.Size.Cols
+	}
+
+	// Convert command.ChooserItem to treemode.ChooserItem.
+	treeItems := make([]treemode.ChooserItem, len(items))
+	for i, it := range items {
+		treeItems[i] = treemode.ChooserItem{
+			Display: it.Display,
+			Preview: it.Preview,
+			Value:   it.Value,
+		}
+	}
+
+	// onSelect switches the calling client to the selected client's session.
+	onSelect := func(selectedClientID string) {
+		target, ok := m.state.Clients[session.ClientID(selectedClientID)]
+		if !ok {
+			return
+		}
+		if target.Session == nil {
+			return
+		}
+		m.SwitchClient(clientID, string(target.Session.ID)) //nolint:errcheck
+	}
+
+	overlay := &chooseClientClientOverlay{
+		mutator:  m,
+		callerID: clientID,
+		rows:     rows,
+		cols:     cols,
+		items:    treeItems,
+		onSelect: onSelect,
+	}
+	overlay.mode = treemode.NewChooser(treeItems, onSelect, false)
+
+	m.PushClientOverlay(clientID, overlay)
+	return nil
 }
 
 // clockPaneMode wraps clock.Mode and stops a background ticker on Close.
