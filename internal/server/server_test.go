@@ -122,6 +122,30 @@ func sendHandshake(t *testing.T, conn net.Conn) {
 	}
 }
 
+// readStdoutUntilContains reads MsgStdout messages from conn until one contains
+// needle, then returns its payload. It fails the test if the deadline elapses
+// before a matching message is found. A fresh deadline must be set by the caller
+// before invoking this helper.
+func readStdoutUntilContains(t *testing.T, conn net.Conn, needle string) string {
+	t.Helper()
+	for {
+		msgType, payload, err := proto.ReadMsg(conn)
+		if err != nil {
+			t.Fatalf("readStdoutUntilContains: read: %v", err)
+		}
+		if msgType != proto.MsgStdout {
+			t.Fatalf("readStdoutUntilContains: expected MsgStdout, got %s", msgType)
+		}
+		var sm proto.StdoutMsg
+		if err := sm.Decode(payload); err != nil {
+			t.Fatalf("readStdoutUntilContains: decode: %v", err)
+		}
+		if strings.Contains(string(sm.Data), needle) {
+			return string(sm.Data)
+		}
+	}
+}
+
 // startServer launches server.Run in a goroutine and returns a channel that
 // receives the Run() return value when the server exits.
 func startServer(cfg server.Config) <-chan error {
@@ -324,24 +348,12 @@ func TestCommandDispatch(t *testing.T) {
 		t.Fatalf("write MsgCommand: %v", err)
 	}
 
-	// Expect a MsgStdout response containing the session-related command names.
+	// Read MsgStdout messages until one contains command output. The initial
+	// render may arrive first now that a window is auto-created on connect.
 	if err := clientConn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatalf("set deadline: %v", err)
 	}
-	msgType, payload, err := proto.ReadMsg(clientConn)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	if msgType != proto.MsgStdout {
-		t.Fatalf("expected MsgStdout, got %s", msgType)
-	}
-	var sm proto.StdoutMsg
-	if err := sm.Decode(payload); err != nil {
-		t.Fatalf("decode StdoutMsg: %v", err)
-	}
-	if !strings.Contains(string(sm.Data), "list-sessions") {
-		t.Fatalf("expected output to contain 'list-sessions', got: %q", sm.Data)
-	}
+	readStdoutUntilContains(t, clientConn, "list-sessions")
 	// Remove deadline before shutdown.
 	clientConn.SetDeadline(time.Time{}) //nolint:errcheck
 
@@ -386,21 +398,9 @@ func TestAutoCreateInitialSession(t *testing.T) {
 	if err := clientConn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatalf("set deadline: %v", err)
 	}
-	msgType, payload, err := proto.ReadMsg(clientConn)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	if msgType != proto.MsgStdout {
-		t.Fatalf("expected MsgStdout, got %s", msgType)
-	}
-	var sm proto.StdoutMsg
-	if err := sm.Decode(payload); err != nil {
-		t.Fatalf("decode StdoutMsg: %v", err)
-	}
-	// The auto-created session is named "session1".
-	if !strings.Contains(string(sm.Data), "session1:") {
-		t.Fatalf("expected auto-created session 'session1' in list-sessions output, got: %q", sm.Data)
-	}
+	// The auto-created session is named "session1". Read until we find it in
+	// command output; earlier messages may be render frames.
+	readStdoutUntilContains(t, clientConn, "session1:")
 	clientConn.SetDeadline(time.Time{}) //nolint:errcheck
 
 	sigs <- fakeSignal("SIGTERM")
@@ -472,21 +472,9 @@ func TestMsgStdinKeyBinding(t *testing.T) {
 	if err := clientConn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatalf("set deadline: %v", err)
 	}
-	msgType, payload, err := proto.ReadMsg(clientConn)
-	if err != nil {
-		t.Fatalf("read list-sessions response: %v", err)
-	}
-	if msgType != proto.MsgStdout {
-		t.Fatalf("expected MsgStdout, got %s", msgType)
-	}
-	var outMsg proto.StdoutMsg
-	if err := outMsg.Decode(payload); err != nil {
-		t.Fatalf("decode StdoutMsg: %v", err)
-	}
 	// The auto-created session is "session1"; new-session creates "session2".
-	if !strings.Contains(string(outMsg.Data), "session2:") {
-		t.Fatalf("expected session 'session2' in list-sessions output, got: %q", outMsg.Data)
-	}
+	// Read until command output arrives; render frames may appear first.
+	readStdoutUntilContains(t, clientConn, "session2:")
 	clientConn.SetDeadline(time.Time{}) //nolint:errcheck
 
 	sigs <- fakeSignal("SIGTERM")
