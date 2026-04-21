@@ -187,14 +187,34 @@ func Run(cfg Config) error {
 				_, err := os.Stat(p)
 				return err == nil
 			})
-			ptyDev, err := pty.Open(shellPath, nil, pty.Size{Rows: 24, Cols: 80})
+			ptySize := pty.Size{Rows: 24, Cols: 80}
+			ptyDev, err := pty.Open(shellPath, nil, ptySize)
 			if err != nil {
 				return nil, fmt.Errorf("new-pane: open pty: %w", err)
 			}
 			cfg.PTY = ptyDev
-			cfg.Term = &pane.FakeTerminal{}
-			cfg.Keys = &pane.FakeKeyEncoder{}
-			cfg.Mouse = &pane.FakeMouseEncoder{}
+			term, err := newGhosttyTerminal(int(ptySize.Cols), int(ptySize.Rows))
+			if err != nil {
+				ptyDev.Close()
+				return nil, fmt.Errorf("new-pane: create terminal: %w", err)
+			}
+			term.SetPTYWriter(ptyDev)
+			keyEnc, err := newGhosttyKeyEncoder()
+			if err != nil {
+				term.Close()
+				ptyDev.Close()
+				return nil, fmt.Errorf("new-pane: create key encoder: %w", err)
+			}
+			mouseEnc, err := newGhosttyMouseEncoder()
+			if err != nil {
+				keyEnc.Close()
+				term.Close()
+				ptyDev.Close()
+				return nil, fmt.Errorf("new-pane: create mouse encoder: %w", err)
+			}
+			cfg.Term = term
+			cfg.Keys = keyEnc
+			cfg.Mouse = mouseEnc
 			return pane.New(cfg)
 		},
 		func(paneID int) { s.startPaneWatcher(paneID) },
