@@ -16,6 +16,7 @@ import (
 	"github.com/dhamidi/dmux/internal/keys"
 	"github.com/dhamidi/dmux/internal/layout"
 	"github.com/dhamidi/dmux/internal/modes"
+	clockmode "github.com/dhamidi/dmux/internal/modes/clock"
 	copymode "github.com/dhamidi/dmux/internal/modes/copy"
 	displaypanes "github.com/dhamidi/dmux/internal/modes/displaypanes"
 	menumode "github.com/dhamidi/dmux/internal/modes/menu"
@@ -1739,8 +1740,72 @@ func (m *serverMutator) EnterChooseClient(clientID, windowID string, items []com
 	return errStub("choose-client")
 }
 
+// clockPaneMode wraps clock.Mode and stops a background ticker on Close.
+type clockPaneMode struct {
+	mode   *clockmode.Mode
+	stopFn func()
+}
+
+func (c *clockPaneMode) Render(dst modes.Canvas)                  { c.mode.Render(dst) }
+func (c *clockPaneMode) Key(k keys.Key) modes.Outcome             { return c.mode.Key(k) }
+func (c *clockPaneMode) Mouse(ev keys.MouseEvent) modes.Outcome   { return c.mode.Mouse(ev) }
+func (c *clockPaneMode) Close() {
+	if c.stopFn != nil {
+		c.stopFn()
+	}
+	c.mode.Close()
+}
+
 func (m *serverMutator) EnterClockMode(clientID string, paneID int) error {
-	return errStub("clock-mode")
+	client, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("clock-mode: client %q not found", clientID)
+	}
+	if client.Session == nil || client.Session.Current == nil {
+		return fmt.Errorf("clock-mode: client %q has no active window", clientID)
+	}
+	win := client.Session.Current.Window
+	targetPaneID := session.PaneID(paneID)
+	if paneID <= 0 {
+		targetPaneID = win.Active
+	}
+	if _, ok := win.Panes[targetPaneID]; !ok {
+		return fmt.Errorf("clock-mode: pane %d not found", paneID)
+	}
+
+	clockModeInst := clockmode.New(nil)
+
+	// Start a 1-second ticker that triggers a redraw so the clock updates.
+	ticker := time.NewTicker(time.Second)
+	stop := make(chan struct{})
+	getConn := m.getConn
+	markDirty := m.markDirty
+	cid := session.ClientID(clientID)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if getConn != nil && markDirty != nil {
+					if conn, ok := getConn(cid); ok {
+						markDirty(conn)
+					}
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	paneMode := &clockPaneMode{
+		mode:   clockModeInst,
+		stopFn: func() { close(stop) },
+	}
+
+	if m.pushPaneOverlayFn != nil {
+		m.pushPaneOverlayFn(cid, targetPaneID, paneMode)
+	}
+	return nil
 }
 
 func (m *serverMutator) DisplayPopup(clientID, cmd, title string, cols, rows int) error {
