@@ -1,0 +1,3 @@
+- use go doc to access read Go source and discover APIs
+- follow diataxis.fr principles for writing documentation
+- follow John Ousterhout's philosophy of software design: narrow interfaces, deep implementations.
