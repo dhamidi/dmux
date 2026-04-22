@@ -5,9 +5,10 @@
 *.o
 *.d
 
-# Binaries (except vendored static libs)
-dmux
-dmux-*
+# Binaries (except vendored static libs). Anchored at repo root so
+# they do not mask source directories like cmd/dmux/.
+/dmux
+/dmux-*
 *.exe
 
 # Test binaries
