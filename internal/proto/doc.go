@@ -19,8 +19,11 @@
 //	          Does NOT include the length field itself.
 //	          Maximum value MaxFrameSize = 1 MiB; receivers reject larger.
 //	type      One of the MsgType constants below.
-//	flags     Currently unused, must be zero. Reserved for compression /
-//	          continuation framing in a later milestone.
+//	flags     Reserved for compression / continuation framing in a
+//	          later milestone. Senders set 0 in M1; receivers ignore
+//	          the value and do not reject nonzero flags, so future
+//	          milestones can introduce new bits without a protocol
+//	          version bump.
 //	reserved  Currently zero. Reserved for a sequence number.
 //	payload   Type-specific; see "Message types" below.
 //
@@ -212,24 +215,34 @@
 // payloads. No reflection, no gob, no protobuf — the message set is
 // small enough that hand-rolled code is the cheapest option.
 //
-// The package exposes typed constructors:
+// Frame is an interface satisfied by every concrete message type
+// (Identify, Input, CommandList, ...). Each implements
+// encoding.BinaryMarshaler and encoding.BinaryUnmarshaler, plus
+// Type() MsgType for dispatch. Callers construct messages with
+// plain struct literals and switch on concrete types on receive:
 //
-//	NewIdentify(profile termcaps.Profile, ...) Frame
-//	NewInput(b []byte) Frame
-//	NewCommandList(commands []Command) Frame
-//	NewOutput(b []byte) Frame
-//	NewExit(reason ExitReason, message string) Frame
-//	// etc.
+//	f := &proto.Input{Data: []byte("ls\n")}
+//	payload, err := f.MarshalBinary()
 //
-// And typed accessors:
+//	switch m := f.(type) {
+//	case *proto.Identify:
+//	    // ...
+//	case *proto.Input:
+//	    // ...
+//	}
 //
-//	Frame.Type() MsgType
-//	Frame.Identify() (*IdentifyMsg, error)
-//	Frame.CommandList() (*CommandListMsg, error)
-//	// ...
+// NewFrame returns a zero-valued Frame for a MsgType. A decoder
+// (see internal/xio) reads the envelope, calls NewFrame to allocate
+// the correct concrete type, and then calls UnmarshalBinary on the
+// payload bytes:
 //
-// Accessors return error if called on the wrong type. No untyped
-// payload access is exposed.
+//	f, err := proto.NewFrame(t)
+//	if err != nil { return err }
+//	if err := f.UnmarshalBinary(payload); err != nil { return err }
+//
+// EncodeEnvelope and DecodeEnvelope handle the 12-byte frame header
+// in terms of raw byte slices; xio uses them to stream frames over
+// io.Reader / io.Writer without pulling I/O concerns into proto.
 //
 // # Scope
 //
