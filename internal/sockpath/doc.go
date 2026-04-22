@@ -10,13 +10,15 @@
 //     - uid subdir on Unix, permission-checked (0700).
 //     - label: -L value, or "default" when unspecified.
 //
-// On Unix the result is a filesystem path like
+// The result is always a filesystem path — AF_UNIX sockets work on
+// both platforms (Windows 10 build 17063+, Windows Server 1809+),
+// so there is no named-pipe path format to special-case. On Unix:
 //
 //	/tmp/dmux-1000/default
 //
-// On Windows the result is a named-pipe name like
+// On Windows:
 //
-//	\\.\pipe\dmux-<user>-<label>
+//	C:\Users\<user>\AppData\Local\dmux\default
 //
 // # Interface
 //

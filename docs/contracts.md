@@ -4,7 +4,7 @@ Decisions that cross package boundaries. Package docs are detail; this doc is "w
 
 ## Wire format
 
-The client/server protocol is a bidirectional stream of length-prefixed binary frames over a single connection — Unix socket on Unix, named pipe on Windows. No file-descriptor passing (not portable to Windows).
+The client/server protocol is a bidirectional stream of length-prefixed binary frames over a single AF_UNIX connection — the same transport on Unix and on Windows 10 build 17063+. No file-descriptor passing (SCM_RIGHTS is not supported by AF_UNIX on Windows).
 
 See `internal/proto/doc.go` for the full byte layout of every message type. The important cross-cutting facts:
 

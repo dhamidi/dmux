@@ -26,7 +26,7 @@ cmd/dmux/                         entry point, flag parsing, dispatch
 
 internal/proto/                   wire message types and codecs
 internal/xio/                     length-prefixed frame reader/writer
-internal/socket/                  Unix socket + Windows named-pipe transport
+internal/socket/                  AF_UNIX transport (portable Unix + Windows)
 internal/sockpath/                resolve socket path from -L/-S/$DMUX
 internal/platform/                daemonize, signals, user context
 

@@ -2,9 +2,11 @@
 // dmux server.
 //
 // The protocol is a bidirectional stream of length-prefixed frames
-// over a single connection (Unix socket on Unix, named pipe on
-// Windows). It replaces tmux's imsg-based protocol, which relies on
-// file descriptor passing and is not portable to Windows.
+// over a single AF_UNIX connection (the same transport on Unix and
+// on Windows 10 build 17063+). It replaces tmux's imsg-based
+// protocol, which relies on SCM_RIGHTS file-descriptor passing —
+// a feature AF_UNIX on Windows does not support, so the wire
+// format carries no fds.
 //
 // # Frame format
 //

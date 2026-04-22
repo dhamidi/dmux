@@ -24,8 +24,8 @@
 // # Server in-process, not as subprocess
 //
 // The scenario runner calls `server.Run(cfg)` in a goroutine. No
-// fork, no exec. The server's socket is a real Unix socket (named
-// pipe on Windows) in a tempdir. Synthetic clients connect to it
+// fork, no exec. The server's socket is a real AF_UNIX socket in a
+// tempdir on both Unix and Windows. Synthetic clients connect to it
 // with real `net.Dial`.
 //
 // Running in-process is what makes the recorder subscription work:
