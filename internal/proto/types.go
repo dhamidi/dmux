@@ -114,6 +114,6 @@ func NewFrame(t MsgType) (Frame, error) {
 	case MsgBeep:
 		return &Beep{}, nil
 	default:
-		return nil, fmt.Errorf("%w: %s", ErrUnknownType, t)
+		return nil, &FrameError{Op: OpNewFrame, Type: t, Err: ErrUnknownType}
 	}
 }

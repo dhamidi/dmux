@@ -1,7 +1,5 @@
 package proto
 
-import "fmt"
-
 // Identify is the first frame every client sends. The server
 // rejects any other frame before it with Exit{ProtocolError}.
 //
@@ -25,9 +23,9 @@ func (*Identify) Type() MsgType { return MsgIdentify }
 
 func (m *Identify) MarshalBinary() ([]byte, error) {
 	if len(m.Features) > 0xFF {
-		return nil, fmt.Errorf("%w: features count %d > 255", ErrPayloadTooLarge, len(m.Features))
+		return nil, frameErr(OpMarshal, MsgIdentify, ErrPayloadTooLarge, "features count %d > 255", len(m.Features))
 	}
-	var w bwriter
+	w := bwriter{op: OpMarshal, typ: MsgIdentify}
 	w.u8(m.ProtocolVersion)
 	w.u8(m.Profile)
 	w.u32(m.InitialCols)
@@ -44,7 +42,7 @@ func (m *Identify) MarshalBinary() ([]byte, error) {
 }
 
 func (m *Identify) UnmarshalBinary(data []byte) error {
-	r := breader{buf: data}
+	r := breader{op: OpUnmarshal, typ: MsgIdentify, buf: data}
 	m.ProtocolVersion = r.u8()
 	m.Profile = r.u8()
 	m.InitialCols = r.u32()

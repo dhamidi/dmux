@@ -1,9 +1,6 @@
 package proto
 
-import (
-	"encoding/binary"
-	"fmt"
-)
+import "encoding/binary"
 
 // EncodeEnvelope writes the 12-byte frame envelope into dst[0:12].
 // payloadLen is the byte count of the payload that will follow; the
@@ -19,10 +16,10 @@ import (
 // other multi-byte integer in this package).
 func EncodeEnvelope(dst []byte, t MsgType, flags uint16, payloadLen uint32) error {
 	if len(dst) < EnvelopeSize {
-		return ErrShortBuffer
+		return &FrameError{Op: OpEncodeEnvelope, Type: t, Err: ErrShortBuffer}
 	}
 	if payloadLen > MaxFrameSize-HeaderSize {
-		return fmt.Errorf("%w: payload %d bytes", ErrPayloadTooLarge, payloadLen)
+		return frameErr(OpEncodeEnvelope, t, ErrPayloadTooLarge, "payload %d bytes", payloadLen)
 	}
 	binary.LittleEndian.PutUint32(dst[0:4], HeaderSize+payloadLen)
 	binary.LittleEndian.PutUint16(dst[4:6], uint16(t))
@@ -38,17 +35,17 @@ func EncodeEnvelope(dst []byte, t MsgType, flags uint16, payloadLen uint32) erro
 // HeaderSize, or ErrPayloadTooLarge if it exceeds MaxFrameSize.
 func DecodeEnvelope(src []byte) (t MsgType, flags uint16, payloadLen uint32, err error) {
 	if len(src) < EnvelopeSize {
-		return 0, 0, 0, ErrShortBuffer
+		return 0, 0, 0, &FrameError{Op: OpDecodeEnvelope, Err: ErrShortBuffer}
 	}
 	length := binary.LittleEndian.Uint32(src[0:4])
 	t = MsgType(binary.LittleEndian.Uint16(src[4:6]))
 	flags = binary.LittleEndian.Uint16(src[6:8])
 	// src[8:12] is the reserved sequence-number slot; unused in M1.
 	if length < HeaderSize {
-		return 0, 0, 0, fmt.Errorf("%w: length %d < header %d", ErrMalformed, length, HeaderSize)
+		return 0, 0, 0, frameErr(OpDecodeEnvelope, t, ErrMalformed, "length %d < header %d", length, HeaderSize)
 	}
 	if length > MaxFrameSize {
-		return 0, 0, 0, fmt.Errorf("%w: length %d > max %d", ErrPayloadTooLarge, length, MaxFrameSize)
+		return 0, 0, 0, frameErr(OpDecodeEnvelope, t, ErrPayloadTooLarge, "length %d > max %d", length, MaxFrameSize)
 	}
 	return t, flags, length - HeaderSize, nil
 }

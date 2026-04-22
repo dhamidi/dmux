@@ -1,7 +1,5 @@
 package proto
 
-import "fmt"
-
 // MaxCommandsPerList caps the number of commands in a single
 // CommandList. Real bootstraps send 1-3; 64 is a defensive ceiling.
 const MaxCommandsPerList = 64
@@ -39,9 +37,9 @@ func (*CommandList) Type() MsgType { return MsgCommandList }
 func (m *CommandList) MarshalBinary() ([]byte, error) {
 	n := len(m.Commands)
 	if n == 0 || n > MaxCommandsPerList {
-		return nil, fmt.Errorf("%w: command count %d (want 1..%d)", ErrMalformed, n, MaxCommandsPerList)
+		return nil, frameErr(OpMarshal, MsgCommandList, ErrMalformed, "command count %d (want 1..%d)", n, MaxCommandsPerList)
 	}
-	var w bwriter
+	w := bwriter{op: OpMarshal, typ: MsgCommandList}
 	w.u32(uint32(n))
 	for _, c := range m.Commands {
 		w.u32(c.ID)
@@ -51,13 +49,13 @@ func (m *CommandList) MarshalBinary() ([]byte, error) {
 }
 
 func (m *CommandList) UnmarshalBinary(data []byte) error {
-	r := breader{buf: data}
+	r := breader{op: OpUnmarshal, typ: MsgCommandList, buf: data}
 	n := r.u32()
 	if r.err != nil {
 		return r.err
 	}
 	if n == 0 || n > MaxCommandsPerList {
-		return fmt.Errorf("%w: command count %d (want 1..%d)", ErrMalformed, n, MaxCommandsPerList)
+		return frameErr(OpUnmarshal, MsgCommandList, ErrMalformed, "command count %d (want 1..%d)", n, MaxCommandsPerList)
 	}
 	m.Commands = make([]Command, n)
 	for i := range m.Commands {

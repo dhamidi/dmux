@@ -131,6 +131,41 @@ func TestNewFrameUnknownType(t *testing.T) {
 	if !errors.Is(err, proto.ErrUnknownType) {
 		t.Fatalf("NewFrame(0xFFFF): got %v, want ErrUnknownType", err)
 	}
+	var fe *proto.FrameError
+	if !errors.As(err, &fe) {
+		t.Fatalf("NewFrame(0xFFFF): errors.As *FrameError failed on %v", err)
+	}
+	if fe.Op != proto.OpNewFrame {
+		t.Errorf("FrameError.Op = %q, want %q", fe.Op, proto.OpNewFrame)
+	}
+	if fe.Type != 0xFFFF {
+		t.Errorf("FrameError.Type = %#x, want 0xFFFF", uint16(fe.Type))
+	}
+}
+
+func TestFrameErrorCarriesContext(t *testing.T) {
+	// Malformed CommandList: force an unmarshal error and make sure
+	// both the sentinel (Is) and the structured context (As) are
+	// reachable.
+	var p []byte
+	p = binary.LittleEndian.AppendUint32(p, 0) // count=0 is invalid
+	err := (&proto.CommandList{}).UnmarshalBinary(p)
+	if !errors.Is(err, proto.ErrMalformed) {
+		t.Fatalf("errors.Is ErrMalformed: err=%v", err)
+	}
+	var fe *proto.FrameError
+	if !errors.As(err, &fe) {
+		t.Fatalf("errors.As *FrameError: err=%v", err)
+	}
+	if fe.Op != proto.OpUnmarshal {
+		t.Errorf("FrameError.Op = %q, want %q", fe.Op, proto.OpUnmarshal)
+	}
+	if fe.Type != proto.MsgCommandList {
+		t.Errorf("FrameError.Type = %v, want %v", fe.Type, proto.MsgCommandList)
+	}
+	if fe.Detail == "" {
+		t.Errorf("FrameError.Detail is empty; want a useful description")
+	}
 }
 
 func TestIsServerToClient(t *testing.T) {

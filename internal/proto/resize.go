@@ -10,14 +10,14 @@ type Resize struct {
 func (*Resize) Type() MsgType { return MsgResize }
 
 func (m *Resize) MarshalBinary() ([]byte, error) {
-	var w bwriter
+	w := bwriter{op: OpMarshal, typ: MsgResize}
 	w.u32(m.Cols)
 	w.u32(m.Rows)
 	return w.bytes(), w.err
 }
 
 func (m *Resize) UnmarshalBinary(data []byte) error {
-	r := breader{buf: data}
+	r := breader{op: OpUnmarshal, typ: MsgResize, buf: data}
 	m.Cols = r.u32()
 	m.Rows = r.u32()
 	return r.finish()

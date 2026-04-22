@@ -47,7 +47,7 @@ type CommandResult struct {
 func (*CommandResult) Type() MsgType { return MsgCommandResult }
 
 func (m *CommandResult) MarshalBinary() ([]byte, error) {
-	var w bwriter
+	w := bwriter{op: OpMarshal, typ: MsgCommandResult}
 	w.u32(m.ID)
 	w.u8(uint8(m.Status))
 	w.string(m.Message)
@@ -55,7 +55,7 @@ func (m *CommandResult) MarshalBinary() ([]byte, error) {
 }
 
 func (m *CommandResult) UnmarshalBinary(data []byte) error {
-	r := breader{buf: data}
+	r := breader{op: OpUnmarshal, typ: MsgCommandResult, buf: data}
 	m.ID = r.u32()
 	raw := r.u8()
 	m.Status = CommandStatus(raw)
@@ -67,6 +67,6 @@ func (m *CommandResult) UnmarshalBinary(data []byte) error {
 	case StatusOk, StatusError, StatusSkipped:
 		return nil
 	default:
-		return fmt.Errorf("%w: command status %d", ErrMalformed, raw)
+		return frameErr(OpUnmarshal, MsgCommandResult, ErrMalformed, "command status %d", raw)
 	}
 }

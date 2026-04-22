@@ -45,14 +45,14 @@ type Exit struct {
 func (*Exit) Type() MsgType { return MsgExit }
 
 func (m *Exit) MarshalBinary() ([]byte, error) {
-	var w bwriter
+	w := bwriter{op: OpMarshal, typ: MsgExit}
 	w.u8(uint8(m.Reason))
 	w.string(m.Message)
 	return w.bytes(), w.err
 }
 
 func (m *Exit) UnmarshalBinary(data []byte) error {
-	r := breader{buf: data}
+	r := breader{op: OpUnmarshal, typ: MsgExit, buf: data}
 	raw := r.u8()
 	m.Reason = ExitReason(raw)
 	m.Message = r.string()
@@ -64,6 +64,6 @@ func (m *Exit) UnmarshalBinary(data []byte) error {
 		ExitProtocolError, ExitLost, ExitExitedShell:
 		return nil
 	default:
-		return fmt.Errorf("%w: exit reason %d", ErrMalformed, raw)
+		return frameErr(OpUnmarshal, MsgExit, ErrMalformed, "exit reason %d", raw)
 	}
 }

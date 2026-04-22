@@ -11,13 +11,13 @@ type CapsUpdate struct {
 func (*CapsUpdate) Type() MsgType { return MsgCapsUpdate }
 
 func (m *CapsUpdate) MarshalBinary() ([]byte, error) {
-	var w bwriter
+	w := bwriter{op: OpMarshal, typ: MsgCapsUpdate}
 	w.u8(m.Profile)
 	return w.bytes(), w.err
 }
 
 func (m *CapsUpdate) UnmarshalBinary(data []byte) error {
-	r := breader{buf: data}
+	r := breader{op: OpUnmarshal, typ: MsgCapsUpdate, buf: data}
 	m.Profile = r.u8()
 	return r.finish()
 }
