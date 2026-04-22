@@ -166,8 +166,9 @@ func TestDataForwarding(t *testing.T) {
 	if code != 42 {
 		t.Errorf("Run() = %d, want 42", code)
 	}
-	if got := out.String(); got != serverOutput {
-		t.Errorf("output = %q, want %q", got, serverOutput)
+	wantOutput := "\x1b[?1049h" + serverOutput + "\x1b[?1049l"
+	if got := out.String(); got != wantOutput {
+		t.Errorf("output = %q, want %q", got, wantOutput)
 	}
 	if err := <-errc; err != nil {
 		t.Error(err)

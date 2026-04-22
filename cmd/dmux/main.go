@@ -28,6 +28,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -90,6 +91,18 @@ func runServer(path string) {
 		fmt.Fprintf(os.Stderr, "dmux: mkdir: %v\n", err)
 		os.Exit(1)
 	}
+	// Remove stale socket if no server is listening on it.
+	if _, err := os.Stat(path); err == nil {
+		conn, dialErr := net.Dial("unix", path)
+		if dialErr != nil {
+			// Nobody is listening — remove the stale socket file.
+			os.Remove(path)
+		} else {
+			conn.Close()
+			fmt.Fprintf(os.Stderr, "dmux: server already running on %s\n", path)
+			os.Exit(1)
+		}
+	}
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dmux: listen: %v\n", err)
@@ -99,9 +112,17 @@ func runServer(path string) {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 
+	logWriter := io.Writer(os.Stderr)
+	if logPath := os.Getenv("DMUX_LOG"); logPath != "" {
+		if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
+			logWriter = io.MultiWriter(os.Stderr, f)
+			defer f.Close()
+		}
+	}
+
 	cfg := server.Config{
 		Listener:   ln,
-		Log:        os.Stderr,
+		Log:        logWriter,
 		Signals:    sigs,
 		ConfigFile: configPath(),
 	}

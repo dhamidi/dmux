@@ -488,6 +488,78 @@ func TestMsgStdinKeyBinding(t *testing.T) {
 	}
 }
 
+// TestPrefixKeyNewWindow verifies that the default Ctrl+b, c prefix sequence
+// creates a new window via the switch-key-table → prefix → new-window flow.
+func TestPrefixKeyNewWindow(t *testing.T) {
+	pl := newPipeListener()
+	sigs := make(chan os.Signal, 1)
+
+	dirtyIDs := make(chan session.ClientID, 8)
+
+	done := startServer(server.Config{
+		Listener: pl,
+		Log:      io.Discard,
+		Signals:  sigs,
+		Now:      fixedClock(time.Time{}),
+		OnDirty: func(id session.ClientID) {
+			select {
+			case dirtyIDs <- id:
+			default:
+			}
+		},
+	})
+
+	clientConn := pl.dial()
+	defer clientConn.Close()
+
+	sendHandshake(t, clientConn)
+	time.Sleep(20 * time.Millisecond)
+
+	// Send Ctrl+b (0x02) to switch to the prefix table.
+	stdinMsg := proto.StdinMsg{Data: []byte{0x02}}
+	if err := proto.WriteMsg(clientConn, proto.MsgStdin, stdinMsg.Encode()); err != nil {
+		t.Fatalf("write Ctrl+b: %v", err)
+	}
+	select {
+	case <-dirtyIDs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnDirty not called after Ctrl+b")
+	}
+
+	// Send 'c' to trigger new-window in the prefix table.
+	stdinMsg = proto.StdinMsg{Data: []byte("c")}
+	if err := proto.WriteMsg(clientConn, proto.MsgStdin, stdinMsg.Encode()); err != nil {
+		t.Fatalf("write c: %v", err)
+	}
+	select {
+	case <-dirtyIDs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnDirty not called after c")
+	}
+
+	// Verify the new window was created by listing windows.
+	listCmd := proto.CommandMsg{Argv: []string{"list-windows"}}
+	if err := proto.WriteMsg(clientConn, proto.MsgCommand, listCmd.Encode()); err != nil {
+		t.Fatalf("write list-windows: %v", err)
+	}
+	if err := clientConn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	// The auto-created window is index 0; new-window creates index 1.
+	readStdoutUntilContains(t, clientConn, "1:")
+	clientConn.SetDeadline(time.Time{}) //nolint:errcheck
+
+	sigs <- fakeSignal("SIGTERM")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return within timeout after SIGTERM")
+	}
+}
+
 // TestConfigFileAutoLoad verifies that when ConfigFile is set, the server
 // sources the file at startup and executes the commands in it.
 func TestConfigFileAutoLoad(t *testing.T) {

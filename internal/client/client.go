@@ -116,6 +116,13 @@ func Run(cfg Config) int {
 		defer restore()
 	}
 
+	// Switch to the alternate screen buffer so that the user's scrollback
+	// is preserved when dmux exits.
+	if cfg.Out != nil {
+		fmt.Fprint(cfg.Out, "\x1b[?1049h")
+		defer fmt.Fprint(cfg.Out, "\x1b[?1049l")
+	}
+
 	// Pump stdin → server in a background goroutine.
 	if !cfg.ReadOnly && cfg.In != nil {
 		go pumpStdin(conn, cfg.In)

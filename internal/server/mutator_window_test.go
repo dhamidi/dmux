@@ -120,9 +120,9 @@ func TestKillWindow(t *testing.T) {
 		t.Fatalf("KillWindow: %v", err)
 	}
 
-	sess := m.state.Sessions[session.SessionID(sv.ID)]
-	if got := len(sess.Windows); got != 0 {
-		t.Errorf("sess.Windows length after kill = %d, want 0", got)
+	// Killing the last window should destroy the session (tmux behaviour).
+	if _, ok := m.state.Sessions[session.SessionID(sv.ID)]; ok {
+		t.Error("session still exists after killing its last window")
 	}
 
 	if len(*created) == 0 {
@@ -295,15 +295,15 @@ func TestKillPaneKillsWindowWhenEmpty(t *testing.T) {
 		t.Fatalf("NewWindow: %v", err)
 	}
 
-	// Window has only one pane; killing it should remove the window too.
+	// Window has only one pane; killing it should remove the window and session.
 	paneID := wv.Active
 	if err := m.KillPane(paneID); err != nil {
 		t.Fatalf("KillPane: %v", err)
 	}
 
-	sess := m.state.Sessions[session.SessionID(sv.ID)]
-	if got := len(sess.Windows); got != 0 {
-		t.Errorf("sess.Windows length = %d, want 0 after killing last pane", got)
+	// Killing the last pane → last window → session should all be gone.
+	if _, ok := m.state.Sessions[session.SessionID(sv.ID)]; ok {
+		t.Error("session still exists after killing its last pane")
 	}
 	if len(*created) == 0 {
 		t.Fatal("no panes were created")

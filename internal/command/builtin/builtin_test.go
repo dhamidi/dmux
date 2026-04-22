@@ -731,6 +731,10 @@ func (b *testBackend) ClearPane(paneID int) error {
 	return nil
 }
 
+func (b *testBackend) SwitchKeyTable(clientID, tableName string) error {
+	return nil
+}
+
 func (b *testBackend) LinkWindow(srcSessionID, srcWindowID, dstSessionID string, index int, afterIndex, beforeIndex, selectWin, killExisting bool) error {
 	b.linkedWindows = append(b.linkedWindows, struct {
 		srcSessionID, srcWindowID, dstSessionID string

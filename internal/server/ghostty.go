@@ -2,6 +2,7 @@ package server
 
 import (
 	"io"
+	"sync"
 
 	libghostty "github.com/mitchellh/go-libghostty"
 
@@ -11,7 +12,10 @@ import (
 )
 
 // ghosttyTerminal adapts *libghostty.Terminal to the pane.Terminal interface.
+// All methods that touch the underlying C terminal are serialized via mu
+// because libghostty is not safe for concurrent access.
 type ghosttyTerminal struct {
+	mu        sync.Mutex
 	term      *libghostty.Terminal
 	rows      int
 	cols      int
@@ -45,11 +49,15 @@ func (g *ghosttyTerminal) SetPTYWriter(w io.Writer) {
 // Write implements pane.Terminal by feeding raw PTY output into the
 // terminal parser.
 func (g *ghosttyTerminal) Write(p []byte) (int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	return g.term.Write(p)
 }
 
 // Resize implements pane.Terminal.
 func (g *ghosttyTerminal) Resize(cols, rows int) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	err := g.term.Resize(uint16(cols), uint16(rows), 0, 0)
 	if err != nil {
 		return err
@@ -61,12 +69,16 @@ func (g *ghosttyTerminal) Resize(cols, rows int) error {
 
 // Title implements pane.Terminal.
 func (g *ghosttyTerminal) Title() (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	return g.term.Title()
 }
 
 // Snapshot implements pane.Terminal. It returns an immutable snapshot of
 // the current visible viewport by iterating the active grid via GridRef.
 func (g *ghosttyTerminal) Snapshot() pane.CellGrid {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	rows := g.rows
 	cols := g.cols
 	cells := make([]pane.Cell, rows*cols)
@@ -112,6 +124,8 @@ func (g *ghosttyTerminal) Snapshot() pane.CellGrid {
 
 // Close implements pane.Terminal.
 func (g *ghosttyTerminal) Close() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.term.Close()
 }
 

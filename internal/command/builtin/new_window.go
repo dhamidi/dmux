@@ -26,9 +26,15 @@ func runNewWindow(ctx *command.Ctx) command.Result {
 		return command.Errorf("new-window: no mutator available")
 	}
 	name := ctx.Args.Option("n")
-	_, err := ctx.Mutator.NewWindow(ctx.Target.Session.ID, name)
+	wv, err := ctx.Mutator.NewWindow(ctx.Target.Session.ID, name)
 	if err != nil {
 		return command.Errorf("new-window: %v", err)
+	}
+	// Select the new window unless -d (detached) was given.
+	if !ctx.Args.Flag("d") {
+		if err := ctx.Mutator.SelectWindow(ctx.Target.Session.ID, wv.ID); err != nil {
+			return command.Errorf("new-window: select: %v", err)
+		}
 	}
 	return command.OK()
 }

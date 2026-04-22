@@ -213,6 +213,15 @@ func (m *serverMutator) SwitchClient(clientID, sessionID string) error {
 	return nil
 }
 
+func (m *serverMutator) SwitchKeyTable(clientID, tableName string) error {
+	client, ok := m.state.Clients[session.ClientID(clientID)]
+	if !ok {
+		return fmt.Errorf("switch-key-table: client %q not found", clientID)
+	}
+	client.KeyTable = tableName
+	return nil
+}
+
 func (m *serverMutator) NewWindow(sessionID, name string) (command.WindowView, error) {
 	sess, ok := m.state.Sessions[session.SessionID(sessionID)]
 	if !ok {
@@ -276,6 +285,11 @@ func (m *serverMutator) KillWindow(sessionID, windowID string) error {
 			sess.RemoveWindow(i)
 			m.notifyAll(control.WindowCloseEvent{WindowID: windowID})
 			m.RunHook("after-kill-window")
+			// When the last window is gone, destroy the session so
+			// attached clients detach (mirrors tmux behaviour).
+			if len(sess.Windows) == 0 {
+				return m.KillSession(sessionID)
+			}
 			return nil
 		}
 	}
@@ -485,9 +499,7 @@ func (m *serverMutator) RespawnPane(paneID int, shell string, kill bool, keepHis
 	// Check whether the pane's process is still alive.
 	pid := p.ShellPID()
 	if pid > 0 {
-		proc, findErr := os.FindProcess(pid)
-		alive := findErr == nil && proc.Signal(syscall.Signal(0)) == nil
-		if alive && !kill {
+		if processAlive(pid) && !kill {
 			return fmt.Errorf("pane still active")
 		}
 	}
@@ -1386,12 +1398,8 @@ func (m *serverMutator) RespawnWindow(sessionID, windowID, shell, dir string, ki
 	if !kill {
 		for _, p := range win.Panes {
 			pid := p.ShellPID()
-			if pid > 0 {
-				proc, findErr := os.FindProcess(pid)
-				alive := findErr == nil && proc.Signal(syscall.Signal(0)) == nil
-				if alive {
-					return fmt.Errorf("pane still active")
-				}
+			if pid > 0 && processAlive(pid) {
+				return fmt.Errorf("pane still active")
 			}
 		}
 	}
@@ -2641,4 +2649,16 @@ func (m *serverMutator) SetServerAccess(username string, allow, write bool) erro
 func (m *serverMutator) DenyAllClients() error {
 	m.state.ACLDenyAll = true
 	return nil
+}
+
+// processAlive reports whether the process with the given PID is still
+// running. It uses kill(pid, 0) and treats EPERM (permission denied) as
+// alive — the process exists but we lack permission to signal it.
+func processAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = proc.Signal(syscall.Signal(0))
+	return err == nil || err == syscall.EPERM
 }

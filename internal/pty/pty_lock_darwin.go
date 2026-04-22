@@ -10,12 +10,25 @@ import (
 )
 
 // grantpt ensures the slave PTY device is owned by the calling user.
-// On macOS the kernel grants ownership when /dev/ptmx is opened.
-func grantpt(_ int) error { return nil }
+// On macOS this issues the TIOCPTYGRANT ioctl which sets ownership and
+// permissions on the slave device.
+func grantpt(fd int) error {
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(unix.TIOCPTYGRANT), 0)
+	if errno != 0 {
+		return fmt.Errorf("ioctl TIOCPTYGRANT: %w", errno)
+	}
+	return nil
+}
 
-// unlockpt removes the internal lock on the slave PTY.
-// On macOS the slave is unlocked automatically when /dev/ptmx is opened.
-func unlockpt(_ int) error { return nil }
+// unlockpt removes the internal lock on the slave PTY so it can be opened.
+// On macOS this issues the TIOCPTYUNLK ioctl.
+func unlockpt(fd int) error {
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(unix.TIOCPTYUNLK), 0)
+	if errno != 0 {
+		return fmt.Errorf("ioctl TIOCPTYUNLK: %w", errno)
+	}
+	return nil
+}
 
 // ptsname returns the filesystem path of the slave PTY device.
 // It uses TIOCPTYGNAME to retrieve the null-terminated name from the kernel.

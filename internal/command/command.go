@@ -372,6 +372,9 @@ type Mutator interface {
 	// ClearPane erases the visible content of a pane by injecting the ANSI
 	// clear-screen sequence into its pseudo-terminal.
 	ClearPane(paneID int) error
+
+	// SwitchKeyTable changes the active key table for the given client.
+	SwitchKeyTable(clientID, tableName string) error
 }
 
 // ─── Argument types ───────────────────────────────────────────────────────────

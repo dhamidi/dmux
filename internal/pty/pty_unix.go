@@ -15,6 +15,7 @@ import (
 type posixPTY struct {
 	master *os.File
 	cmd    *exec.Cmd
+	exited chan struct{} // closed when the child process exits
 }
 
 // open opens a new pseudo-terminal, starts cmd with args inside it,
@@ -42,19 +43,24 @@ func open(cmd string, args []string, size Size) (PTY, error) {
 		return nil, fmt.Errorf("pty: ptsname: %w", err)
 	}
 
-	// Set the initial terminal size before the child starts so that the child
-	// reads the correct dimensions via TIOCGWINSZ on startup.
-	ws := unix.Winsize{Row: uint16(size.Rows), Col: uint16(size.Cols)}
-	if err := unix.IoctlSetWinsize(masterFD, unix.TIOCSWINSZ, &ws); err != nil {
-		master.Close()
-		return nil, fmt.Errorf("pty: set initial winsize: %w", err)
-	}
-
 	// Open the slave side; the child process will use this as its controlling tty.
 	slave, err := os.OpenFile(slaveName, os.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {
 		master.Close()
 		return nil, fmt.Errorf("pty: open slave %s: %w", slaveName, err)
+	}
+
+	// Set the initial terminal size so that the child reads the correct
+	// dimensions via TIOCGWINSZ on startup.  Try the slave fd first (required
+	// on macOS where TIOCSWINSZ on the master returns ENOTTY), then fall back
+	// to the master.
+	ws := unix.Winsize{Row: uint16(size.Rows), Col: uint16(size.Cols)}
+	if err := unix.IoctlSetWinsize(int(slave.Fd()), unix.TIOCSWINSZ, &ws); err != nil {
+		if err2 := unix.IoctlSetWinsize(masterFD, unix.TIOCSWINSZ, &ws); err2 != nil {
+			slave.Close()
+			master.Close()
+			return nil, fmt.Errorf("pty: set initial winsize: %w", err2)
+		}
 	}
 
 	c := exec.Command(cmd, args...)
@@ -73,7 +79,12 @@ func open(cmd string, args []string, size Size) (PTY, error) {
 	}
 	slave.Close() // parent does not need the slave side
 
-	return &posixPTY{master: master, cmd: c}, nil
+	p := &posixPTY{master: master, cmd: c, exited: make(chan struct{})}
+	go func() {
+		_ = c.Wait()
+		close(p.exited)
+	}()
+	return p, nil
 }
 
 // Read reads output produced by the child process.
@@ -94,14 +105,24 @@ func (p *posixPTY) Pid() int {
 	if p.cmd.Process == nil {
 		return 0
 	}
-	return p.cmd.Process.Pid
+	select {
+	case <-p.exited:
+		return 0
+	default:
+		return p.cmd.Process.Pid
+	}
 }
 
 // Close kills the child process and releases the master PTY file descriptor.
 func (p *posixPTY) Close() error {
 	if p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
-		_ = p.cmd.Wait()
+		select {
+		case <-p.exited:
+			// Already exited; nothing to kill.
+		default:
+			_ = p.cmd.Process.Kill()
+			<-p.exited // wait for the goroutine to finish
+		}
 	}
 	return p.master.Close()
 }

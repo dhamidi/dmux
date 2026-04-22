@@ -128,6 +128,7 @@ type clientConn struct {
 	dirty       chan struct{}     // buffered(1); written to when a redraw is needed
 	dragBorder  *layout.BorderID // non-nil while a border drag is in progress
 	controlMode bool             // set when attach-session -C or new-session -C runs
+	wasAttached bool             // true once the client has been attached to a session
 
 	// overlays is a stack of client-scoped overlays (menus, popups, prompts).
 	// The last element is on top and receives key events first.
@@ -193,6 +194,7 @@ func Run(cfg Config) error {
 				_, err := os.Stat(p)
 				return err == nil
 			})
+			s.log.Printf("new-pane: shell=%s pty=80x24", shellPath)
 			ptySize := pty.Size{Rows: 24, Cols: 80}
 			ptyDev, err := pty.Open(shellPath, nil, ptySize)
 			if err != nil {
@@ -204,6 +206,7 @@ func Run(cfg Config) error {
 				ptyDev.Close()
 				return nil, fmt.Errorf("new-pane: create terminal: %w", err)
 			}
+			s.log.Printf("new-pane: ghostty terminal created %dx%d", ptySize.Cols, ptySize.Rows)
 			term.SetPTYWriter(ptyDev)
 			keyEnc, err := newGhosttyKeyEncoder()
 			if err != nil {
@@ -487,7 +490,7 @@ func (s *srv) serveConn(nc net.Conn) {
 	s.decoders[client.ID] = newClientDecoder()
 	s.mu.Unlock()
 
-	s.log.Printf("client %s attached (tty=%s term=%s)", client.ID, client.TTY, client.Term)
+	s.log.Printf("client %s attached (tty=%s term=%s size=%dx%d)", client.ID, client.TTY, client.Term, client.Size.Cols, client.Size.Rows)
 
 	// If an OverlayPusher is configured (e.g. in tests), push the returned
 	// overlay onto the client's stack immediately after registration.
@@ -504,11 +507,15 @@ func (s *srv) serveConn(nc net.Conn) {
 	s.mu.Unlock()
 
 	if noSessions {
+		s.log.Printf("client %s: auto-creating initial session+window", client.ID)
 		view, err := s.mutator.NewSession("") // name defaults to "0"
 		if err == nil {
 			_ = s.mutator.AttachClient(string(cc.id), view.ID)
-			_, _ = s.mutator.NewWindow(view.ID, "") // create initial window so Session.Current != nil
+			wv, werr := s.mutator.NewWindow(view.ID, "") // create initial window so Session.Current != nil
+			s.log.Printf("client %s: new-window result: id=%s err=%v", client.ID, wv.ID, werr)
 			s.markDirty(cc)
+		} else {
+			s.log.Printf("client %s: new-session error: %v", client.ID, err)
 		}
 	}
 
@@ -629,6 +636,7 @@ func (s *srv) clientLoop(cc *clientConn) {
 	for {
 		msgType, payload, err := proto.ReadMsg(cc.netConn)
 		if err != nil {
+			s.log.Printf("client %s: read error: %v", cc.id, err)
 			return
 		}
 		switch msgType {
@@ -638,9 +646,20 @@ func (s *srv) clientLoop(cc *clientConn) {
 		case proto.MsgResize:
 			var m proto.ResizeMsg
 			if err := m.Decode(payload); err == nil {
+				cols, rows := int(m.Width), int(m.Height)
+				s.log.Printf("client %s: resize %dx%d", cc.id, cols, rows)
 				s.mu.Lock()
-				cc.client.Size = session.Size{Cols: int(m.Width), Rows: int(m.Height)}
-				s.mu.Unlock()
+				cc.client.Size = session.Size{Cols: cols, Rows: rows}
+				// Resize the active window's layout and panes to match.
+				if cc.client.Session != nil && cc.client.Session.Current != nil {
+					win := cc.client.Session.Current.Window
+					sessID := string(cc.client.Session.ID)
+					winID := string(win.ID)
+					s.mu.Unlock()
+					_ = s.mutator.ResizeWindow(sessID, winID, cols, rows)
+				} else {
+					s.mu.Unlock()
+				}
 				s.markDirty(cc)
 			}
 
@@ -789,6 +808,7 @@ func (s *srv) clientLoop(cc *clientConn) {
 						}
 					}
 				}
+				s.log.Printf("key: %s table=%s bound=%v cmd=%q", k.String(), tableName, isBound, boundCmd)
 				var activePane session.Pane
 				var syncPanes []session.Pane
 				if !isBound && cc.client.Session != nil && cc.client.Session.Current != nil {
@@ -813,8 +833,25 @@ func (s *srv) clientLoop(cc *clientConn) {
 				if isBound {
 					argv := strings.Fields(boundCmd)
 					if len(argv) > 0 {
-						command.Dispatch(argv[0], argv[1:], s.store, clientView, s.queue, s.mutator)
+						result := command.Dispatch(argv[0], argv[1:], s.store, clientView, s.queue, s.mutator)
+						if result.Err != nil {
+							s.log.Printf("dispatch %q: %v", boundCmd, result.Err)
+						}
 					}
+					// After dispatching a command from a non-root table
+					// (e.g. "prefix"), reset back to "root" — unless the
+					// command itself switched the table (like switch-key-table).
+					s.mu.Lock()
+					if tableName != "root" && cc.client.KeyTable == tableName {
+						cc.client.KeyTable = "root"
+					}
+					s.mu.Unlock()
+				} else if tableName != "root" {
+					// Unbound key in a non-root table: reset to root,
+					// do not forward the key to the pane.
+					s.mu.Lock()
+					cc.client.KeyTable = "root"
+					s.mu.Unlock()
 				} else if activePane != nil {
 					_ = activePane.Write(rawBytes)
 					for _, p := range syncPanes {
@@ -853,12 +890,29 @@ func (s *srv) markAllDirty() {
 	}
 }
 
+// refreshAllDirty is like markAllDirty but only pokes the dirty channel
+// without calling cfg.OnDirty. This is used by the render tick so that
+// periodic redraws don't flood test hooks with spurious dirty events.
+func (s *srv) refreshAllDirty() {
+	for _, cc := range s.conns {
+		select {
+		case cc.dirty <- struct{}{}:
+		default:
+		}
+	}
+}
+
 // tickLoop fires once per second to perform periodic tasks such as
 // automatic window renaming. It exits when s.done is closed.
 func (s *srv) tickLoop() {
 	defer s.wg.Done()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	// renderTick drives output-based redrawing. Every tick, all clients
+	// are marked dirty so the render loop picks up any new PTY output
+	// that arrived since the last frame.
+	renderTick := time.NewTicker(16 * time.Millisecond) // ~60 fps
+	defer renderTick.Stop()
 	for {
 		select {
 		case <-s.done:
@@ -867,6 +921,10 @@ func (s *srv) tickLoop() {
 			s.mu.Lock()
 			s.autoRenameWindows()
 			s.monitorWindows()
+			s.mu.Unlock()
+		case <-renderTick.C:
+			s.mu.Lock()
+			s.refreshAllDirty()
 			s.mu.Unlock()
 		}
 	}
@@ -981,8 +1039,16 @@ func (s *srv) startPaneWatcher(paneID int) {
 				wasAlive = true
 			} else if wasAlive && !remainOnExit {
 				// Process was alive before and is now dead.
+				s.log.Printf("pane %d: shell exited, killing pane", paneID)
 				s.mutator.RunHook("pane-died")
 				_ = s.mutator.KillPane(paneID)
+				// Signal all clients to re-render so that clients whose
+				// session was destroyed receive an EXIT via renderLoop.
+				s.mu.Lock()
+				for _, cc := range s.conns {
+					s.markDirty(cc)
+				}
+				s.mu.Unlock()
 				return
 			}
 		}
@@ -1077,15 +1143,33 @@ func (c *gridCanvas) Set(col, row int, cell modes.Cell) {
 // when cc.dirty is closed (on client disconnect).
 func (s *srv) renderLoop(cc *clientConn) {
 	defer s.wg.Done()
+	renderCount := 0
 	for range cc.dirty {
+		renderCount++
 		s.mu.Lock()
 		client := cc.client
-		if client.Session == nil || client.Session.Current == nil {
+		if client.Session == nil {
+			if cc.wasAttached {
+				// Session was destroyed (e.g. last window closed).
+				s.log.Printf("render[%s] #%d: session gone, sending EXIT", cc.id, renderCount)
+				s.mu.Unlock()
+				em := proto.ExitMsg{Code: 0}
+				_ = proto.WriteMsg(cc.netConn, proto.MsgExit, em.Encode())
+				return
+			}
+			s.log.Printf("render[%s] #%d: skipped (not yet attached)", cc.id, renderCount)
+			s.mu.Unlock()
+			continue
+		}
+		cc.wasAttached = true
+		if client.Session.Current == nil {
+			s.log.Printf("render[%s] #%d: skipped (current=false)", cc.id, renderCount)
 			s.mu.Unlock()
 			continue
 		}
 		win := client.Session.Current.Window
 		if win.Layout == nil || len(win.Panes) == 0 {
+			s.log.Printf("render[%s] #%d: skipped (layout=%v panes=%d)", cc.id, renderCount, win.Layout != nil, len(win.Panes))
 			s.mu.Unlock()
 			continue
 		}
@@ -1104,10 +1188,12 @@ func (s *srv) renderLoop(cc *clientConn) {
 		borderStatus, _ := win.Options.GetString("pane-border-status")
 		borderFormat, _ := win.Options.GetString("pane-border-format")
 		vpOffset := cc.viewportOffset
+		s.log.Printf("render[%s] #%d: composing frame %dx%d, %d pane(s), clientSize=%dx%d", cc.id, renderCount, cols, rows, len(win.Panes), client.Size.Cols, client.Size.Rows)
 		placements := make([]render.PanePlacement, 0, len(win.Panes))
 		for id, p := range win.Panes {
 			rect := win.Layout.Rect(id)
 			if rect.Width == 0 || rect.Height == 0 {
+				s.log.Printf("render[%s] #%d: pane %d skipped (rect %dx%d)", cc.id, renderCount, id, rect.Width, rect.Height)
 				continue
 			}
 			// Apply viewport scroll: shift pane position by the client's
@@ -1186,11 +1272,23 @@ func (s *srv) renderLoop(cc *clientConn) {
 		// On the first render, or when the terminal was resized, fall back to a
 		// full repaint. Otherwise emit only the cells that changed.
 		var ansiBytes []byte
+		diffMode := "full"
 		if hasPrev && prevGrid.Rows == grid.Rows && prevGrid.Cols == grid.Cols {
 			ansiBytes = render.EncodeDiffANSI(prevGrid, grid)
+			diffMode = "diff"
 		} else {
 			ansiBytes = render.EncodeANSI(grid)
 		}
+
+		// Count non-space cells in the grid to detect blank frames.
+		nonEmpty := 0
+		for _, c := range grid.Cells {
+			if c.Char != 0 && c.Char != ' ' {
+				nonEmpty++
+			}
+		}
+		s.log.Printf("render[%s] #%d: %s %dx%d grid, %d non-empty cells, %d ANSI bytes, %d placements",
+			cc.id, renderCount, diffMode, grid.Cols, grid.Rows, nonEmpty, len(ansiBytes), len(placements))
 
 		msg := proto.StdoutMsg{Data: ansiBytes}
 		_ = proto.WriteMsg(cc.netConn, proto.MsgStdout, msg.Encode())
