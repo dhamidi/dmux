@@ -180,6 +180,10 @@ const readBufSize = 4096
 // Cursor, Resize, and Close. A single mutex is the simplest way to
 // keep vt.Terminal's single-goroutine rule honest across those
 // callers without a dedicated control-channel goroutine.
+//
+// Multiple consumers watch a pane via Subscribe: each Subscription
+// carries a coalescing dirty-signal channel that fires whenever new
+// bytes have been fed to the vt. subMu guards the subscriber set.
 type Pane struct {
 	pty *pty.PTY
 
@@ -197,6 +201,33 @@ type Pane struct {
 
 	vtMu sync.Mutex
 	vt   *vt.Terminal // nil when Config.VT was nil
+
+	subMu   sync.Mutex
+	subs    map[*subscriber]struct{}
+	subsDone bool // readLoop exited; new subscribers get a closed channel
+}
+
+// subscriber is one dirty-signal slot. ch is buffered cap=1 and
+// non-blocking sends coalesce: a pending signal means the consumer
+// has not yet observed the previous feed, so skipping a send is
+// correct.
+type subscriber struct {
+	ch chan struct{}
+}
+
+// Subscription wakes a consumer whenever the pane becomes dirty.
+// Dirty = new bytes have been Fed to the vt.Terminal since the
+// subscriber last saw the signal. Consumers re-read via Format /
+// Cursor / Placements — the signal is coalescing (multiple feeds
+// between wakes fold into a single signal).
+//
+// The returned channel fires once immediately so a new subscriber
+// can do an initial render without waiting for the next feed. When
+// the pane's readLoop exits (child gone / Close), every outstanding
+// subscription's channel is closed, letting for-range loops unblock.
+type Subscription struct {
+	Ch    <-chan struct{}
+	Close func() // idempotent; removes this subscriber
 }
 
 // Open spawns the child under a fresh pty and starts the helper
@@ -223,6 +254,7 @@ func Open(ctx context.Context, cfg Config) (*Pane, error) {
 		cancel:   cancel,
 		bytesCh:  make(chan []byte, bytesChanBuffer),
 		exitedCh: make(chan pty.ExitStatus, 1),
+		subs:     make(map[*subscriber]struct{}),
 	}
 
 	if cfg.VT != nil {
@@ -285,8 +317,86 @@ func (p *Pane) Resize(cols, rows int) error {
 // the pty reader goroutine exits (child closed its end or Close
 // ran). Consumers must receive promptly; the channel is buffered
 // but will backpressure under sustained heavy output.
+//
+// The dirty-signal path on Subscribe is the preferred consumer API;
+// Bytes() remains for tests and future raw-byte tap use cases.
 func (p *Pane) Bytes() <-chan []byte {
 	return p.bytesCh
+}
+
+// Subscribe adds a dirty-signal subscriber. Safe to call
+// concurrently with Feed and Close. The returned channel is fired
+// once before return so the caller can render immediately.
+//
+// Close on the Subscription is idempotent — calling it twice, or
+// calling it after readLoop has already closed the channel, is a
+// no-op.
+func (p *Pane) Subscribe() Subscription {
+	s := &subscriber{ch: make(chan struct{}, 1)}
+
+	p.subMu.Lock()
+	if p.subsDone {
+		// readLoop has already exited. Hand back a closed channel so
+		// consumers observe "no more signals, we're done" immediately.
+		p.subMu.Unlock()
+		close(s.ch)
+		return Subscription{
+			Ch:    s.ch,
+			Close: func() {},
+		}
+	}
+	p.subs[s] = struct{}{}
+	p.subMu.Unlock()
+
+	// Prime the channel so the new subscriber renders once without
+	// needing to wait for the next feed. Non-blocking send: slot is
+	// empty by construction.
+	select {
+	case s.ch <- struct{}{}:
+	default:
+	}
+
+	var closeOnce sync.Once
+	return Subscription{
+		Ch: s.ch,
+		Close: func() {
+			closeOnce.Do(func() {
+				p.subMu.Lock()
+				if _, ok := p.subs[s]; ok {
+					delete(p.subs, s)
+					close(s.ch)
+				}
+				p.subMu.Unlock()
+			})
+		},
+	}
+}
+
+// signalDirty fans a wake-up signal out to every subscriber. Called
+// by readLoop after each successful Feed. Non-blocking sends coalesce:
+// a subscriber with an unread signal keeps the one it already has.
+func (p *Pane) signalDirty() {
+	p.subMu.Lock()
+	for s := range p.subs {
+		select {
+		case s.ch <- struct{}{}:
+		default:
+		}
+	}
+	p.subMu.Unlock()
+}
+
+// closeSubscribers marks subscriptions done and closes every
+// subscriber's channel so for-range consumers unblock. Called once
+// from readLoop on exit.
+func (p *Pane) closeSubscribers() {
+	p.subMu.Lock()
+	p.subsDone = true
+	for s := range p.subs {
+		close(s.ch)
+		delete(p.subs, s)
+	}
+	p.subMu.Unlock()
 }
 
 // Exited returns a one-shot channel carrying the child's exit
@@ -418,6 +528,7 @@ func (p *Pane) Placements() ([]vt.Placement, error) {
 func (p *Pane) readLoop() {
 	defer p.wg.Done()
 	defer close(p.bytesCh)
+	defer p.closeSubscribers()
 
 	buf := make([]byte, readBufSize)
 	for {
@@ -438,6 +549,10 @@ func (p *Pane) readLoop() {
 					_ = feedErr
 				}
 			}
+			// Signal subscribers that the grid is dirty. Done before
+			// the bytesCh send so a subscribed consumer can observe
+			// the signal without needing to also drain bytesCh.
+			p.signalDirty()
 			select {
 			case p.bytesCh <- chunk:
 			case <-p.ctx.Done():

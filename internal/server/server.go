@@ -29,19 +29,19 @@ import (
 //     goroutine per connection. On ctx cancellation (kill-server) the
 //     listener is closed so Accept unblocks; Run waits for every
 //     per-client goroutine to drain before returning.
-//   - One attach client at a time. A sync.Mutex-guarded flag in
-//     serverState.attachInUse marks the attach slot: a second attach is
-//     refused with Exit{ServerExit, "another client is attached"}. M1's
-//     acceptance criteria only ask for one session, so there is no
-//     pane-sharing or multi-viewer work here.
+//   - Multiple attach clients share one pane. The first attach spawns
+//     the shell at its tty dimensions; subsequent attaches reuse the
+//     same pane and see it at the original size. Each attach runs its
+//     own pump driven by a pane.Subscribe() dirty-signal channel, so N
+//     clients render independently off a single vt.Terminal.
 //   - Command-only clients (e.g. "dmux kill-server") share the Accept
-//     loop but never take the attach slot and never spawn a pane.
-//     kill-server acks StatusOk, writes Exit{ServerExit, "kill-server"},
-//     cancels the server ctx, and returns — pump on any other
-//     connection observes ctx.Done and tears its pane down.
+//     loop but never take a subscription and never spawn a pane.
+//     kill-server acks StatusOk, sets serverState.shutdownReason to
+//     ExitServerExit, cancels the server ctx, and returns — every
+//     attach pump observes ctx.Done and writes its own Exit frame.
 //   - No cmdq, no session registry, no window, no options. Argv[0]
 //     of each Command is ignored by the attach path; the first
-//     CommandList on an attach connection triggers the single shell
+//     CommandList on the first attach triggers the single shell
 //     pane. Any further CommandList answers StatusOk without doing
 //     anything.
 //   - doc.go still describes the full event-loop design with a main
@@ -123,14 +123,19 @@ func Run(path string) error {
 	// return value.
 	<-listenerClosed
 	connWG.Wait()
+
+	// Every client goroutine has drained — safe to tear the pane
+	// (and its vt.Terminal) down now, after the final pumps have
+	// already returned.
+	state.shutdownPane()
 	return nil
 }
 
 // serverState is the per-server shared state threaded through every
 // per-connection goroutine. The M1 walking skeleton keeps this small:
-// a shared ctx + cancel, the wasm runtime, and a mutex-guarded attach
-// slot. The real server will carry session/window registries, the
-// command queue, and key tables here.
+// a shared ctx + cancel, the wasm runtime, the one shared pane (lazy),
+// and the shutdown-reason handoff used to categorize Exit frames on
+// every attach pump at shutdown time.
 //
 // TODO(m1:server-cmd-registry): replace the hardcoded "kill-server"
 // string match in handle with a lookup into the cmd registry that
@@ -140,31 +145,124 @@ type serverState struct {
 	cancel context.CancelFunc
 	rt     *vt.Runtime
 
-	// attachMu guards attachInUse. Held only briefly around the
-	// take/release transitions; the pump loop does not hold it.
-	attachMu     sync.Mutex
-	attachInUse  bool
+	// paneMu guards pane/paneCols/paneRows. Held only across the
+	// pane-ensure fast path; pumps do not hold it.
+	paneMu   sync.Mutex
+	pane     *pane.Pane
+	paneCols int
+	paneRows int
+
+	// shutdownMu guards shutdownReason and shutdownMessage. Both are
+	// written exactly once (by whichever actor initiates shutdown —
+	// kill-server handler or the shell-exit watcher goroutine) and
+	// read by every pump after ctx.Done fires. A sync.Once on
+	// shutdown-set keeps first-writer-wins honest.
+	shutdownMu      sync.Mutex
+	shutdownOnce    sync.Once
+	shutdownReason  proto.ExitReason
+	shutdownMessage string
 }
 
-// tryTakeAttach claims the single attach slot. Returns true on success;
-// false means another client already holds it.
-func (s *serverState) tryTakeAttach() bool {
-	s.attachMu.Lock()
-	defer s.attachMu.Unlock()
-	if s.attachInUse {
-		return false
+// ensurePane returns the shared pane, spawning it on first call.
+// First-attach wins on size: whichever client calls ensurePane first
+// fixes the pane's dimensions for the lifetime of the server. Every
+// subsequent attach sees the pane at that size regardless of its own
+// tty, and the pump silently ignores Resize frames from clients.
+//
+// TODO(m1:server-pane-resize-negotiation): replace first-attach-wins
+// with tmux-style min-across-clients shrinking so a small client
+// joining a session does not squeeze the larger ones, and a larger
+// client joining does not leave the rest looking at blank cells.
+func (s *serverState) ensurePane(ident *proto.Identify) (*pane.Pane, int, int, error) {
+	s.paneMu.Lock()
+	defer s.paneMu.Unlock()
+
+	if s.pane != nil {
+		return s.pane, s.paneCols, s.paneRows, nil
 	}
-	s.attachInUse = true
-	return true
+
+	cols, rows := int(ident.InitialCols), int(ident.InitialRows)
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows < 2 {
+		rows = 24
+	}
+	paneRows := rows - 1
+
+	p, err := pane.Open(s.ctx, pane.Config{
+		Argv: shellArgv(),
+		Cwd:  chooseCwd(ident.Cwd),
+		Env:  childEnv(ident.Env, ident.TermEnv),
+		Cols: cols,
+		Rows: paneRows,
+		VT:   s.rt,
+	})
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("server: open pane: %w", err)
+	}
+
+	s.pane = p
+	s.paneCols = cols
+	s.paneRows = rows
+
+	// Watch the pane for shell exit. When the child goes, mark the
+	// shutdown reason as ExitedShell so every attach pump writes the
+	// correct Exit category, then cancel the server ctx.
+	go s.watchPaneExit(p)
+
+	return p, cols, rows, nil
 }
 
-// releaseAttach frees the attach slot. Always paired with a successful
-// tryTakeAttach; calling it when the slot is already free is a no-op so
-// defers stay trivial even on error paths.
-func (s *serverState) releaseAttach() {
-	s.attachMu.Lock()
-	defer s.attachMu.Unlock()
-	s.attachInUse = false
+// watchPaneExit blocks on the pane's Exited channel and, when the
+// child goes away, sets the server's shutdown reason/message and
+// cancels the server ctx so every attach pump's ctx.Done arm fires.
+// Runs exactly once per pane lifetime; ends when the pane closes.
+func (s *serverState) watchPaneExit(p *pane.Pane) {
+	st, ok := <-p.Exited()
+	if !ok {
+		// Pane was closed before a status arrived (Close called in
+		// shutdown path). Nothing to announce — whoever triggered the
+		// close already set the shutdown reason.
+		return
+	}
+	s.setShutdown(proto.ExitExitedShell, exitMessage(st))
+	s.cancel()
+}
+
+// setShutdown records why the server is going away. First writer
+// wins: kill-server and shell-exit can both race here, and callers
+// learn which won by reading shutdownReason under the mutex. Later
+// writes are silently discarded.
+func (s *serverState) setShutdown(reason proto.ExitReason, msg string) {
+	s.shutdownOnce.Do(func() {
+		s.shutdownMu.Lock()
+		s.shutdownReason = reason
+		s.shutdownMessage = msg
+		s.shutdownMu.Unlock()
+	})
+}
+
+// shutdown reports the reason/message the server is shutting down
+// with, as previously set by setShutdown. Returns a zero reason +
+// empty message if nobody has recorded anything — the generic
+// server-shutting-down fallback in the pump.
+func (s *serverState) shutdown() (proto.ExitReason, string) {
+	s.shutdownMu.Lock()
+	defer s.shutdownMu.Unlock()
+	return s.shutdownReason, s.shutdownMessage
+}
+
+// shutdownPane closes the pane if one was ever spawned. Called from
+// Run's defer path after every per-connection goroutine has drained,
+// so there are no concurrent readers or writers racing the close.
+func (s *serverState) shutdownPane() {
+	s.paneMu.Lock()
+	p := s.pane
+	s.paneMu.Unlock()
+	if p != nil {
+		_ = p.Close()
+	}
 }
 
 // handle runs one client connection. Sequence:
@@ -172,16 +270,16 @@ func (s *serverState) releaseAttach() {
 //  1. Read Identify. Anything else → Exit{ProtocolError}.
 //  2. Read the first CommandList. Dispatch by Commands[0].Argv[0]:
 //     - "kill-server": ack StatusOk for every command, write
-//       Exit{ServerExit, "kill-server"}, cancel the server ctx, and
-//       return. No pane is spawned.
-//     - anything else (attach-session, new-session, empty argv): take
-//       the attach slot. If already held, write
-//       Exit{ServerExit, "another client is attached"} and return.
-//       Otherwise spawn the shell pane, ack commands, paint the
+//       Exit{ServerExit, "kill-server"}, record the shutdown reason
+//       on serverState, cancel the server ctx, and return. No pane
+//       is spawned.
+//     - anything else (attach-session, new-session, empty argv):
+//       ensure the shared pane exists (spawns it on first attach),
+//       subscribe for dirty signals, ack commands, paint the
 //       initial frame, and enter pump.
-//  3. pump runs the byte-pump until the pane exits, the client sends
-//     Bye, the connection drops, or the server ctx is canceled
-//     (kill-server on another connection).
+//  3. pump runs the render loop until the client sends Bye, the
+//     connection drops, or the server ctx is canceled (kill-server
+//     on another connection, or the pane's shell exited).
 func handle(conn net.Conn, state *serverState) error {
 	frameR := xio.NewReader(conn)
 	frameW := xio.NewWriter(conn)
@@ -225,18 +323,22 @@ func isKillServer(cl *proto.CommandList) bool {
 	return len(argv) >= 1 && argv[0] == "kill-server"
 }
 
-// handleKillServer acks every command in the list with StatusOk, writes
-// a final Exit{ServerExit}, then cancels the server ctx so the Run
-// loop closes the listener and any concurrent attach connection tears
-// down.
+// handleKillServer acks every command in the list with StatusOk, records
+// the shutdown reason on serverState so attach pumps emit the correct
+// Exit category, writes this connection's own Exit{ServerExit}, then
+// cancels the server ctx so the Run loop closes the listener and every
+// concurrent attach pump tears itself down.
 func handleKillServer(cl *proto.CommandList, w xio.FrameWriter, state *serverState) error {
+	// Set the shutdown reason before we cancel so any pump racing the
+	// ctx.Done wake-up sees "server-exit / kill-server" rather than
+	// the generic fallback.
+	state.setShutdown(proto.ExitServerExit, "kill-server")
+
 	for _, cmd := range cl.Commands {
 		if err := w.WriteFrame(&proto.CommandResult{
 			ID:     cmd.ID,
 			Status: proto.StatusOk,
 		}); err != nil {
-			// Even if we can't tell this client, still cancel so the
-			// server process exits.
 			state.cancel()
 			return fmt.Errorf("server: write CommandResult: %w", err)
 		}
@@ -252,10 +354,14 @@ func handleKillServer(cl *proto.CommandList, w xio.FrameWriter, state *serverSta
 	return nil
 }
 
-// handleAttach is the attach-client path: take the attach slot, spawn a
-// pane, ack commands, paint the initial frame, enter pump. On return,
-// whether successful or not, releases the attach slot for the next
-// client.
+// handleAttach is the attach-client path: ensure the shared pane,
+// subscribe for dirty signals, ack commands, paint the initial frame,
+// enter pump.
+//
+// Multiple attach handlers run concurrently — there is no attach
+// slot to contend for. Each handler's subscription, renderer, and
+// pump loop are independent; the pane is the only shared state and
+// is concurrency-safe.
 func handleAttach(
 	ident *proto.Identify,
 	cl *proto.CommandList,
@@ -264,66 +370,27 @@ func handleAttach(
 	frameW xio.FrameWriter,
 	state *serverState,
 ) error {
-	if !state.tryTakeAttach() {
+	p, cols, rows, err := state.ensurePane(ident)
+	if err != nil {
 		_ = frameW.WriteFrame(&proto.Exit{
 			Reason:  proto.ExitServerExit,
-			Message: "another client is attached",
+			Message: "spawn: " + err.Error(),
 		})
-		return nil
+		return err
 	}
-	defer state.releaseAttach()
 
-	// The first CommandList sets initial dimensions. If the client
-	// didn't send them, fall back to 80x24 — this is the skeleton, a
-	// real attach client always sends real sizes from its tty.
-	//
-	// The pane gets rows-1 cells of vertical space; the last row is
-	// reserved for the status line that termout.Wrap paints on top of
-	// the formatter output. Anything below rows=2 would leave the pane
-	// with zero or negative rows, so clamp the floor.
-	cols, rows := int(ident.InitialCols), int(ident.InitialRows)
-	if cols <= 0 {
-		cols = 80
-	}
-	if rows < 2 {
-		rows = 24
-	}
-	paneRows := rows - 1
+	// Total rows includes the status line; the pane itself is rows-1
+	// cells tall (see ensurePane for the initial sizing).
 	totalRows := rows
 
-	// Per-connection ctx is a child of the server ctx so kill-server
-	// on another connection propagates down here: pump selects on
-	// this ctx and closes the pane when it fires.
-	ctx, cancel := context.WithCancel(state.ctx)
-	defer cancel()
-
-	p, err := pane.Open(ctx, pane.Config{
-		Argv: shellArgv(),
-		Cwd:  chooseCwd(ident.Cwd),
-		Env:  childEnv(ident.Env, ident.TermEnv),
-		Cols: cols,
-		Rows: paneRows,
-		VT:   state.rt,
-	})
-	if err != nil {
-		msg := err.Error()
-		_ = frameW.WriteFrame(&proto.Exit{
-			Reason:  proto.ExitServerExit,
-			Message: "spawn: " + msg,
-		})
-		return fmt.Errorf("server: open pane: %w", err)
-	}
-
-	// CommandResults go out after the pane is live so that if spawn
-	// fails the client sees Exit, not a phantom StatusOk followed by
-	// Exit.
+	// CommandResults go out after we have a pane so that if the
+	// ensurePane spawn fails the client sees Exit, not a phantom
+	// StatusOk followed by Exit.
 	for _, cmd := range cl.Commands {
 		if err := frameW.WriteFrame(&proto.CommandResult{
 			ID:     cmd.ID,
 			Status: proto.StatusOk,
 		}); err != nil {
-			cancel()
-			_ = p.Close()
 			return fmt.Errorf("server: write CommandResult: %w", err)
 		}
 	}
@@ -348,17 +415,28 @@ func handleAttach(
 		Cols:       cols,
 	}
 
+	// Subscribe for dirty-signal wake-ups. Close on return removes
+	// this subscription so the pane's readLoop stops signaling a
+	// consumer that's gone.
+	sub := p.Subscribe()
+	defer sub.Close()
+
+	// Drain the priming signal from Subscribe; the initial render
+	// below does the job.
+	select {
+	case <-sub.Ch:
+	default:
+	}
+
 	// Paint the initial (blank) frame so the client's tty is clean
 	// before the shell's first output lands. Without this, the user
 	// sees whatever was on their terminal before the attach until the
 	// prompt prints.
 	if err := renderAndSend(p, renderer, frameW, sv, totalRows); err != nil {
-		cancel()
-		_ = p.Close()
 		return err
 	}
 
-	return pump(ctx, cancel, conn, p, frameR, frameW, renderer, sv, totalRows)
+	return pump(conn, p, sub, frameR, frameW, renderer, sv, totalRows, state)
 }
 
 // renderAndSend formats the pane's current screen via libghostty-vt,
@@ -424,28 +502,33 @@ func readIdentify(r xio.FrameReader, w xio.FrameWriter) (*proto.Identify, error)
 	return ident, nil
 }
 
-// pump is the byte-pump main loop for one client + one pane. It owns
-// frameW — every WriteFrame call in the server happens on this
-// goroutine, so xio.FrameWriter's single-writer contract holds
-// without extra locking. Reader and pane-output goroutines feed this
-// loop via channels.
+// pump is the render loop for one attached client. It owns frameW —
+// every WriteFrame call for this client happens on this goroutine,
+// so xio.FrameWriter's single-writer contract holds without extra
+// locking. The pane's dirty-signal subscription and the socket
+// reader goroutine feed this loop via channels.
 //
-// pump also observes the server-wide ctx (threaded in via the per-
-// connection ctx, which is a child of state.ctx). When kill-server on
-// another connection cancels that ctx, pump writes
-// Exit{ServerExit, "server shutting down"} and returns; the deferred
-// teardown closes the pane.
+// pump observes the server-wide ctx (via state.ctx). When either
+// kill-server on another connection or the shell-exit watcher
+// cancels that ctx, pump reads state.shutdown() to pick the right
+// Exit category, writes it, and returns.
 func pump(
-	ctx context.Context,
-	cancel context.CancelFunc,
 	conn net.Conn,
 	p *pane.Pane,
+	sub pane.Subscription,
 	frameR xio.FrameReader,
 	frameW xio.FrameWriter,
 	renderer *termout.Renderer,
 	sv status.View,
 	totalRows int,
+	state *serverState,
 ) (retErr error) {
+	// Per-connection ctx: cancels when the client disconnects so the
+	// reader goroutine unblocks. Separate from state.ctx so one
+	// client dropping does not tear the whole server down.
+	ctx, cancel := context.WithCancel(state.ctx)
+	defer cancel()
+
 	// Reader goroutine: parse frames off the socket, deliver on
 	// inCh. A single-slot readErrCh carries the terminal error
 	// (io.EOF or a real failure) exactly once.
@@ -470,75 +553,56 @@ func pump(
 		}
 	}()
 
-	// Shut everything down on the way out in the order that lets
-	// each goroutine observe its cue:
-	//
-	//  1. cancel pane context so pane.Bytes -> ctx.Done select wins
-	//     if readLoop is waiting to deliver a chunk.
-	//  2. Close the pane. This kills the child (SIGHUP), drains the
-	//     pty, and lets pane.Close return after its helpers exit.
-	//  3. Close the conn — this is what unblocks the reader
-	//     goroutine's ReadFrame so readerWG.Wait can return.
-	//  4. Wait for the reader.
-	//
-	// The caller also defers conn.Close as a safety net; the second
-	// Close is a no-op error that we do not propagate.
+	// Shut the reader down on the way out: closing the conn unblocks
+	// the reader's ReadFrame, after which readerWG can return. The
+	// pane itself is NOT closed here — it is shared across clients,
+	// and Run.shutdownPane is responsible for the final teardown.
 	defer func() {
 		cancel()
-		if err := p.Close(); err != nil && retErr == nil {
-			retErr = fmt.Errorf("server: close pane: %w", err)
-		}
 		_ = conn.Close()
 		readerWG.Wait()
 	}()
 
-	paneBytes := p.Bytes()
-	paneExited := p.Exited()
-
 	for {
 		select {
 		case <-ctx.Done():
-			// Server ctx canceled (kill-server on another connection)
-			// or this connection's ctx canceled for local reasons.
-			// Announce Exit{ServerExit} so the attach client prints a
-			// sensible summary, then return; defer tears the pane down.
+			// Server ctx canceled (kill-server on another connection,
+			// or the pane's shell exited and the watcher canceled) —
+			// look up why and emit the right Exit category to this
+			// client.
+			reason, msg := state.shutdown()
+			if reason == 0 && msg == "" {
+				// Local-only cancel (deferred cancel with no
+				// shutdown recorded yet). Fall back to the generic
+				// server-shutting-down message.
+				reason = proto.ExitServerExit
+				msg = "server shutting down"
+			}
 			_ = frameW.WriteFrame(&proto.Exit{
-				Reason:  proto.ExitServerExit,
-				Message: "server shutting down",
+				Reason:  reason,
+				Message: msg,
 			})
 			return nil
 
-		case _, ok := <-paneBytes:
+		case _, ok := <-sub.Ch:
 			if !ok {
-				// Pane reader finished. Wait for Exited (or for the
-				// client to depart) via the other arms.
-				paneBytes = nil
+				// Subscription channel closed: the pane's readLoop
+				// exited (child gone). The shell-exit watcher has
+				// either already fired or will in a moment; wait for
+				// ctx.Done on the next iteration rather than writing
+				// Exit here with no shutdown reason available yet.
+				sub.Ch = nil
 				continue
 			}
-			// Raw chunk is discarded — the vt.Terminal has already
-			// consumed it inside pane.readLoop. The chunk's arrival is
-			// just a dirty signal: format, wrap, send.
+			// Dirty signal: the vt.Terminal has new bytes since we
+			// last rendered. Re-render and send.
 			//
-			// TODO(m1:server-render-coalesce): drain additional pending
-			// chunks from paneBytes (non-blocking) before rendering so
-			// a burst produces one frame, not N.
+			// TODO(m1:server-render-coalesce): drain any pending
+			// signals (non-blocking) before rendering so a burst
+			// produces one frame, not N.
 			if err := renderAndSend(p, renderer, frameW, sv, totalRows); err != nil {
 				return err
 			}
-
-		case st, ok := <-paneExited:
-			// ExitedShell fires regardless of ok — the channel closes
-			// right after the single send, so both branches mean the
-			// child is gone. See pane.waitLoop.
-			_ = ok
-			msg := exitMessage(st)
-			if err := frameW.WriteFrame(&proto.Exit{
-				Reason:  proto.ExitExitedShell,
-				Message: msg,
-			}); err != nil {
-				return fmt.Errorf("server: write Exit: %w", err)
-			}
-			return nil
 
 		case f, ok := <-inCh:
 			if !ok {
@@ -552,24 +616,13 @@ func pump(
 				}
 				return fmt.Errorf("server: read frame: %w", err)
 			}
-			// Resize is handled inline because it mutates three pieces
-			// of render state (pane rows, status cols, totalRows) that
-			// must stay consistent for the next renderAndSend.
-			if rs, isResize := f.(*proto.Resize); isResize {
-				newCols := int(rs.Cols)
-				newRows := int(rs.Rows)
-				if newCols < 1 {
-					newCols = 1
-				}
-				if newRows < 2 {
-					newRows = 2
-				}
-				_ = p.Resize(newCols, newRows-1)
-				totalRows = newRows
-				sv.Cols = newCols
-				if err := renderAndSend(p, renderer, frameW, sv, totalRows); err != nil {
-					return err
-				}
+			// Resize from any attached client is ignored today. The
+			// first-attach-wins size is recorded on serverState and
+			// every pump renders against those dimensions; letting a
+			// second client resize would violate that invariant and
+			// confuse the first client. See ensurePane for the
+			// TODO(m1:server-pane-resize-negotiation) pointer.
+			if _, isResize := f.(*proto.Resize); isResize {
 				continue
 			}
 			if err := dispatchClientFrame(f, p, frameW); err != nil {
@@ -586,12 +639,12 @@ func pump(
 // pump loop. Returns a non-nil error only when the frame implies the
 // connection should end (e.g. an unrecoverable write error); normal
 // per-frame failures like pane.Write returning ErrClosed are treated
-// as "the pane is gone, let the Exited arm handle it."
+// as "the pane is gone, let ctx.Done handle it."
 func dispatchClientFrame(f proto.Frame, p *pane.Pane, w xio.FrameWriter) error {
 	switch m := f.(type) {
 	case *proto.Input:
 		// Short write or ErrClosed here means the pane went away; the
-		// Exited arm will observe that and emit Exit on its own.
+		// ctx.Done arm will observe that and emit Exit on its own.
 		_, _ = p.Write(m.Data)
 		return nil
 

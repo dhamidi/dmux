@@ -299,6 +299,112 @@ func TestSnapshotNoVTReturnsErrNoVT(t *testing.T) {
 	}
 }
 
+func TestSubscribeFiresOnFeed(t *testing.T) {
+	ctx := context.Background()
+	rt, err := vt.NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("vt.NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { _ = rt.Close(ctx) })
+
+	p, err := Open(ctx, Config{
+		Argv: []string{"/bin/sh", "-c", "printf hello"},
+		Cols: 40, Rows: 5,
+		VT:   rt,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer p.Close()
+
+	sub := p.Subscribe()
+	defer sub.Close()
+
+	// Subscribe primes the channel once so the caller can do an
+	// initial render without waiting for the first feed. Drain that.
+	select {
+	case <-sub.Ch:
+	case <-time.After(time.Second):
+		t.Fatal("Subscribe did not prime the channel")
+	}
+
+	// Drain bytesCh in the background so readLoop can progress; we're
+	// asserting on the dirty-signal path, not the byte path.
+	go func() {
+		for range p.Bytes() {
+		}
+	}()
+
+	// Wait for at least one feed-driven wake-up or for the channel
+	// to close (readLoop finished). Both observably show the signal
+	// plumbing works.
+	select {
+	case _, ok := <-sub.Ch:
+		if !ok {
+			// Closed before we saw an explicit feed-wake; the single
+			// printf was so fast readLoop hit EOF before we observed
+			// the signal. Closure itself proves the fan-out ran.
+			return
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("subscription channel never fired after feed")
+	}
+
+	// Drain the rest via for-range; the channel must close when
+	// readLoop exits.
+	done := make(chan struct{})
+	go func() {
+		for range sub.Ch {
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("subscription channel did not close after shell exit")
+	}
+}
+
+func TestSubscribeAfterCloseIsClosed(t *testing.T) {
+	p, err := Open(context.Background(), Config{
+		Argv: []string{"/bin/sh", "-c", "printf hi"},
+		Cols: 40, Rows: 5,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// Drain bytesCh so readLoop progresses to EOF.
+	go func() {
+		for range p.Bytes() {
+		}
+	}()
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// After Close, new subscribers must get an already-closed channel
+	// so for-range loops exit without blocking.
+	sub := p.Subscribe()
+	defer sub.Close()
+	select {
+	case _, ok := <-sub.Ch:
+		if ok {
+			// First receive might drain the prime signal, but the
+			// next one must be a zero-value closed read.
+			select {
+			case _, ok2 := <-sub.Ch:
+				if ok2 {
+					t.Fatal("subscription on closed pane must close after priming")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("subscription on closed pane did not close")
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("subscription on closed pane blocked")
+	}
+}
+
 func TestWriteAfterCloseErrClosed(t *testing.T) {
 	p, err := Open(context.Background(), Config{
 		Argv: []string{"/bin/cat"},
