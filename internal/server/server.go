@@ -79,11 +79,12 @@ func Run(path string) error {
 	defer rt.Close(ctx)
 
 	state := &serverState{
-		ctx:      ctx,
-		cancel:   cancel,
-		rt:       rt,
-		registry: session.NewRegistry(),
-		attached: make(map[uint64]*attachedClient),
+		ctx:            ctx,
+		cancel:         cancel,
+		rt:             rt,
+		registry:       session.NewRegistry(),
+		serverSessions: make(map[session.ID]*serverSession),
+		attached:       make(map[uint64]*attachedClient),
 	}
 
 	// Closer goroutine: when ctx is canceled (kill-server or Run's
@@ -139,16 +140,17 @@ func Run(path string) error {
 }
 
 // serverState is the per-server shared state threaded through every
-// per-connection goroutine. The M1 walking skeleton keeps this small:
-// a shared ctx + cancel, the wasm runtime, the session registry (one
-// session, one window, one pane in M1), and the shutdown-reason
-// handoff used to categorize Exit frames on every attach pump at
-// shutdown time.
+// per-connection goroutine: the server-wide ctx + cancel, the wasm
+// runtime, the session registry, the per-session metadata
+// (serverSessions) that carries each session's own ctx + exit
+// bookkeeping, and the kill-server shutdown-reason handoff read by
+// every pump on state.ctx cancellation.
 //
-// The one-and-only pane now lives behind the registry:
-// registry → Session → Window → ActivePane. ensureSession creates
-// them on first attach and watchPaneExit observes the pane's
-// lifecycle so the shell-exit case cancels the server ctx.
+// Session lifecycle is scoped: each session has its own ctx, cancelled
+// by watchPaneExit when its shell exits. One session's shell ending no
+// longer tears the whole server down — only the pumps attached to
+// that session see their sessCtx fire and emit Exit{ExitedShell}.
+// kill-server still cancels state.ctx to end every pump at once.
 type serverState struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -156,13 +158,27 @@ type serverState struct {
 
 	// registry owns the session / window / pane object graph. Its
 	// methods are NOT safe for concurrent use (see
-	// internal/session); registryMu below protects the subset the
-	// server touches from more than one connection goroutine (the
-	// ensureSession fast path and shutdownRegistry teardown).
+	// internal/session); registryMu below protects every access from
+	// more than one connection goroutine (creation, resolution,
+	// teardown, and retirement on shell exit).
 	registry *session.Registry
 
-	// registryMu guards the ensureSession fast path. Held only across
-	// the create step; pumps do not hold it.
+	// serverSessions pairs each live registry session with its
+	// server-side metadata (ctx, cancel, exit reason/message, pane
+	// pointer for cleanup). Keyed by the registry's session.ID. A
+	// session is "live" iff it appears here; watchPaneExit removes
+	// the entry when its shell exits. Guarded by registryMu.
+	serverSessions map[session.ID]*serverSession
+
+	// retiredPanes collects panes whose sessions were removed from
+	// the registry by watchPaneExit. Run.shutdownRegistry closes
+	// them on server exit so readLoop goroutines don't leak. Guarded
+	// by registryMu.
+	retiredPanes []*pane.Pane
+
+	// registryMu guards registry, serverSessions, and retiredPanes.
+	// Held only across the create / resolve / retire / teardown
+	// steps; pumps do not hold it during their select loop.
 	registryMu sync.Mutex
 
 	// attachedMu guards attached and nextAttachID. Held briefly across
@@ -173,15 +189,51 @@ type serverState struct {
 	attached     map[uint64]*attachedClient
 	nextAttachID uint64
 
-	// shutdownMu guards shutdownReason and shutdownMessage. Both are
-	// written exactly once (by whichever actor initiates shutdown —
-	// kill-server handler or the shell-exit watcher goroutine) and
-	// read by every pump after ctx.Done fires. A sync.Once on
-	// shutdown-set keeps first-writer-wins honest.
+	// shutdownMu guards shutdownReason and shutdownMessage. Written
+	// exactly once by kill-server and read by every pump after
+	// state.ctx cancellation. A sync.Once on shutdown-set keeps
+	// first-writer-wins honest.
 	shutdownMu      sync.Mutex
 	shutdownOnce    sync.Once
 	shutdownReason  proto.ExitReason
 	shutdownMessage string
+}
+
+// serverSession is the server-side companion to one session.Session.
+// It owns the session's own cancellable context (derived from nothing
+// — independent of state.ctx so kill-server and shell-exit arms stay
+// distinguishable in pump's select) and the exit reason/message
+// recorded by watchPaneExit when the shell dies. Pane pointer kept
+// for cleanup after retirement.
+type serverSession struct {
+	id     session.ID
+	pane   *pane.Pane
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// exitMu guards exitReason and exitMessage. Written once by
+	// watchPaneExit, read by pump after sessCtx fires.
+	exitMu      sync.Mutex
+	exitReason  proto.ExitReason
+	exitMessage string
+}
+
+// setExit records the session's exit reason/message. Called once by
+// watchPaneExit before cancelling the session's ctx.
+func (ss *serverSession) setExit(reason proto.ExitReason, msg string) {
+	ss.exitMu.Lock()
+	ss.exitReason = reason
+	ss.exitMessage = msg
+	ss.exitMu.Unlock()
+}
+
+// exit reports the previously recorded exit reason/message, or zero
+// values if the session ended via kill-server (watchPaneExit never
+// ran because state.ctx teardown raced ahead).
+func (ss *serverSession) exit() (proto.ExitReason, string) {
+	ss.exitMu.Lock()
+	defer ss.exitMu.Unlock()
+	return ss.exitReason, ss.exitMessage
 }
 
 // attachedClient is one live attach pump's recorded tty size. Used by
@@ -204,9 +256,11 @@ type attachedClient struct {
 // first free numeric name ("0", "1", ...) to match tmux's
 // auto-naming convention; explicit names fail fast on duplicate.
 //
-// Must be called with registryMu held. The pane's shell-exit watcher
-// goroutine is started before returning so the session's lifecycle
-// is observed from birth.
+// Must be called with registryMu held. Also registers the session's
+// server-side companion (serverSession) and starts its shell-exit
+// watcher before returning so the lifecycle is observed from birth.
+// On any failure after pane.Open, the pane is closed and the
+// registry/serverSessions state is rolled back.
 func (s *serverState) createSession(name string, cwd string, env []string, cols, rows int) (*session.Session, error) {
 	if name == "" {
 		name = s.autogenSessionName()
@@ -244,16 +298,19 @@ func (s *serverState) createSession(name string, cwd string, env []string, cols,
 	}
 	w.SetActivePane(p)
 
-	// Watch the pane for shell exit. When the child goes, mark the
-	// shutdown reason as ExitedShell so every attach pump writes the
-	// correct Exit category, then cancel the server ctx.
-	//
-	// TODO(m2:server-session-scope-exit): with multi-session support,
-	// a single shell exit should not tear the whole server down.
-	// Today every pane exit cancels the server ctx; that matches M1's
-	// one-pane world but will need per-session teardown when sessions
-	// outlive individual panes.
-	go s.watchPaneExit(p)
+	// serverSession.ctx is independent of state.ctx: kill-server
+	// cancels state.ctx, shell-exit cancels sessCtx, and pump's
+	// select distinguishes the two to emit the right Exit reason.
+	ssCtx, ssCancel := context.WithCancel(context.Background())
+	ss := &serverSession{
+		id:     sess.ID(),
+		pane:   p,
+		ctx:    ssCtx,
+		cancel: ssCancel,
+	}
+	s.serverSessions[sess.ID()] = ss
+
+	go s.watchPaneExit(ss)
 
 	return sess, nil
 }
@@ -332,20 +389,31 @@ func (s *serverState) deregister(id uint64) {
 	delete(s.attached, id)
 }
 
-// watchPaneExit blocks on the pane's Exited channel and, when the
-// child goes away, sets the server's shutdown reason/message and
-// cancels the server ctx so every attach pump's ctx.Done arm fires.
-// Runs exactly once per pane lifetime; ends when the pane closes.
-func (s *serverState) watchPaneExit(p *pane.Pane) {
-	st, ok := <-p.Exited()
+// watchPaneExit blocks on the session's pane Exited channel and,
+// when the child goes away, records the exit reason on the session,
+// cancels the session's ctx (so only pumps attached to THIS session
+// observe it), and retires the session from the registry so later
+// attach-session lookups skip it. Runs exactly once per session
+// lifetime; ends when the pane closes.
+//
+// The pane is NOT closed here — pumps attached to this session are
+// still about to read from it to emit their final frame. Pane
+// cleanup happens in Run.shutdownRegistry via retiredPanes.
+func (s *serverState) watchPaneExit(ss *serverSession) {
+	st, ok := <-ss.pane.Exited()
 	if !ok {
-		// Pane was closed before a status arrived (Close called in
-		// shutdown path). Nothing to announce — whoever triggered the
-		// close already set the shutdown reason.
+		// Pane was closed externally (Run teardown). Nothing to
+		// announce — that path records its own shutdown reason.
 		return
 	}
-	s.setShutdown(proto.ExitExitedShell, exitMessage(st))
-	s.cancel()
+	ss.setExit(proto.ExitExitedShell, exitMessage(st))
+	ss.cancel()
+
+	s.registryMu.Lock()
+	s.registry.RemoveSession(ss.id)
+	delete(s.serverSessions, ss.id)
+	s.retiredPanes = append(s.retiredPanes, ss.pane)
+	s.registryMu.Unlock()
 }
 
 // setShutdown records why the server is going away. First writer
@@ -371,12 +439,12 @@ func (s *serverState) shutdown() (proto.ExitReason, string) {
 	return s.shutdownReason, s.shutdownMessage
 }
 
-// shutdownRegistry walks every session's window's active pane and
-// closes it. Called from Run's defer path after every per-connection
+// shutdownRegistry walks every still-live session's active pane and
+// every retired pane (those whose session ended via shell exit but
+// whose readLoop goroutine we haven't cleaned up yet) and closes
+// them. Called from Run's defer path after every per-connection
 // goroutine has drained, so there are no concurrent readers or
-// writers racing the close. M1 has at most one session / one window /
-// one pane, but the loop is written against the registry's iterator
-// so it keeps working as the graph grows.
+// writers racing the close.
 func (s *serverState) shutdownRegistry() {
 	s.registryMu.Lock()
 	defer s.registryMu.Unlock()
@@ -389,6 +457,10 @@ func (s *serverState) shutdownRegistry() {
 			_ = p.Close()
 		}
 	}
+	for _, p := range s.retiredPanes {
+		_ = p.Close()
+	}
+	s.retiredPanes = nil
 }
 
 // serverItem is the cmd.Item implementation handed to every
@@ -697,7 +769,7 @@ func enterAttachPump(
 	item *serverItem,
 ) error {
 	state := item.state
-	sess, w, p, err := resolveAttachTarget(state, item.attachTarget)
+	sess, ss, w, p, err := resolveAttachTarget(state, item.attachTarget)
 	if err != nil {
 		_ = frameW.WriteFrame(&proto.Exit{
 			Reason:  proto.ExitServerExit,
@@ -762,6 +834,7 @@ func enterAttachPump(
 		frameW:   frameW,
 		renderer: renderer,
 		sess:     sess,
+		ss:       ss,
 		win:      w,
 		cols:     cols,
 		rows:     rows,
@@ -771,29 +844,35 @@ func enterAttachPump(
 }
 
 // resolveAttachTarget looks a SessionRef back up in the registry,
-// returning the live session/window/pane triple for pump use. A
-// target that vanished between command drain and pump entry (or
-// that never existed) returns an error the caller translates to an
-// Exit frame.
-func resolveAttachTarget(state *serverState, ref cmd.SessionRef) (*session.Session, *session.Window, *pane.Pane, error) {
+// returning the live session / serverSession / window / pane quad
+// for pump use. A target that vanished between command drain and
+// pump entry (or that never existed) returns an error the caller
+// translates to an Exit frame. The serverSession is needed so pump
+// can select on its ctx and read its exit reason on shell-exit.
+func resolveAttachTarget(state *serverState, ref cmd.SessionRef) (*session.Session, *serverSession, *session.Window, *pane.Pane, error) {
 	if ref == nil {
-		return nil, nil, nil, fmt.Errorf("server: no attach target")
+		return nil, nil, nil, nil, fmt.Errorf("server: no attach target")
 	}
 	state.registryMu.Lock()
 	defer state.registryMu.Unlock()
-	sess := state.registry.FindSession(session.ID(ref.ID()))
+	id := session.ID(ref.ID())
+	sess := state.registry.FindSession(id)
 	if sess == nil {
-		return nil, nil, nil, fmt.Errorf("server: attach target vanished: id=%d", ref.ID())
+		return nil, nil, nil, nil, fmt.Errorf("server: attach target vanished: id=%d", ref.ID())
+	}
+	ss, ok := state.serverSessions[id]
+	if !ok {
+		return nil, nil, nil, nil, fmt.Errorf("server: attach target has no companion: id=%d", ref.ID())
 	}
 	w := sess.CurrentWindow()
 	if w == nil {
-		return nil, nil, nil, fmt.Errorf("server: attach target has no window: id=%d", ref.ID())
+		return nil, nil, nil, nil, fmt.Errorf("server: attach target has no window: id=%d", ref.ID())
 	}
 	p := w.ActivePane()
 	if p == nil {
-		return nil, nil, nil, fmt.Errorf("server: attach target has no pane: id=%d", ref.ID())
+		return nil, nil, nil, nil, fmt.Errorf("server: attach target has no pane: id=%d", ref.ID())
 	}
-	return sess, w, p, nil
+	return sess, ss, w, p, nil
 }
 
 // statusView builds the status.View for one client at the given tty
@@ -885,6 +964,7 @@ type pumpArgs struct {
 	frameW   xio.FrameWriter
 	renderer *termout.Renderer
 	sess     *session.Session
+	ss       *serverSession
 	win      *session.Window
 	cols     int // initial client tty cols
 	rows     int // initial client tty rows
@@ -898,10 +978,19 @@ type pumpArgs struct {
 // locking. The pane's dirty-signal subscription and the socket
 // reader goroutine feed this loop via channels.
 //
-// pump observes the server-wide ctx (via state.ctx). When either
-// kill-server on another connection or the shell-exit watcher
-// cancels that ctx, pump reads state.shutdown() to pick the right
-// Exit category, writes it, and returns.
+// pump observes two independent cancellation sources:
+//
+//   - state.ctx: kill-server on any connection cancels it, and the
+//     pump emits Exit{<recorded shutdown reason>}. All pumps end.
+//   - ss.ctx: this session's shell exited, and the pump emits
+//     Exit{ExitedShell, <status message>}. Only pumps attached to
+//     this session end; other sessions' pumps keep running.
+//
+// The two ctxs are independent (ss.ctx is NOT a child of state.ctx)
+// so select can distinguish them. If state.ctx fires first the
+// kill-server path runs; if ss.ctx fires first the shell-exit path
+// runs; if both race, whichever the scheduler picks wins and the
+// other's cancellation is observed on the defer'd cleanup.
 //
 // Each render uses the CLIENT's current tty cols and rows (not the
 // pane's) for the status bar's width and the renderer's totalRows.
@@ -956,10 +1045,9 @@ func pump(a pumpArgs) (retErr error) {
 	for {
 		select {
 		case <-ctx.Done():
-			// Server ctx canceled (kill-server on another connection,
-			// or the pane's shell exited and the watcher canceled) —
-			// look up why and emit the right Exit category to this
-			// client.
+			// Either state.ctx fired (kill-server on any connection)
+			// or the local cancel ran in a defer. Read the recorded
+			// shutdown reason and emit the right Exit category.
 			reason, msg := a.state.shutdown()
 			if reason == 0 && msg == "" {
 				// Local-only cancel (deferred cancel with no
@@ -967,6 +1055,24 @@ func pump(a pumpArgs) (retErr error) {
 				// server-shutting-down message.
 				reason = proto.ExitServerExit
 				msg = "server shutting down"
+			}
+			_ = a.frameW.WriteFrame(&proto.Exit{
+				Reason:  reason,
+				Message: msg,
+			})
+			return nil
+
+		case <-a.ss.ctx.Done():
+			// This session's shell exited. Only pumps attached to
+			// this session observe this — other sessions keep
+			// running. Emit the exit reason recorded by the
+			// watcher; fall back to a generic ExitedShell if the
+			// watcher hasn't populated it yet (race window where
+			// cancel fired before setExit returned).
+			reason, msg := a.ss.exit()
+			if reason == 0 {
+				reason = proto.ExitExitedShell
+				msg = "shell ended"
 			}
 			_ = a.frameW.WriteFrame(&proto.Exit{
 				Reason:  reason,
