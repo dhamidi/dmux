@@ -319,11 +319,16 @@ func (p *Pane) Resize(cols, rows int) error {
 
 // Bytes returns the channel carrying raw pty output. Closed when
 // the pty reader goroutine exits (child closed its end or Close
-// ran). Consumers must receive promptly; the channel is buffered
-// but will backpressure under sustained heavy output.
+// ran).
 //
-// The dirty-signal path on Subscribe is the preferred consumer API;
-// Bytes() remains for tests and future raw-byte tap use cases.
+// The channel is a best-effort tap: readLoop sends non-blocking, so
+// chunks are dropped when the buffer (cap 32) is full. This keeps
+// readLoop making forward progress when no one drains — the server
+// uses Subscribe() for dirty signals and does not read here, so a
+// blocking send would wedge the pipeline once the buffer saturated.
+// Tests that care about every byte must drain promptly; under
+// normal scheduling the buffer absorbs ordinary bursts without
+// drops.
 func (p *Pane) Bytes() <-chan []byte {
 	return p.bytesCh
 }
@@ -557,10 +562,19 @@ func (p *Pane) readLoop() {
 			// the bytesCh send so a subscribed consumer can observe
 			// the signal without needing to also drain bytesCh.
 			p.signalDirty()
+			// Non-blocking tap send: drop chunks when the buffer
+			// (cap 32) is full rather than wedging readLoop. The
+			// server does not drain Bytes() — it uses Subscribe —
+			// so a blocking send here would freeze every downstream
+			// Feed/signalDirty after the first burst of 32 chunks,
+			// which presents to the user as "keypresses stop
+			// echoing" because shell output never advances into vt.
+			// See Bytes() doc for the tap contract.
 			select {
 			case p.bytesCh <- chunk:
 			case <-p.ctx.Done():
 				return
+			default:
 			}
 		}
 		if err != nil {
