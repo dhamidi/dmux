@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/dhamidi/dmux/internal/client"
 	"github.com/dhamidi/dmux/internal/platform"
@@ -101,6 +102,21 @@ func attach(conn net.Conn) error {
 		return fmt.Errorf("raw: %w", err)
 	}
 
+	// Enter the alternate screen buffer so the session's frame stream
+	// does not disturb the user's shell scrollback, and guarantee the
+	// matching leave via defer so a panic in client.Run still hands
+	// the terminal back to the user's prior state. The explicit call
+	// after Run returns is what keeps the exit-summary line (printed
+	// to stderr below) on the user's restored primary screen instead
+	// of hidden inside the about-to-be-torn-down alt screen.
+	if _, err := t.Write([]byte("\x1b[?1049h")); err != nil {
+		return fmt.Errorf("enter alt screen: %w", err)
+	}
+	leaveAltScreen := sync.OnceFunc(func() {
+		_, _ = t.Write([]byte("\x1b[?1049l"))
+	})
+	defer leaveAltScreen()
+
 	opts, err := buildClientOptions()
 	if err != nil {
 		return err
@@ -108,9 +124,12 @@ func attach(conn net.Conn) error {
 
 	ctx := context.Background()
 	res, err := client.Run(ctx, conn, t, opts)
-	// Put the tty back before writing anything to stderr — otherwise
-	// the error line renders in the middle of a raw-mode scroll
-	// region and looks like garbage.
+	// Leave the alt screen *before* Restore so the leave sequence
+	// travels through the unchanged output path, then put the tty back
+	// before writing anything to stderr — otherwise the error line
+	// renders in the middle of a raw-mode scroll region and looks
+	// like garbage.
+	leaveAltScreen()
 	_ = t.Restore()
 
 	if err != nil {
