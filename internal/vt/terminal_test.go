@@ -218,6 +218,33 @@ func TestMultipleTerminalsAreIndependent(t *testing.T) {
 	}
 }
 
+func TestFormatEmitsVTSequences(t *testing.T) {
+	r := newRuntime(t)
+	term := newTerminal(t, r, 40, 5)
+
+	if err := term.Feed([]byte("\x1b[31mred\x1b[m plain")); err != nil {
+		t.Fatalf("Feed: %v", err)
+	}
+
+	out, err := term.Format(FormatOptions{SGR: true, Cursor: true})
+	if err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+	if len(out) == 0 {
+		t.Fatal("Format returned empty output")
+	}
+	s := string(out)
+	if !strings.Contains(s, "\x1b[") {
+		t.Errorf("Format output missing CSI escape sequences: %q", s)
+	}
+	if !strings.Contains(s, "red") {
+		t.Errorf("Format output missing 'red' text: %q", s)
+	}
+	if !strings.Contains(s, "plain") {
+		t.Errorf("Format output missing 'plain' text: %q", s)
+	}
+}
+
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		return s[:i]

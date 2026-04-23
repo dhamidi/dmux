@@ -164,44 +164,42 @@ func handle(conn net.Conn, rt *vt.Runtime) error {
 	// before the shell's first output lands. Without this, the user
 	// sees whatever was on their terminal before the attach until the
 	// prompt prints.
-	initial, err := renderAndSend(p, renderer, termout.Frame{}, frameW)
-	if err != nil {
+	if err := renderAndSend(p, renderer, frameW); err != nil {
 		cancel()
 		_ = p.Close()
 		return err
 	}
 
-	return pump(ctx, cancel, conn, p, frameR, frameW, renderer, initial)
+	return pump(ctx, cancel, conn, p, frameR, frameW, renderer)
 }
 
-// renderAndSend takes a snapshot + cursor from the pane, runs the
-// renderer, sends the bytes as a proto.Output frame, and returns the
-// updated Frame cache. prev is the last Frame (zero value on the
-// initial paint); the returned Frame replaces it.
+// renderAndSend formats the pane's current screen via libghostty-vt,
+// wraps the bytes with the client-specific cursor/home/erase preamble,
+// and writes them as a proto.Output frame.
 //
-// The snapshot call locks against the pane's readLoop; the render and
-// WriteFrame happen on the pump goroutine so frameW's single-writer
-// contract holds without extra coordination.
+// Both pane.Format and pane.Cursor lock against the pane's readLoop;
+// the WriteFrame call happens on the pump goroutine so xio.FrameWriter's
+// single-writer contract holds without extra coordination.
 //
 // TODO(m1:server-render-coalesce): today we render on every pane-byte
 // chunk, which is correct but wasteful — bursty output (shell prompts)
 // produces several full-frame repaints when one would do. Add a small
 // coalescing timer (a few ms) so consecutive chunks fold into one
-// render. Blocked on termout growing a cheaper diff path first.
-func renderAndSend(p *pane.Pane, r *termout.Renderer, prev termout.Frame, w xio.FrameWriter) (termout.Frame, error) {
-	g, err := p.Snapshot()
+// render.
+func renderAndSend(p *pane.Pane, r *termout.Renderer, w xio.FrameWriter) error {
+	formatted, err := p.Format(r.FormatOptions())
 	if err != nil {
-		return prev, fmt.Errorf("server: snapshot: %w", err)
+		return fmt.Errorf("server: format: %w", err)
 	}
 	cur, err := p.Cursor()
 	if err != nil {
-		return prev, fmt.Errorf("server: cursor: %w", err)
+		return fmt.Errorf("server: cursor: %w", err)
 	}
-	frame, data := r.Render(termout.View{Grid: g, Cursor: cur}, prev)
+	data := r.Wrap(formatted, cur.Visible)
 	if err := w.WriteFrame(&proto.Output{Data: data}); err != nil {
-		return prev, fmt.Errorf("server: write Output: %w", err)
+		return fmt.Errorf("server: write Output: %w", err)
 	}
-	return frame, nil
+	return nil
 }
 
 // readIdentify enforces the "Identify is the first frame" rule. On
@@ -236,7 +234,6 @@ func pump(
 	frameR xio.FrameReader,
 	frameW xio.FrameWriter,
 	renderer *termout.Renderer,
-	initialFrame termout.Frame,
 ) (retErr error) {
 	// Reader goroutine: parse frames off the socket, deliver on
 	// inCh. A single-slot readErrCh carries the terminal error
@@ -286,7 +283,6 @@ func pump(
 
 	paneBytes := p.Bytes()
 	paneExited := p.Exited()
-	prevFrame := initialFrame
 
 	for {
 		select {
@@ -299,16 +295,14 @@ func pump(
 			}
 			// Raw chunk is discarded — the vt.Terminal has already
 			// consumed it inside pane.readLoop. The chunk's arrival is
-			// just a dirty signal: snapshot, render, send.
+			// just a dirty signal: format, wrap, send.
 			//
 			// TODO(m1:server-render-coalesce): drain additional pending
 			// chunks from paneBytes (non-blocking) before rendering so
 			// a burst produces one frame, not N.
-			frame, err := renderAndSend(p, renderer, prevFrame, frameW)
-			if err != nil {
+			if err := renderAndSend(p, renderer, frameW); err != nil {
 				return err
 			}
-			prevFrame = frame
 
 		case st, ok := <-paneExited:
 			// ExitedShell fires regardless of ok — the channel closes

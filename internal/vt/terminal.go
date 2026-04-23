@@ -66,6 +66,45 @@ const (
 	cellGetWide      uint32 = 3
 )
 
+// Formatter output format. Mirrors GhosttyFormatterFormat; we only use
+// the VT variant today.
+const (
+	formatterFormatPlain uint32 = 0
+	formatterFormatVT    uint32 = 1
+	formatterFormatHTML  uint32 = 2
+)
+
+// GhosttyFormatterTerminalOptions field offsets and sizes, cross-checked
+// against ghostty_type_json at the embedded wasm revision. Refresh along
+// with the wasm binary if upstream changes the layout.
+const (
+	fmtOptsSize       uint32 = 40
+	fmtOptsOffEmit    uint32 = 4
+	fmtOptsOffUnwrap  uint32 = 8
+	fmtOptsOffTrim    uint32 = 9
+	fmtOptsOffExtra   uint32 = 12
+	fmtOptsOffSel     uint32 = 36
+
+	fmtExtraSize       uint32 = 24
+	fmtExtraOffScreen  uint32 = 12
+
+	fmtScreenSize       uint32 = 12
+	fmtScreenOffCursor  uint32 = 4
+	fmtScreenOffStyle   uint32 = 5
+	fmtScreenOffHyper   uint32 = 6
+)
+
+// FormatOptions selects which layers of screen state the formatter
+// should emit as VT sequences. All booleans default to false; a
+// zero-value FormatOptions produces a plain cells-only repaint without
+// colors or hyperlinks. The dmux server wires SGR/Hyperlink/Cursor from
+// the termout.Renderer's profile.
+type FormatOptions struct {
+	SGR       bool
+	Hyperlink bool
+	Cursor    bool
+}
+
 // Terminal wraps one GhosttyTerminal plus its render pipeline
 // (render state, row iterator, row cells) inside a dedicated wazero
 // Module instance.
@@ -112,6 +151,17 @@ type Terminal struct {
 
 	// GhosttyCell (u64) accessor.
 	fnCellGet api.Function
+
+	// Formatter lifecycle (see internal/vt/cabi/ghostty/vt/formatter.h).
+	// Bound lazily-once at NewTerminal to keep Format fast.
+	fnFormatterNew         api.Function
+	fnFormatterFormatAlloc api.Function
+	fnFormatterFree        api.Function
+	fnGhosttyFree          api.Function
+	fnAllocOpaque          api.Function
+	fnFreeOpaque           api.Function
+	fnAllocUsize           api.Function
+	fnFreeUsize            api.Function
 
 	// Handles into wasm-side opaque types. These are the values the
 	// wasm exports return through their *_new out-pointers.
@@ -193,6 +243,14 @@ func (r *Runtime) NewTerminal(ctx context.Context, cols, rows int) (*Terminal, e
 		{&t.fnCellsSelect, "ghostty_render_state_row_cells_select"},
 		{&t.fnCellsGet, "ghostty_render_state_row_cells_get"},
 		{&t.fnCellGet, "ghostty_cell_get"},
+		{&t.fnFormatterNew, "ghostty_formatter_terminal_new"},
+		{&t.fnFormatterFormatAlloc, "ghostty_formatter_format_alloc"},
+		{&t.fnFormatterFree, "ghostty_formatter_free"},
+		{&t.fnGhosttyFree, "ghostty_free"},
+		{&t.fnAllocOpaque, "ghostty_wasm_alloc_opaque"},
+		{&t.fnFreeOpaque, "ghostty_wasm_free_opaque"},
+		{&t.fnAllocUsize, "ghostty_wasm_alloc_usize"},
+		{&t.fnFreeUsize, "ghostty_wasm_free_usize"},
 	}
 	for _, l := range lookups {
 		*l.out = mod.ExportedFunction(l.name)
@@ -663,6 +721,176 @@ func (t *Terminal) readCurrentCell() (Cell, error) {
 	}
 
 	return Cell{Rune: rune(cp), Wide: CellWide(wide)}, nil
+}
+
+// writeBool writes a single byte (1 or 0) to ptr. wasm bools are 1 byte.
+func (t *Terminal) writeBool(ptr uint32, v bool) bool {
+	var b byte
+	if v {
+		b = 1
+	}
+	return t.memory.WriteByte(ptr, b)
+}
+
+// Format renders the terminal's current screen into a fresh VT byte
+// sequence via libghostty-vt's formatter. The sequence starts from
+// cursor-home (inside the formatter's output when opts.Cursor is set)
+// and may include SGR, OSC 8, and other style sequences depending on
+// opts. The returned slice is owned by the caller.
+//
+// Each call creates, uses, and frees a one-shot formatter handle.
+// Caching the handle across calls would be safe (libghostty-vt reads
+// live terminal state on every format call), but one-shot keeps the
+// lifetime trivial and is cheap relative to the actual rendering work.
+func (t *Terminal) Format(opts FormatOptions) ([]byte, error) {
+	if t.closed {
+		return nil, vtErr(OpFormat, ErrClosed, nil, "")
+	}
+
+	ctx := t.ctx
+
+	optsPtr, err := t.alloc(ctx, fmtOptsSize)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = t.free(ctx, optsPtr, fmtOptsSize) }()
+
+	// Zero the options buffer: the wasm allocator does not guarantee
+	// zero-init, and several booleans live inside the padded regions
+	// we intentionally leave alone.
+	zero := make([]byte, fmtOptsSize)
+	if !t.memory.Write(optsPtr, zero) {
+		return nil, vtErr(OpFormat, nil, nil, "zero options")
+	}
+
+	// Top-level options: size, emit=VT, unwrap=false, trim=false.
+	if !t.writeU32(optsPtr, fmtOptsSize) ||
+		!t.writeU32(optsPtr+fmtOptsOffEmit, formatterFormatVT) {
+		return nil, vtErr(OpFormat, nil, nil, "write options header")
+	}
+
+	// extra.size + extra.screen.size — both sized-struct fields must
+	// be set so the library can tolerate future struct growth.
+	if !t.writeU32(optsPtr+fmtOptsOffExtra, fmtExtraSize) {
+		return nil, vtErr(OpFormat, nil, nil, "write extra.size")
+	}
+	screenPtr := optsPtr + fmtOptsOffExtra + fmtExtraOffScreen
+	if !t.writeU32(screenPtr, fmtScreenSize) {
+		return nil, vtErr(OpFormat, nil, nil, "write screen.size")
+	}
+
+	// Screen-level toggles: the dmux subset.
+	if !t.writeBool(screenPtr+fmtScreenOffCursor, opts.Cursor) ||
+		!t.writeBool(screenPtr+fmtScreenOffStyle, opts.SGR) ||
+		!t.writeBool(screenPtr+fmtScreenOffHyper, opts.Hyperlink) {
+		return nil, vtErr(OpFormat, nil, nil, "write screen flags")
+	}
+
+	// selection is a pointer-to-GhosttySelection; leaving it NULL asks
+	// for full-screen output.
+
+	// Allocate the opaque formatter handle slot.
+	fmtOut, err := t.callOpaqueOut(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ret, err := t.fnFormatterNew.Call(ctx,
+		0, /* allocator */
+		uint64(fmtOut),
+		uint64(t.termH),
+		uint64(optsPtr),
+	)
+	if err != nil {
+		_ = t.freeOpaque(ctx, fmtOut)
+		return nil, vtErr(OpFormat, nil, err, "formatter_terminal_new")
+	}
+	if code := CabiResult(int32(ret[0])); code != CabiSuccess {
+		_ = t.freeOpaque(ctx, fmtOut)
+		return nil, cabiErr(OpFormat, "ghostty_formatter_terminal_new", code)
+	}
+	fmtH, ok := t.readU32(fmtOut)
+	_ = t.freeOpaque(ctx, fmtOut)
+	if !ok || fmtH == 0 {
+		return nil, vtErr(OpFormat, ErrOutOfMemory, nil, "null formatter handle")
+	}
+	defer func() { _, _ = t.fnFormatterFree.Call(ctx, uint64(fmtH)) }()
+
+	// format_alloc populates a ghostty-owned buffer + its length.
+	bufPtrSlot, err := t.callOpaqueOut(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = t.freeOpaque(ctx, bufPtrSlot) }()
+
+	ret2, err := t.fnAllocUsize.Call(ctx)
+	if err != nil {
+		return nil, vtErr(OpFormat, nil, err, "alloc_usize")
+	}
+	lenSlot := uint32(ret2[0])
+	if lenSlot == 0 {
+		return nil, vtErr(OpFormat, ErrOutOfMemory, nil, "alloc_usize")
+	}
+	defer func() { _, _ = t.fnFreeUsize.Call(ctx, uint64(lenSlot)) }()
+
+	ret3, err := t.fnFormatterFormatAlloc.Call(ctx,
+		uint64(fmtH),
+		0, /* allocator */
+		uint64(bufPtrSlot),
+		uint64(lenSlot),
+	)
+	if err != nil {
+		return nil, vtErr(OpFormat, nil, err, "formatter_format_alloc")
+	}
+	if code := CabiResult(int32(ret3[0])); code != CabiSuccess {
+		return nil, cabiErr(OpFormat, "ghostty_formatter_format_alloc", code)
+	}
+
+	outPtr, ok := t.readU32(bufPtrSlot)
+	if !ok {
+		return nil, vtErr(OpFormat, nil, nil, "read output pointer")
+	}
+	outLen, ok := t.readU32(lenSlot)
+	if !ok {
+		return nil, vtErr(OpFormat, nil, nil, "read output length")
+	}
+
+	var out []byte
+	if outLen > 0 && outPtr != 0 {
+		raw, ok := t.memory.Read(outPtr, outLen)
+		if !ok {
+			_, _ = t.fnGhosttyFree.Call(ctx, 0, uint64(outPtr), uint64(outLen))
+			return nil, vtErr(OpFormat, nil, nil, "read output bytes")
+		}
+		out = make([]byte, outLen)
+		copy(out, raw)
+	}
+	_, _ = t.fnGhosttyFree.Call(ctx, 0, uint64(outPtr), uint64(outLen))
+
+	return out, nil
+}
+
+// callOpaqueOut allocates a wasm-side opaque pointer slot via the
+// library's convenience helper. The return is the slot address, not the
+// handle — the caller invokes a constructor that writes the handle into
+// the slot, then reads it back with readU32.
+func (t *Terminal) callOpaqueOut(ctx context.Context) (uint32, error) {
+	ret, err := t.fnAllocOpaque.Call(ctx)
+	if err != nil {
+		return 0, vtErr(OpFormat, nil, err, "alloc_opaque")
+	}
+	p := uint32(ret[0])
+	if p == 0 {
+		return 0, vtErr(OpFormat, ErrOutOfMemory, nil, "alloc_opaque")
+	}
+	return p, nil
+}
+
+func (t *Terminal) freeOpaque(ctx context.Context, ptr uint32) error {
+	if ptr == 0 {
+		return nil
+	}
+	_, err := t.fnFreeOpaque.Call(ctx, uint64(ptr))
+	return err
 }
 
 // Close frees the wasm-side handles and the per-Terminal module

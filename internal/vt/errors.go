@@ -43,6 +43,7 @@ const (
 	OpResize      Op = "resize"
 	OpSnapshot    Op = "snapshot"
 	OpCursor      Op = "cursor"
+	OpFormat      Op = "format"
 	OpClose       Op = "close"
 )
 

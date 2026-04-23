@@ -63,6 +63,7 @@ const (
 	OpClose    Op = "close"
 	OpSnapshot Op = "snapshot"
 	OpCursor   Op = "cursor"
+	OpFormat   Op = "format"
 )
 
 // PaneError is the concrete error type returned by this package.
@@ -367,6 +368,23 @@ func (p *Pane) Cursor() (vt.Cursor, error) {
 		return vt.Cursor{}, paneErr(OpCursor, nil, err, "")
 	}
 	return c, nil
+}
+
+// Format renders the terminal's current screen into VT sequence bytes
+// via libghostty-vt's formatter. Safe to call from any goroutine;
+// serialized against readLoop's Feed via vtMu. Returns ErrNoVT when
+// the pane was opened without a vt.Runtime.
+func (p *Pane) Format(opts vt.FormatOptions) ([]byte, error) {
+	if p.vt == nil {
+		return nil, paneErr(OpFormat, ErrNoVT, nil, "")
+	}
+	p.vtMu.Lock()
+	defer p.vtMu.Unlock()
+	out, err := p.vt.Format(opts)
+	if err != nil {
+		return nil, paneErr(OpFormat, nil, err, "")
+	}
+	return out, nil
 }
 
 // readLoop is the pty reader helper. It runs a Read loop, emitting
