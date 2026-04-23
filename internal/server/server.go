@@ -84,6 +84,7 @@ func Run(path string) error {
 		cancel:   cancel,
 		rt:       rt,
 		registry: session.NewRegistry(),
+		attached: make(map[uint64]*attachedClient),
 	}
 
 	// Closer goroutine: when ctx is canceled (kill-server or Run's
@@ -161,12 +162,17 @@ type serverState struct {
 	// ensureSession fast path and shutdownRegistry teardown).
 	registry *session.Registry
 
-	// registryMu guards the ensureSession fast path and the pane
-	// size stored after first-attach. Held only across the create
-	// step; pumps do not hold it.
+	// registryMu guards the ensureSession fast path. Held only across
+	// the create step; pumps do not hold it.
 	registryMu sync.Mutex
-	paneCols   int
-	paneRows   int
+
+	// attachedMu guards attached and nextAttachID. Held briefly across
+	// every attach/resize/detach to apply the window-size=latest
+	// policy: the pane's dimensions track whichever client most
+	// recently attached or sent a Resize frame.
+	attachedMu   sync.Mutex
+	attached     map[uint64]*attachedClient
+	nextAttachID uint64
 
 	// shutdownMu guards shutdownReason and shutdownMessage. Both are
 	// written exactly once (by whichever actor initiates shutdown —
@@ -179,29 +185,36 @@ type serverState struct {
 	shutdownMessage string
 }
 
+// attachedClient is one live attach pump's recorded tty size. Used by
+// the latest-policy applier (see register / resizeAttached) to tell the
+// pane what dimensions to take. The pane's actual size is the only
+// source of truth for grid layout; this map exists only so we can keep
+// running totals as clients come and go.
+//
+// TODO(m1:server-window-size-options): when internal/options lands,
+// honor session.window-size = largest|smallest|manual in addition to
+// the current latest policy. The struct is the right shape for any of
+// them — only the chooser changes.
+type attachedClient struct {
+	cols int
+	rows int
+}
+
 // ensureSession returns the shared session's active pane, creating
-// the session + window + pane on first call. First-attach wins on
-// size: whichever client calls ensureSession first fixes the pane's
-// dimensions for the lifetime of the server. Every subsequent attach
-// sees the pane at that size regardless of its own tty, and the pump
-// silently ignores Resize frames from clients.
+// the session + window + pane on first call. The pane is opened at
+// (ident.InitialCols, ident.InitialRows-1); the actual ongoing size
+// is governed by the window-size=latest policy applied through
+// register / resizeAttached, not stored here.
 //
 // The returned *session.Session and *session.Window are the live
 // ones the caller should read names off for the status bar.
-//
-// TODO(m1:server-pane-resize-negotiation): replace first-attach-wins
-// with tmux-style min-across-clients shrinking so a small client
-// joining a session does not squeeze the larger ones, and a larger
-// client joining does not leave the rest looking at blank cells.
-func (s *serverState) ensureSession(ident *proto.Identify) (*session.Session, *session.Window, *pane.Pane, int, int, error) {
+func (s *serverState) ensureSession(ident *proto.Identify) (*session.Session, *session.Window, *pane.Pane, error) {
 	s.registryMu.Lock()
 	defer s.registryMu.Unlock()
 
-	// Fast path: registry already has the one session from a prior
-	// attach. Return its window's active pane at the recorded size.
 	if sess := s.registry.FindSessionByName("dmux"); sess != nil {
 		w := sess.CurrentWindow()
-		return sess, w, w.ActivePane(), s.paneCols, s.paneRows, nil
+		return sess, w, w.ActivePane(), nil
 	}
 
 	cols, rows := int(ident.InitialCols), int(ident.InitialRows)
@@ -211,7 +224,6 @@ func (s *serverState) ensureSession(ident *proto.Identify) (*session.Session, *s
 	if rows < 2 {
 		rows = 24
 	}
-	paneRows := rows - 1
 
 	argv := shellArgv()
 	p, err := pane.Open(s.ctx, pane.Config{
@@ -219,11 +231,11 @@ func (s *serverState) ensureSession(ident *proto.Identify) (*session.Session, *s
 		Cwd:  chooseCwd(ident.Cwd),
 		Env:  childEnv(ident.Env, ident.TermEnv),
 		Cols: cols,
-		Rows: paneRows,
+		Rows: rows - 1,
 		VT:   s.rt,
 	})
 	if err != nil {
-		return nil, nil, nil, 0, 0, fmt.Errorf("server: open pane: %w", err)
+		return nil, nil, nil, fmt.Errorf("server: open pane: %w", err)
 	}
 
 	// Wire up the object graph. NewSession / AddWindow only fail on
@@ -234,25 +246,84 @@ func (s *serverState) ensureSession(ident *proto.Identify) (*session.Session, *s
 	sess, err := s.registry.NewSession("dmux")
 	if err != nil {
 		_ = p.Close()
-		return nil, nil, nil, 0, 0, fmt.Errorf("server: new session: %w", err)
+		return nil, nil, nil, fmt.Errorf("server: new session: %w", err)
 	}
 	w, err := sess.AddWindow(filepath.Base(argv[0]))
 	if err != nil {
 		_ = p.Close()
 		s.registry.RemoveSession(sess.ID())
-		return nil, nil, nil, 0, 0, fmt.Errorf("server: add window: %w", err)
+		return nil, nil, nil, fmt.Errorf("server: add window: %w", err)
 	}
 	w.SetActivePane(p)
-
-	s.paneCols = cols
-	s.paneRows = rows
 
 	// Watch the pane for shell exit. When the child goes, mark the
 	// shutdown reason as ExitedShell so every attach pump writes the
 	// correct Exit category, then cancel the server ctx.
 	go s.watchPaneExit(p)
 
-	return sess, w, p, cols, rows, nil
+	return sess, w, p, nil
+}
+
+// register adds an attached client at (cols, rows) and applies the
+// window-size=latest policy: the pane is resized so its dimensions
+// match this client's tty (cols, rows-1; the -1 reserves the bottom
+// row for the status bar). Returns an id used by resizeAttached and
+// deregister to refer back to this client.
+//
+// The pane.Resize call signals every pump so older clients re-paint
+// against the new grid dimensions. They might be smaller or larger
+// than the new pane size; smaller ttys see the pane content wrap
+// (TODO(m1:server-pane-clip)), larger ones see padding around the
+// pane.
+func (s *serverState) register(p *pane.Pane, cols, rows int) (uint64, error) {
+	s.attachedMu.Lock()
+	defer s.attachedMu.Unlock()
+
+	id := s.nextAttachID
+	s.nextAttachID++
+	s.attached[id] = &attachedClient{cols: cols, rows: rows}
+
+	if cols <= 0 || rows < 2 {
+		return id, nil
+	}
+	if err := p.Resize(cols, rows-1); err != nil {
+		return id, fmt.Errorf("server: resize on attach: %w", err)
+	}
+	return id, nil
+}
+
+// resizeAttached updates the recorded size for id and re-applies the
+// latest policy. A Resize frame from the most recent client just
+// re-sizes the pane to the same dims; from an older client it makes
+// that one the new latest. Either way the pane and every pump's next
+// frame catch up to the requested size.
+func (s *serverState) resizeAttached(p *pane.Pane, id uint64, cols, rows int) error {
+	s.attachedMu.Lock()
+	defer s.attachedMu.Unlock()
+
+	c, ok := s.attached[id]
+	if !ok {
+		return nil
+	}
+	c.cols, c.rows = cols, rows
+
+	if cols <= 0 || rows < 2 {
+		return nil
+	}
+	if err := p.Resize(cols, rows-1); err != nil {
+		return fmt.Errorf("server: resize on client resize: %w", err)
+	}
+	return nil
+}
+
+// deregister drops id from the attached map. The latest policy does
+// NOT roll back to a prior client's size on detach — the pane stays
+// at whatever the most recent attach/resize set it to, and the next
+// event will move it again.
+func (s *serverState) deregister(id uint64) {
+	s.attachedMu.Lock()
+	defer s.attachedMu.Unlock()
+	delete(s.attached, id)
 }
 
 // watchPaneExit blocks on the pane's Exited channel and, when the
@@ -503,10 +574,11 @@ func handle(conn net.Conn, state *serverState) error {
 }
 
 // enterAttachPump is the attach-client path: ensure the shared
-// pane, subscribe for dirty signals, paint the initial frame, enter
-// pump. CommandResults were already acked by the caller (handle)
-// before this is invoked — entering pump means the command queue
-// drained successfully and at least one attach-family command
+// pane, register this client's tty size with the latest-policy
+// applier, subscribe for dirty signals, paint the initial frame,
+// enter pump. CommandResults were already acked by the caller
+// (handle) before this is invoked — entering pump means the command
+// queue drained successfully and at least one attach-family command
 // returned Ok.
 //
 // Multiple attach handlers run concurrently — there is no attach
@@ -520,7 +592,7 @@ func enterAttachPump(
 	frameW xio.FrameWriter,
 	state *serverState,
 ) error {
-	sess, w, p, cols, rows, err := state.ensureSession(ident)
+	sess, w, p, err := state.ensureSession(ident)
 	if err != nil {
 		_ = frameW.WriteFrame(&proto.Exit{
 			Reason:  proto.ExitServerExit,
@@ -529,26 +601,32 @@ func enterAttachPump(
 		return err
 	}
 
-	// Total rows includes the status line; the pane itself is rows-1
-	// cells tall (see ensureSession for the initial sizing).
-	totalRows := rows
+	cols, rows := int(ident.InitialCols), int(ident.InitialRows)
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows < 2 {
+		rows = 24
+	}
+
+	// Register with the window-size=latest applier. The pane is
+	// resized to (cols, rows-1) so this client's tty determines the
+	// session's grid dimensions until another attach or Resize moves
+	// it. The pane.Resize wakes every other pump's subscription.
+	attachID, err := state.register(p, cols, rows)
+	if err != nil {
+		_ = frameW.WriteFrame(&proto.Exit{
+			Reason:  proto.ExitServerExit,
+			Message: "register: " + err.Error(),
+		})
+		return err
+	}
+	defer state.deregister(attachID)
 
 	// Renderer per client. The profile came in on Identify; the client
 	// currently hard-codes Unknown (see client.handshake), which maps
 	// to the least-capable feature set — safe for every real terminal.
 	renderer := termout.NewRenderer(termcaps.Profile(ident.Profile))
-
-	// Status view: names come from the real session and window now.
-	// Current is always true in M1 because there is exactly one
-	// window in the session and the attached client is by definition
-	// looking at it.
-	sv := status.View{
-		Session:    sess.Name(),
-		WindowIdx:  w.Index(),
-		WindowName: w.Name(),
-		Current:    true,
-		Cols:       cols,
-	}
 
 	// Subscribe for dirty-signal wake-ups. Close on return removes
 	// this subscription so the pane's readLoop stops signaling a
@@ -567,11 +645,39 @@ func enterAttachPump(
 	// before the shell's first output lands. Without this, the user
 	// sees whatever was on their terminal before the attach until the
 	// prompt prints.
-	if err := renderAndSend(p, renderer, frameW, sv, totalRows); err != nil {
+	if err := renderAndSend(p, renderer, frameW, statusView(sess, w, cols), rows); err != nil {
 		return err
 	}
 
-	return pump(conn, p, sub, frameR, frameW, renderer, sv, totalRows, state)
+	return pump(pumpArgs{
+		conn:     conn,
+		pane:     p,
+		sub:      sub,
+		frameR:   frameR,
+		frameW:   frameW,
+		renderer: renderer,
+		sess:     sess,
+		win:      w,
+		cols:     cols,
+		rows:     rows,
+		attachID: attachID,
+		state:    state,
+	})
+}
+
+// statusView builds the status.View for one client at the given tty
+// width. Cols is the CLIENT's tty width (not the pane's) so the
+// status bar fits the client's tty exactly — even when the pane
+// dimensions differ from the client (e.g. an older client whose tty
+// no longer matches the latest-policy pane size).
+func statusView(sess *session.Session, w *session.Window, cols int) status.View {
+	return status.View{
+		Session:    sess.Name(),
+		WindowIdx:  w.Index(),
+		WindowName: w.Name(),
+		Current:    true,
+		Cols:       cols,
+	}
 }
 
 // renderAndSend formats the pane's current screen via libghostty-vt,
@@ -637,6 +743,24 @@ func readIdentify(r xio.FrameReader, w xio.FrameWriter) (*proto.Identify, error)
 	return ident, nil
 }
 
+// pumpArgs bundles the values pump needs. Grouped because the
+// argument list grew past comfort once cols/rows/sess/win/attachID
+// joined the original ctx + io plumbing.
+type pumpArgs struct {
+	conn     net.Conn
+	pane     *pane.Pane
+	sub      pane.Subscription
+	frameR   xio.FrameReader
+	frameW   xio.FrameWriter
+	renderer *termout.Renderer
+	sess     *session.Session
+	win      *session.Window
+	cols     int // initial client tty cols
+	rows     int // initial client tty rows
+	attachID uint64
+	state    *serverState
+}
+
 // pump is the render loop for one attached client. It owns frameW —
 // every WriteFrame call for this client happens on this goroutine,
 // so xio.FrameWriter's single-writer contract holds without extra
@@ -647,22 +771,22 @@ func readIdentify(r xio.FrameReader, w xio.FrameWriter) (*proto.Identify, error)
 // kill-server on another connection or the shell-exit watcher
 // cancels that ctx, pump reads state.shutdown() to pick the right
 // Exit category, writes it, and returns.
-func pump(
-	conn net.Conn,
-	p *pane.Pane,
-	sub pane.Subscription,
-	frameR xio.FrameReader,
-	frameW xio.FrameWriter,
-	renderer *termout.Renderer,
-	sv status.View,
-	totalRows int,
-	state *serverState,
-) (retErr error) {
+//
+// Each render uses the CLIENT's current tty cols and rows (not the
+// pane's) for the status bar's width and the renderer's totalRows.
+// Resize frames update the recorded size and feed the latest-policy
+// applier so the pane follows this client's new dimensions.
+func pump(a pumpArgs) (retErr error) {
 	// Per-connection ctx: cancels when the client disconnects so the
 	// reader goroutine unblocks. Separate from state.ctx so one
 	// client dropping does not tear the whole server down.
-	ctx, cancel := context.WithCancel(state.ctx)
+	ctx, cancel := context.WithCancel(a.state.ctx)
 	defer cancel()
+
+	// Pump-local mutable view of this client's tty dimensions. Resize
+	// updates these in place; renderAndSend reads them every frame.
+	cols := a.cols
+	rows := a.rows
 
 	// Reader goroutine: parse frames off the socket, deliver on
 	// inCh. A single-slot readErrCh carries the terminal error
@@ -675,7 +799,7 @@ func pump(
 		defer readerWG.Done()
 		defer close(inCh)
 		for {
-			f, err := frameR.ReadFrame()
+			f, err := a.frameR.ReadFrame()
 			if err != nil {
 				readErrCh <- err
 				return
@@ -694,7 +818,7 @@ func pump(
 	// and Run.shutdownRegistry is responsible for the final teardown.
 	defer func() {
 		cancel()
-		_ = conn.Close()
+		_ = a.conn.Close()
 		readerWG.Wait()
 	}()
 
@@ -705,7 +829,7 @@ func pump(
 			// or the pane's shell exited and the watcher canceled) —
 			// look up why and emit the right Exit category to this
 			// client.
-			reason, msg := state.shutdown()
+			reason, msg := a.state.shutdown()
 			if reason == 0 && msg == "" {
 				// Local-only cancel (deferred cancel with no
 				// shutdown recorded yet). Fall back to the generic
@@ -713,29 +837,30 @@ func pump(
 				reason = proto.ExitServerExit
 				msg = "server shutting down"
 			}
-			_ = frameW.WriteFrame(&proto.Exit{
+			_ = a.frameW.WriteFrame(&proto.Exit{
 				Reason:  reason,
 				Message: msg,
 			})
 			return nil
 
-		case _, ok := <-sub.Ch:
+		case _, ok := <-a.sub.Ch:
 			if !ok {
 				// Subscription channel closed: the pane's readLoop
 				// exited (child gone). The shell-exit watcher has
 				// either already fired or will in a moment; wait for
 				// ctx.Done on the next iteration rather than writing
 				// Exit here with no shutdown reason available yet.
-				sub.Ch = nil
+				a.sub.Ch = nil
 				continue
 			}
-			// Dirty signal: the vt.Terminal has new bytes since we
-			// last rendered. Re-render and send.
+			// Dirty signal: either the vt.Terminal has new bytes or
+			// pane.Resize fired (some other client became the latest).
+			// Re-render against this client's tty dims.
 			//
 			// TODO(m1:server-render-coalesce): drain any pending
 			// signals (non-blocking) before rendering so a burst
 			// produces one frame, not N.
-			if err := renderAndSend(p, renderer, frameW, sv, totalRows); err != nil {
+			if err := renderAndSend(a.pane, a.renderer, a.frameW, statusView(a.sess, a.win, cols), rows); err != nil {
 				return err
 			}
 
@@ -751,16 +876,21 @@ func pump(
 				}
 				return fmt.Errorf("server: read frame: %w", err)
 			}
-			// Resize from any attached client is ignored today. The
-			// first-attach-wins size is recorded on serverState and
-			// every pump renders against those dimensions; letting a
-			// second client resize would violate that invariant and
-			// confuse the first client. See ensureSession for the
-			// TODO(m1:server-pane-resize-negotiation) pointer.
-			if _, isResize := f.(*proto.Resize); isResize {
+			if rz, isResize := f.(*proto.Resize); isResize {
+				// Update recorded size + apply the latest policy.
+				// pane.Resize signals every pump (including this one)
+				// to re-paint at the new dims.
+				newCols, newRows := int(rz.Cols), int(rz.Rows)
+				if newCols <= 0 || newRows < 2 {
+					continue
+				}
+				cols, rows = newCols, newRows
+				if err := a.state.resizeAttached(a.pane, a.attachID, cols, rows); err != nil {
+					return err
+				}
 				continue
 			}
-			if err := dispatchClientFrame(f, p, frameW); err != nil {
+			if err := dispatchClientFrame(f, a.pane, a.frameW); err != nil {
 				return err
 			}
 			if _, isBye := f.(*proto.Bye); isBye {

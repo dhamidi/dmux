@@ -290,7 +290,10 @@ func (p *Pane) Write(b []byte) (int, error) {
 	return n, nil
 }
 
-// Resize forwards to pty.Resize.
+// Resize forwards to pty.Resize. Subscribers are signaled after a
+// successful resize so each client's pump re-paints against the new
+// grid dimensions; without this a window-size negotiation update would
+// not show on already-attached clients until the next pty byte landed.
 //
 // TODO(m1:pane-vt): in the full design (doc.go) this request goes
 // on controlCh so vt.Resize runs before pty.Resize. With no vt in
@@ -310,6 +313,7 @@ func (p *Pane) Resize(cols, rows int) error {
 	if err := p.pty.Resize(cols, rows); err != nil {
 		return paneErr(OpResize, nil, err, "cols=%d rows=%d", cols, rows)
 	}
+	p.signalDirty()
 	return nil
 }
 
