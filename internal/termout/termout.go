@@ -16,6 +16,11 @@ import (
 //     the formatter itself; this package only prepends the
 //     hide-cursor + home + erase-display preamble and appends a
 //     show-cursor postlude based on the live cursor visibility.
+//   - Status overlay: Wrap accepts a pre-rendered status cell-row and
+//     a target totalRows, paints it at the bottom of the client tty
+//     after the formatter output, and re-CUPs the cursor back onto
+//     the pane's cursor position so the cursor-visibility postlude
+//     lands at the right spot.
 //   - No diff rendering, no graphics routing, no per-pane compositing.
 //
 // TODO(m1:termout-diff): store previous bytes + fingerprint; on Render,
@@ -223,7 +228,8 @@ func writeKittyHeader(buf *bytes.Buffer, p vt.Placement, withDisplay, more bool)
 }
 
 // Wrap bookends the raw formatter output with the sequences every
-// dmux client's tty needs:
+// dmux client's tty needs, and overlays a status cell-row at the
+// bottom of the client's tty:
 //
 //   - CSI ?25 l: hide cursor during the paint to avoid flicker.
 //   - CSI H:     home the cursor so the formatter's row-by-row output
@@ -231,19 +237,40 @@ func writeKittyHeader(buf *bytes.Buffer, p vt.Placement, withDisplay, more bool)
 //   - CSI J:     erase to end of screen so trailing blank rows clear
 //                any stale content from the previous frame (the
 //                formatter trims trailing empty rows from its output).
+//   - formatted: the libghostty-vt formatter output, including the
+//                pane's own CUP to the pane cursor.
+//   - status:    when statusRow != nil, CUP to (totalRows, 1), write
+//                statusRow verbatim, then CUP back to the pane cursor
+//                at (cursor.Y+1, cursor.X+1) so the post-paint cursor
+//                sits where the pane expects.
 //   - CSI ?25 h: show cursor when the pane's cursor is visible. The
 //                formatter's own cursor-position sequence (CUP) is
 //                already inside `formatted`; we only toggle visibility.
 //
-// No \r\n is appended: the formatter's tail is either a CUP or the
-// last line's content, and either is a safe terminator that does not
-// scroll the real tty.
-func (r *Renderer) Wrap(formatted []byte, visible bool) []byte {
+// When statusRow is nil, the status overlay and the cursor-restore
+// CUP are skipped; behaviour matches the original Wrap signature so
+// callers that haven't wired status yet keep working.
+//
+// No \r\n is appended: the tail is either the cursor-restore CUP, the
+// formatter's own CUP, or the last line's content; all are safe
+// terminators that do not scroll the real tty.
+func (r *Renderer) Wrap(formatted []byte, cursor vt.Cursor, statusRow []byte, totalRows int) []byte {
 	var buf bytes.Buffer
-	buf.Grow(len(formatted) + 16)
+	buf.Grow(len(formatted) + len(statusRow) + 32)
 	buf.WriteString("\x1b[?25l\x1b[H\x1b[J")
 	buf.Write(formatted)
-	if visible {
+	if statusRow != nil {
+		buf.WriteString("\x1b[")
+		buf.WriteString(strconv.Itoa(totalRows))
+		buf.WriteString(";1H")
+		buf.Write(statusRow)
+		buf.WriteString("\x1b[")
+		buf.WriteString(strconv.Itoa(cursor.Y + 1))
+		buf.WriteByte(';')
+		buf.WriteString(strconv.Itoa(cursor.X + 1))
+		buf.WriteByte('H')
+	}
+	if cursor.Visible {
 		buf.WriteString("\x1b[?25h")
 	}
 	return buf.Bytes()

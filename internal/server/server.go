@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/pty"
 	"github.com/dhamidi/dmux/internal/socket"
+	"github.com/dhamidi/dmux/internal/status"
 	"github.com/dhamidi/dmux/internal/termcaps"
 	"github.com/dhamidi/dmux/internal/termout"
 	"github.com/dhamidi/dmux/internal/vt"
@@ -100,13 +102,20 @@ func handle(conn net.Conn, rt *vt.Runtime) error {
 	// The first CommandList sets initial dimensions. If the client
 	// didn't send them, fall back to 80x24 — this is the skeleton, a
 	// real client always sends real sizes from its tty.
+	//
+	// The pane gets rows-1 cells of vertical space; the last row is
+	// reserved for the status line that termout.Wrap paints on top of
+	// the formatter output. Anything below rows=2 would leave the pane
+	// with zero or negative rows, so clamp the floor.
 	cols, rows := int(ident.InitialCols), int(ident.InitialRows)
 	if cols <= 0 {
 		cols = 80
 	}
-	if rows <= 0 {
+	if rows < 2 {
 		rows = 24
 	}
+	paneRows := rows - 1
+	totalRows := rows
 
 	first, err := frameR.ReadFrame()
 	if err != nil {
@@ -129,7 +138,7 @@ func handle(conn net.Conn, rt *vt.Runtime) error {
 		Cwd:  chooseCwd(ident.Cwd),
 		Env:  childEnv(ident.Env, ident.TermEnv),
 		Cols: cols,
-		Rows: rows,
+		Rows: paneRows,
 		VT:   rt,
 	})
 	if err != nil {
@@ -160,17 +169,32 @@ func handle(conn net.Conn, rt *vt.Runtime) error {
 	// to the least-capable feature set — safe for every real terminal.
 	renderer := termout.NewRenderer(termcaps.Profile(ident.Profile))
 
+	// Status view for the single-window walking skeleton. Session and
+	// window names are hardcoded today — the session registry that
+	// owns real names does not exist yet.
+	// TODO(m1:status-session-name): replace "dmux" with the real
+	// session the client attached to once internal/session lands.
+	// TODO(m1:status-window-name): derive the window name from the
+	// pane's command/title once internal/window lands.
+	sv := status.View{
+		Session:    "dmux",
+		WindowIdx:  0,
+		WindowName: filepath.Base(shellArgv()[0]),
+		Current:    true,
+		Cols:       cols,
+	}
+
 	// Paint the initial (blank) frame so the client's tty is clean
 	// before the shell's first output lands. Without this, the user
 	// sees whatever was on their terminal before the attach until the
 	// prompt prints.
-	if err := renderAndSend(p, renderer, frameW); err != nil {
+	if err := renderAndSend(p, renderer, frameW, sv, totalRows); err != nil {
 		cancel()
 		_ = p.Close()
 		return err
 	}
 
-	return pump(ctx, cancel, conn, p, frameR, frameW, renderer)
+	return pump(ctx, cancel, conn, p, frameR, frameW, renderer, sv, totalRows)
 }
 
 // renderAndSend formats the pane's current screen via libghostty-vt,
@@ -193,7 +217,7 @@ func handle(conn net.Conn, rt *vt.Runtime) error {
 // produces several full-frame repaints when one would do. Add a small
 // coalescing timer (a few ms) so consecutive chunks fold into one
 // render.
-func renderAndSend(p *pane.Pane, r *termout.Renderer, w xio.FrameWriter) error {
+func renderAndSend(p *pane.Pane, r *termout.Renderer, w xio.FrameWriter, sv status.View, totalRows int) error {
 	formatted, err := p.Format(r.FormatOptions())
 	if err != nil {
 		return fmt.Errorf("server: format: %w", err)
@@ -206,7 +230,8 @@ func renderAndSend(p *pane.Pane, r *termout.Renderer, w xio.FrameWriter) error {
 	if err != nil {
 		return fmt.Errorf("server: placements: %w", err)
 	}
-	data := r.Wrap(formatted, cur.Visible)
+	statusRow := status.Render(sv)
+	data := r.Wrap(formatted, cur, statusRow, totalRows)
 	if kitty := r.EmitKitty(placements); len(kitty) > 0 {
 		data = append(data, kitty...)
 	}
@@ -248,6 +273,8 @@ func pump(
 	frameR xio.FrameReader,
 	frameW xio.FrameWriter,
 	renderer *termout.Renderer,
+	sv status.View,
+	totalRows int,
 ) (retErr error) {
 	// Reader goroutine: parse frames off the socket, deliver on
 	// inCh. A single-slot readErrCh carries the terminal error
@@ -314,7 +341,7 @@ func pump(
 			// TODO(m1:server-render-coalesce): drain additional pending
 			// chunks from paneBytes (non-blocking) before rendering so
 			// a burst produces one frame, not N.
-			if err := renderAndSend(p, renderer, frameW); err != nil {
+			if err := renderAndSend(p, renderer, frameW, sv, totalRows); err != nil {
 				return err
 			}
 
@@ -344,6 +371,26 @@ func pump(
 				}
 				return fmt.Errorf("server: read frame: %w", err)
 			}
+			// Resize is handled inline because it mutates three pieces
+			// of render state (pane rows, status cols, totalRows) that
+			// must stay consistent for the next renderAndSend.
+			if rs, isResize := f.(*proto.Resize); isResize {
+				newCols := int(rs.Cols)
+				newRows := int(rs.Rows)
+				if newCols < 1 {
+					newCols = 1
+				}
+				if newRows < 2 {
+					newRows = 2
+				}
+				_ = p.Resize(newCols, newRows-1)
+				totalRows = newRows
+				sv.Cols = newCols
+				if err := renderAndSend(p, renderer, frameW, sv, totalRows); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := dispatchClientFrame(f, p, frameW); err != nil {
 				return err
 			}
@@ -365,10 +412,6 @@ func dispatchClientFrame(f proto.Frame, p *pane.Pane, w xio.FrameWriter) error {
 		// Short write or ErrClosed here means the pane went away; the
 		// Exited arm will observe that and emit Exit on its own.
 		_, _ = p.Write(m.Data)
-		return nil
-
-	case *proto.Resize:
-		_ = p.Resize(int(m.Cols), int(m.Rows))
 		return nil
 
 	case *proto.CommandList:
