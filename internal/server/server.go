@@ -18,6 +18,7 @@ import (
 	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/pty"
+	"github.com/dhamidi/dmux/internal/session"
 	"github.com/dhamidi/dmux/internal/socket"
 	"github.com/dhamidi/dmux/internal/status"
 	"github.com/dhamidi/dmux/internal/termcaps"
@@ -43,11 +44,12 @@ import (
 //     kill-server acks StatusOk, sets serverState.shutdownReason to
 //     ExitServerExit, cancels the server ctx, and returns — every
 //     attach pump observes ctx.Done and writes its own Exit frame.
-//   - No cmdq, no session registry, no window, no options. Argv[0]
-//     of each Command is ignored by the attach path; the first
-//     CommandList on the first attach triggers the single shell
-//     pane. Any further CommandList answers StatusOk without doing
-//     anything.
+//   - One session, one window, one pane, threaded through
+//     internal/session. The first attach creates session "dmux",
+//     adds a window named after the shell's argv[0], spawns the
+//     pane, and sets it as the window's active pane. Subsequent
+//     attaches reuse the same objects via the registry. No options
+//     layer yet; cwd / env / shell come from the server process.
 //   - doc.go still describes the full event-loop design with a main
 //     goroutine, cmd registry, and session registry. This file is the
 //     walking-skeleton stub. Search for TODO(m1:server-*) for the
@@ -78,9 +80,10 @@ func Run(path string) error {
 	defer rt.Close(ctx)
 
 	state := &serverState{
-		ctx:    ctx,
-		cancel: cancel,
-		rt:     rt,
+		ctx:      ctx,
+		cancel:   cancel,
+		rt:       rt,
+		registry: session.NewRegistry(),
 	}
 
 	// Closer goroutine: when ctx is canceled (kill-server or Run's
@@ -131,26 +134,39 @@ func Run(path string) error {
 	// Every client goroutine has drained — safe to tear the pane
 	// (and its vt.Terminal) down now, after the final pumps have
 	// already returned.
-	state.shutdownPane()
+	state.shutdownRegistry()
 	return nil
 }
 
 // serverState is the per-server shared state threaded through every
 // per-connection goroutine. The M1 walking skeleton keeps this small:
-// a shared ctx + cancel, the wasm runtime, the one shared pane (lazy),
-// and the shutdown-reason handoff used to categorize Exit frames on
-// every attach pump at shutdown time.
+// a shared ctx + cancel, the wasm runtime, the session registry (one
+// session, one window, one pane in M1), and the shutdown-reason
+// handoff used to categorize Exit frames on every attach pump at
+// shutdown time.
+//
+// The one-and-only pane now lives behind the registry:
+// registry → Session → Window → ActivePane. ensureSession creates
+// them on first attach and watchPaneExit observes the pane's
+// lifecycle so the shell-exit case cancels the server ctx.
 type serverState struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	rt     *vt.Runtime
 
-	// paneMu guards pane/paneCols/paneRows. Held only across the
-	// pane-ensure fast path; pumps do not hold it.
-	paneMu   sync.Mutex
-	pane     *pane.Pane
-	paneCols int
-	paneRows int
+	// registry owns the session / window / pane object graph. Its
+	// methods are NOT safe for concurrent use (see
+	// internal/session); registryMu below protects the subset the
+	// server touches from more than one connection goroutine (the
+	// ensureSession fast path and shutdownRegistry teardown).
+	registry *session.Registry
+
+	// registryMu guards the ensureSession fast path and the pane
+	// size stored after first-attach. Held only across the create
+	// step; pumps do not hold it.
+	registryMu sync.Mutex
+	paneCols   int
+	paneRows   int
 
 	// shutdownMu guards shutdownReason and shutdownMessage. Both are
 	// written exactly once (by whichever actor initiates shutdown —
@@ -163,22 +179,29 @@ type serverState struct {
 	shutdownMessage string
 }
 
-// ensurePane returns the shared pane, spawning it on first call.
-// First-attach wins on size: whichever client calls ensurePane first
-// fixes the pane's dimensions for the lifetime of the server. Every
-// subsequent attach sees the pane at that size regardless of its own
-// tty, and the pump silently ignores Resize frames from clients.
+// ensureSession returns the shared session's active pane, creating
+// the session + window + pane on first call. First-attach wins on
+// size: whichever client calls ensureSession first fixes the pane's
+// dimensions for the lifetime of the server. Every subsequent attach
+// sees the pane at that size regardless of its own tty, and the pump
+// silently ignores Resize frames from clients.
+//
+// The returned *session.Session and *session.Window are the live
+// ones the caller should read names off for the status bar.
 //
 // TODO(m1:server-pane-resize-negotiation): replace first-attach-wins
 // with tmux-style min-across-clients shrinking so a small client
 // joining a session does not squeeze the larger ones, and a larger
 // client joining does not leave the rest looking at blank cells.
-func (s *serverState) ensurePane(ident *proto.Identify) (*pane.Pane, int, int, error) {
-	s.paneMu.Lock()
-	defer s.paneMu.Unlock()
+func (s *serverState) ensureSession(ident *proto.Identify) (*session.Session, *session.Window, *pane.Pane, int, int, error) {
+	s.registryMu.Lock()
+	defer s.registryMu.Unlock()
 
-	if s.pane != nil {
-		return s.pane, s.paneCols, s.paneRows, nil
+	// Fast path: registry already has the one session from a prior
+	// attach. Return its window's active pane at the recorded size.
+	if sess := s.registry.FindSessionByName("dmux"); sess != nil {
+		w := sess.CurrentWindow()
+		return sess, w, w.ActivePane(), s.paneCols, s.paneRows, nil
 	}
 
 	cols, rows := int(ident.InitialCols), int(ident.InitialRows)
@@ -190,8 +213,9 @@ func (s *serverState) ensurePane(ident *proto.Identify) (*pane.Pane, int, int, e
 	}
 	paneRows := rows - 1
 
+	argv := shellArgv()
 	p, err := pane.Open(s.ctx, pane.Config{
-		Argv: shellArgv(),
+		Argv: argv,
 		Cwd:  chooseCwd(ident.Cwd),
 		Env:  childEnv(ident.Env, ident.TermEnv),
 		Cols: cols,
@@ -199,10 +223,27 @@ func (s *serverState) ensurePane(ident *proto.Identify) (*pane.Pane, int, int, e
 		VT:   s.rt,
 	})
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("server: open pane: %w", err)
+		return nil, nil, nil, 0, 0, fmt.Errorf("server: open pane: %w", err)
 	}
 
-	s.pane = p
+	// Wire up the object graph. NewSession / AddWindow only fail on
+	// duplicate-name, which cannot happen here: the fast path above
+	// short-circuits when "dmux" already exists. Any error is a
+	// logic bug, so wrap with %w and surface to the caller — they
+	// will translate to an Exit frame.
+	sess, err := s.registry.NewSession("dmux")
+	if err != nil {
+		_ = p.Close()
+		return nil, nil, nil, 0, 0, fmt.Errorf("server: new session: %w", err)
+	}
+	w, err := sess.AddWindow(filepath.Base(argv[0]))
+	if err != nil {
+		_ = p.Close()
+		s.registry.RemoveSession(sess.ID())
+		return nil, nil, nil, 0, 0, fmt.Errorf("server: add window: %w", err)
+	}
+	w.SetActivePane(p)
+
 	s.paneCols = cols
 	s.paneRows = rows
 
@@ -211,7 +252,7 @@ func (s *serverState) ensurePane(ident *proto.Identify) (*pane.Pane, int, int, e
 	// correct Exit category, then cancel the server ctx.
 	go s.watchPaneExit(p)
 
-	return p, cols, rows, nil
+	return sess, w, p, cols, rows, nil
 }
 
 // watchPaneExit blocks on the pane's Exited channel and, when the
@@ -253,15 +294,23 @@ func (s *serverState) shutdown() (proto.ExitReason, string) {
 	return s.shutdownReason, s.shutdownMessage
 }
 
-// shutdownPane closes the pane if one was ever spawned. Called from
-// Run's defer path after every per-connection goroutine has drained,
-// so there are no concurrent readers or writers racing the close.
-func (s *serverState) shutdownPane() {
-	s.paneMu.Lock()
-	p := s.pane
-	s.paneMu.Unlock()
-	if p != nil {
-		_ = p.Close()
+// shutdownRegistry walks every session's window's active pane and
+// closes it. Called from Run's defer path after every per-connection
+// goroutine has drained, so there are no concurrent readers or
+// writers racing the close. M1 has at most one session / one window /
+// one pane, but the loop is written against the registry's iterator
+// so it keeps working as the graph grows.
+func (s *serverState) shutdownRegistry() {
+	s.registryMu.Lock()
+	defer s.registryMu.Unlock()
+	for sess := range s.registry.Sessions() {
+		w := sess.CurrentWindow()
+		if w == nil {
+			continue
+		}
+		if p := w.ActivePane(); p != nil {
+			_ = p.Close()
+		}
 	}
 }
 
@@ -293,18 +342,16 @@ func (i *serverItem) Shutdown(message string) {
 }
 
 // HasSession reports whether the server owns a session to attach
-// to. The M1 walking-skeleton server has one implicit session that
-// exists from the moment Run starts — the shell pane is lazily
-// spawned on first attach via ensurePane, but the "there is a
-// session here" invariant is true any time this server is
-// answering a connection. Returning true matches the pre-refactor
-// behavior where attach-session from a fresh server enters pump
-// and spawns the pane in the process.
+// to. With the session registry in place this is a real predicate:
+// attach-session on a fresh server (empty registry) returns
+// cmd.ErrNotFound, matching tmux's "no sessions" behavior. The
+// default client invocation is new-session (see
+// cmd/dmux.buildClientOptions) so bare `dmux` still spawns the
+// first pane on a fresh server.
 //
-// TODO(m1:server-session-registry): consult internal/session for
-// the real lookup once it lands; then attach-session with no
-// sessions returns ErrNotFound naturally.
-func (i *serverItem) HasSession() bool { return true }
+// TODO(m1:server-session-target): consult the target-specific
+// session once -t parsing lands. M1 checks presence, not identity.
+func (i *serverItem) HasSession() bool { return i.state.registry.Len() > 0 }
 
 // shutdownRequested is the read side of the local bit set by
 // Shutdown. Separate from serverState.shutdown() because we only
@@ -473,7 +520,7 @@ func enterAttachPump(
 	frameW xio.FrameWriter,
 	state *serverState,
 ) error {
-	p, cols, rows, err := state.ensurePane(ident)
+	sess, w, p, cols, rows, err := state.ensureSession(ident)
 	if err != nil {
 		_ = frameW.WriteFrame(&proto.Exit{
 			Reason:  proto.ExitServerExit,
@@ -483,7 +530,7 @@ func enterAttachPump(
 	}
 
 	// Total rows includes the status line; the pane itself is rows-1
-	// cells tall (see ensurePane for the initial sizing).
+	// cells tall (see ensureSession for the initial sizing).
 	totalRows := rows
 
 	// Renderer per client. The profile came in on Identify; the client
@@ -491,17 +538,14 @@ func enterAttachPump(
 	// to the least-capable feature set — safe for every real terminal.
 	renderer := termout.NewRenderer(termcaps.Profile(ident.Profile))
 
-	// Status view for the single-window walking skeleton. Session and
-	// window names are hardcoded today — the session registry that
-	// owns real names does not exist yet.
-	// TODO(m1:status-session-name): replace "dmux" with the real
-	// session the client attached to once internal/session lands.
-	// TODO(m1:status-window-name): derive the window name from the
-	// pane's command/title once internal/window lands.
+	// Status view: names come from the real session and window now.
+	// Current is always true in M1 because there is exactly one
+	// window in the session and the attached client is by definition
+	// looking at it.
 	sv := status.View{
-		Session:    "dmux",
-		WindowIdx:  0,
-		WindowName: filepath.Base(shellArgv()[0]),
+		Session:    sess.Name(),
+		WindowIdx:  w.Index(),
+		WindowName: w.Name(),
 		Current:    true,
 		Cols:       cols,
 	}
@@ -647,7 +691,7 @@ func pump(
 	// Shut the reader down on the way out: closing the conn unblocks
 	// the reader's ReadFrame, after which readerWG can return. The
 	// pane itself is NOT closed here — it is shared across clients,
-	// and Run.shutdownPane is responsible for the final teardown.
+	// and Run.shutdownRegistry is responsible for the final teardown.
 	defer func() {
 		cancel()
 		_ = conn.Close()
@@ -711,7 +755,7 @@ func pump(
 			// first-attach-wins size is recorded on serverState and
 			// every pump renders against those dimensions; letting a
 			// second client resize would violate that invariant and
-			// confuse the first client. See ensurePane for the
+			// confuse the first client. See ensureSession for the
 			// TODO(m1:server-pane-resize-negotiation) pointer.
 			if _, isResize := f.(*proto.Resize); isResize {
 				continue
