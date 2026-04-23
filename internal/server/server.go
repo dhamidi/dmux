@@ -24,73 +24,165 @@ import (
 
 // Current scope (M1 walking skeleton):
 //
-//   - Accept one client. Require Identify first. On the first
-//     CommandList, spawn a single pane running $SHELL (fallback
-//     /bin/sh) at the client's initial dimensions. Fan Input frames
-//     into pane.Write, fan pane.Bytes() into Output frames, route
-//     Resize into pane.Resize. On client Bye or pane exit, send Exit
-//     and return.
+//   - Accept loop. The server binds the socket once, creates one shared
+//     vt.Runtime and one serverState, then loops on Accept spawning a
+//     goroutine per connection. On ctx cancellation (kill-server) the
+//     listener is closed so Accept unblocks; Run waits for every
+//     per-client goroutine to drain before returning.
+//   - One attach client at a time. A sync.Mutex-guarded flag in
+//     serverState.attachInUse marks the attach slot: a second attach is
+//     refused with Exit{ServerExit, "another client is attached"}. M1's
+//     acceptance criteria only ask for one session, so there is no
+//     pane-sharing or multi-viewer work here.
+//   - Command-only clients (e.g. "dmux kill-server") share the Accept
+//     loop but never take the attach slot and never spawn a pane.
+//     kill-server acks StatusOk, writes Exit{ServerExit, "kill-server"},
+//     cancels the server ctx, and returns — pump on any other
+//     connection observes ctx.Done and tears its pane down.
 //   - No cmdq, no session registry, no window, no options. Argv[0]
-//     of each Command is ignored; the first CommandList triggers the
-//     single shell pane. Any further CommandList answers StatusOk
-//     without doing anything.
-//   - doc.go still describes the full event-loop design with multiple
-//     clients, panes, and sessions. This file is the walking-skeleton
-//     stub. Search for TODO(m1:server-*) for the replacement points.
+//     of each Command is ignored by the attach path; the first
+//     CommandList on an attach connection triggers the single shell
+//     pane. Any further CommandList answers StatusOk without doing
+//     anything.
+//   - doc.go still describes the full event-loop design with a main
+//     goroutine, cmd registry, and session registry. This file is the
+//     walking-skeleton stub. Search for TODO(m1:server-*) for the
+//     replacement points.
 
 // Run is the M1 walking-skeleton server entry point. It binds the
-// AF_UNIX socket at path, accepts exactly one client, runs a single
-// shell pane over that connection, and returns when the client
-// departs or the pane exits.
-//
-// TODO(m1:server-accept-loop): the real server loops on Accept and
-// spawns per-client state. For M1 one client at a time is enough to
-// exercise the full byte-pump path end-to-end.
+// AF_UNIX socket at path, loops on Accept, and runs one goroutine per
+// connection under a shared context. Run returns when the context is
+// canceled (kill-server) and every per-connection goroutine has
+// finished, or when the initial bind/runtime setup fails.
 func Run(path string) error {
 	l, err := socket.Listen(path)
 	if err != nil {
 		return fmt.Errorf("server: listen: %w", err)
 	}
-	defer l.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// One Runtime per server process: compiling the wasm module is
 	// expensive, and each Terminal gets its own Module instance anyway
 	// so the runtime is safe to share across panes.
-	rtCtx := context.Background()
-	rt, err := vt.NewRuntime(rtCtx)
+	rt, err := vt.NewRuntime(ctx)
 	if err != nil {
+		l.Close()
 		return fmt.Errorf("server: vt runtime: %w", err)
 	}
-	defer rt.Close(rtCtx)
+	defer rt.Close(ctx)
 
-	conn, err := l.Accept()
-	if err != nil {
-		return fmt.Errorf("server: accept: %w", err)
+	state := &serverState{
+		ctx:    ctx,
+		cancel: cancel,
+		rt:     rt,
 	}
-	// Safety-net close. pump closes the conn explicitly on the main
-	// success path so that readerWG.Wait can observe the reader
-	// goroutine unblocking; this defer covers error paths between
-	// Accept and pump and is a no-op after an earlier Close.
-	defer conn.Close()
-	return handle(conn, rt)
+
+	// Closer goroutine: when ctx is canceled (kill-server or Run's
+	// defer), close the listener so the Accept loop unblocks. Without
+	// this the Accept call would park forever.
+	listenerClosed := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		_ = l.Close()
+		close(listenerClosed)
+	}()
+
+	var connWG sync.WaitGroup
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			// Accept returns an error once Close is called. That is the
+			// only clean exit path; every other error is also terminal
+			// because we have no way to rebind the socket.
+			if ctx.Err() != nil {
+				break
+			}
+			// Unexpected Accept error: stop accepting new clients and
+			// let existing ones drain.
+			cancel()
+			break
+		}
+		connWG.Add(1)
+		go func(c net.Conn) {
+			defer connWG.Done()
+			defer c.Close()
+			if err := handle(c, state); err != nil {
+				// The server process has nowhere to log yet — stderr is
+				// /dev/null on the detached child. Per-connection errors
+				// are surfaced to the client via Exit frames in handle;
+				// swallowing here is intentional.
+				_ = err
+			}
+		}(conn)
+	}
+
+	// Make sure the listener goroutine has exited before returning so
+	// the socket file is gone by the time the caller observes Run's
+	// return value.
+	<-listenerClosed
+	connWG.Wait()
+	return nil
 }
 
-// handle runs one client. Sequence:
+// serverState is the per-server shared state threaded through every
+// per-connection goroutine. The M1 walking skeleton keeps this small:
+// a shared ctx + cancel, the wasm runtime, and a mutex-guarded attach
+// slot. The real server will carry session/window registries, the
+// command queue, and key tables here.
+//
+// TODO(m1:server-cmd-registry): replace the hardcoded "kill-server"
+// string match in handle with a lookup into the cmd registry that
+// docs/m1.md describes (internal/cmd + internal/cmd/killserver).
+type serverState struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	rt     *vt.Runtime
+
+	// attachMu guards attachInUse. Held only briefly around the
+	// take/release transitions; the pump loop does not hold it.
+	attachMu     sync.Mutex
+	attachInUse  bool
+}
+
+// tryTakeAttach claims the single attach slot. Returns true on success;
+// false means another client already holds it.
+func (s *serverState) tryTakeAttach() bool {
+	s.attachMu.Lock()
+	defer s.attachMu.Unlock()
+	if s.attachInUse {
+		return false
+	}
+	s.attachInUse = true
+	return true
+}
+
+// releaseAttach frees the attach slot. Always paired with a successful
+// tryTakeAttach; calling it when the slot is already free is a no-op so
+// defers stay trivial even on error paths.
+func (s *serverState) releaseAttach() {
+	s.attachMu.Lock()
+	defer s.attachMu.Unlock()
+	s.attachInUse = false
+}
+
+// handle runs one client connection. Sequence:
 //
 //  1. Read Identify. Anything else → Exit{ProtocolError}.
-//  2. Read CommandList. Reply with StatusOk per command. The first
-//     CommandList spawns the shell pane at Identify's InitialCols /
-//     InitialRows. Further CommandLists are accepted but do not
-//     spawn additional panes.
-//  3. Enter the byte-pump: client frames (Input / Resize / Bye /
-//     further CommandList) arrive on inCh from a reader goroutine;
-//     pane output flows from pane.Bytes(); pane exit flows from
-//     pane.Exited(). Everything funnels into frameW.WriteFrame, which
-//     this goroutine owns.
-//  4. On Bye → Exit{Detached}; on pane exit → Exit{ExitedShell}; on
-//     client-side EOF → return without sending Exit (connection is
-//     already gone).
-func handle(conn net.Conn, rt *vt.Runtime) error {
+//  2. Read the first CommandList. Dispatch by Commands[0].Argv[0]:
+//     - "kill-server": ack StatusOk for every command, write
+//       Exit{ServerExit, "kill-server"}, cancel the server ctx, and
+//       return. No pane is spawned.
+//     - anything else (attach-session, new-session, empty argv): take
+//       the attach slot. If already held, write
+//       Exit{ServerExit, "another client is attached"} and return.
+//       Otherwise spawn the shell pane, ack commands, paint the
+//       initial frame, and enter pump.
+//  3. pump runs the byte-pump until the pane exits, the client sends
+//     Bye, the connection drops, or the server ctx is canceled
+//     (kill-server on another connection).
+func handle(conn net.Conn, state *serverState) error {
 	frameR := xio.NewReader(conn)
 	frameW := xio.NewWriter(conn)
 
@@ -99,9 +191,91 @@ func handle(conn net.Conn, rt *vt.Runtime) error {
 		return err
 	}
 
+	first, err := frameR.ReadFrame()
+	if err != nil {
+		return fmt.Errorf("server: read CommandList: %w", err)
+	}
+	cl, ok := first.(*proto.CommandList)
+	if !ok {
+		_ = frameW.WriteFrame(&proto.Exit{
+			Reason:  proto.ExitProtocolError,
+			Message: "expected CommandList, got " + first.Type().String(),
+		})
+		return fmt.Errorf("server: protocol error: second frame was %s", first.Type())
+	}
+
+	if isKillServer(cl) {
+		return handleKillServer(cl, frameW, state)
+	}
+
+	return handleAttach(ident, cl, conn, frameR, frameW, state)
+}
+
+// isKillServer returns true when the first command's argv is exactly
+// ["kill-server"]. Anything else falls through to the attach path.
+//
+// TODO(m1:server-cmd-registry): the real server looks every command up
+// in the cmd registry (internal/cmd) and dispatches through cmdq.
+// Hardcoding the string here is the walking-skeleton shortcut.
+func isKillServer(cl *proto.CommandList) bool {
+	if len(cl.Commands) == 0 {
+		return false
+	}
+	argv := cl.Commands[0].Argv
+	return len(argv) >= 1 && argv[0] == "kill-server"
+}
+
+// handleKillServer acks every command in the list with StatusOk, writes
+// a final Exit{ServerExit}, then cancels the server ctx so the Run
+// loop closes the listener and any concurrent attach connection tears
+// down.
+func handleKillServer(cl *proto.CommandList, w xio.FrameWriter, state *serverState) error {
+	for _, cmd := range cl.Commands {
+		if err := w.WriteFrame(&proto.CommandResult{
+			ID:     cmd.ID,
+			Status: proto.StatusOk,
+		}); err != nil {
+			// Even if we can't tell this client, still cancel so the
+			// server process exits.
+			state.cancel()
+			return fmt.Errorf("server: write CommandResult: %w", err)
+		}
+	}
+	if err := w.WriteFrame(&proto.Exit{
+		Reason:  proto.ExitServerExit,
+		Message: "kill-server",
+	}); err != nil {
+		state.cancel()
+		return fmt.Errorf("server: write Exit: %w", err)
+	}
+	state.cancel()
+	return nil
+}
+
+// handleAttach is the attach-client path: take the attach slot, spawn a
+// pane, ack commands, paint the initial frame, enter pump. On return,
+// whether successful or not, releases the attach slot for the next
+// client.
+func handleAttach(
+	ident *proto.Identify,
+	cl *proto.CommandList,
+	conn net.Conn,
+	frameR xio.FrameReader,
+	frameW xio.FrameWriter,
+	state *serverState,
+) error {
+	if !state.tryTakeAttach() {
+		_ = frameW.WriteFrame(&proto.Exit{
+			Reason:  proto.ExitServerExit,
+			Message: "another client is attached",
+		})
+		return nil
+	}
+	defer state.releaseAttach()
+
 	// The first CommandList sets initial dimensions. If the client
 	// didn't send them, fall back to 80x24 — this is the skeleton, a
-	// real client always sends real sizes from its tty.
+	// real attach client always sends real sizes from its tty.
 	//
 	// The pane gets rows-1 cells of vertical space; the last row is
 	// reserved for the status line that termout.Wrap paints on top of
@@ -117,20 +291,10 @@ func handle(conn net.Conn, rt *vt.Runtime) error {
 	paneRows := rows - 1
 	totalRows := rows
 
-	first, err := frameR.ReadFrame()
-	if err != nil {
-		return fmt.Errorf("server: read CommandList: %w", err)
-	}
-	cl, ok := first.(*proto.CommandList)
-	if !ok {
-		_ = frameW.WriteFrame(&proto.Exit{
-			Reason:  proto.ExitProtocolError,
-			Message: "expected CommandList, got " + first.Type().String(),
-		})
-		return fmt.Errorf("server: protocol error: second frame was %s", first.Type())
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
+	// Per-connection ctx is a child of the server ctx so kill-server
+	// on another connection propagates down here: pump selects on
+	// this ctx and closes the pane when it fires.
+	ctx, cancel := context.WithCancel(state.ctx)
 	defer cancel()
 
 	p, err := pane.Open(ctx, pane.Config{
@@ -139,7 +303,7 @@ func handle(conn net.Conn, rt *vt.Runtime) error {
 		Env:  childEnv(ident.Env, ident.TermEnv),
 		Cols: cols,
 		Rows: paneRows,
-		VT:   rt,
+		VT:   state.rt,
 	})
 	if err != nil {
 		msg := err.Error()
@@ -265,6 +429,12 @@ func readIdentify(r xio.FrameReader, w xio.FrameWriter) (*proto.Identify, error)
 // goroutine, so xio.FrameWriter's single-writer contract holds
 // without extra locking. Reader and pane-output goroutines feed this
 // loop via channels.
+//
+// pump also observes the server-wide ctx (threaded in via the per-
+// connection ctx, which is a child of state.ctx). When kill-server on
+// another connection cancels that ctx, pump writes
+// Exit{ServerExit, "server shutting down"} and returns; the deferred
+// teardown closes the pane.
 func pump(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -327,6 +497,17 @@ func pump(
 
 	for {
 		select {
+		case <-ctx.Done():
+			// Server ctx canceled (kill-server on another connection)
+			// or this connection's ctx canceled for local reasons.
+			// Announce Exit{ServerExit} so the attach client prints a
+			// sensible summary, then return; defer tears the pane down.
+			_ = frameW.WriteFrame(&proto.Exit{
+				Reason:  proto.ExitServerExit,
+				Message: "server shutting down",
+			})
+			return nil
+
 		case _, ok := <-paneBytes:
 			if !ok {
 				// Pane reader finished. Wait for Exited (or for the
@@ -418,8 +599,9 @@ func dispatchClientFrame(f proto.Frame, p *pane.Pane, w xio.FrameWriter) error {
 		// Extra CommandLists after the pane is spawned: ack StatusOk
 		// so the client's bookkeeping stays consistent. No-op on the
 		// server side — there's still only one pane.
-		// TODO(m1:server-cmdq): route through the real cmd registry
-		// once it exists.
+		// TODO(m1:server-cmd-registry): route through the real cmd
+		// registry once it exists; this is the same hardcoded path as
+		// handleKillServer but for in-session CommandLists.
 		for _, cmd := range m.Commands {
 			if err := w.WriteFrame(&proto.CommandResult{
 				ID:     cmd.ID,

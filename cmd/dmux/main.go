@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/dhamidi/dmux/internal/socket"
 	"github.com/dhamidi/dmux/internal/sockpath"
 	"github.com/dhamidi/dmux/internal/tty"
+	"github.com/dhamidi/dmux/internal/xio"
 )
 
 func main() {
@@ -68,6 +70,19 @@ func clientMain() error {
 	}
 	defer conn.Close()
 
+	// Split on the first non-flag argv element. "dmux" and
+	// "dmux -S X" both come through with flag.NArg()==0 — those
+	// hit the attach path. "dmux kill-server" and any future
+	// command-only invocation land on the command-only path,
+	// which must not open the tty.
+	//
+	// TODO(m1:server-cmd-registry): once internal/cmd exists, the
+	// dispatch here shrinks to "build argv, send CommandList, wait
+	// for results" regardless of the command name — every name in
+	// the registry just routes through the same wire path.
+	if flag.NArg() > 0 {
+		return runCommand(conn, flag.Args())
+	}
 	return attach(conn)
 }
 
@@ -146,6 +161,88 @@ func attach(conn net.Conn) error {
 
 	printExitSummary(res)
 	return nil
+}
+
+// runCommand is the command-only client path: "dmux kill-server" and
+// any other non-attach invocation. It is deliberately minimal and
+// does not touch the tty — no raw mode, no alt screen. The server
+// either acks and tears down (kill-server) or answers with a
+// command's StatusOk/StatusError chain and then Exit.
+//
+// Sequence:
+//
+//  1. Send Identify with InitialCols=InitialRows=0. Zeroes signal
+//     "not an attach client" to a future server that cares; today's
+//     server ignores them outside the attach path.
+//  2. Send CommandList{argv}.
+//  3. Read frames until Exit: each CommandResult is printed to
+//     stderr on non-ok status, CapsUpdate and Beep are ignored.
+//  4. On Exit, print a summary identical to the attach path so the
+//     user sees why the server is departing.
+//
+// Returns a non-nil error on transport failure or unexpected frame;
+// in that case main() exits non-zero. A clean Exit{ServerExit} from
+// the server returns nil even though it terminates the process the
+// user was interacting with — that is the intended outcome of
+// kill-server.
+func runCommand(conn net.Conn, argv []string) error {
+	cwd, _ := os.Getwd()
+	ident := &proto.Identify{
+		ProtocolVersion: proto.ProtocolVersion,
+		Profile:         0,
+		InitialCols:     0,
+		InitialRows:     0,
+		Cwd:             cwd,
+		TTYName:         "",
+		TermEnv:         os.Getenv("TERM"),
+		Env:             os.Environ(),
+	}
+	cmds := []proto.Command{{ID: 1, Argv: argv}}
+
+	fw := xio.NewWriter(conn)
+	fr := xio.NewReader(conn)
+
+	if err := fw.WriteFrame(ident); err != nil {
+		return fmt.Errorf("write Identify: %w", err)
+	}
+	if err := fw.WriteFrame(&proto.CommandList{Commands: cmds}); err != nil {
+		return fmt.Errorf("write CommandList: %w", err)
+	}
+
+	for {
+		f, err := fr.ReadFrame()
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				// Server closed the socket without an Exit frame. For
+				// kill-server the server cancels its ctx and returns,
+				// and on some timings the socket tears down before
+				// the Exit write lands on this side. Treat as success
+				// — the caller's exit code is what matters.
+				return nil
+			}
+			return fmt.Errorf("read frame: %w", err)
+		}
+		switch m := f.(type) {
+		case *proto.CommandResult:
+			if m.Status != proto.StatusOk {
+				fmt.Fprintf(os.Stderr, "dmux: command %d: %s: %s\n",
+					m.ID, m.Status, m.Message)
+			}
+		case *proto.Exit:
+			printExitSummary(client.Result{
+				ExitReason:  m.Reason,
+				ExitMessage: m.Message,
+			})
+			return nil
+		case *proto.Beep, *proto.CapsUpdate, *proto.Output:
+			// Ignore: a command-only client has nowhere to render
+			// these. Output in particular should not reach a
+			// command-only connection, but drop it safely rather
+			// than tripping the default arm.
+		default:
+			return fmt.Errorf("unexpected frame %s", f.Type())
+		}
+	}
 }
 
 // buildClientOptions captures the client's identity from the
