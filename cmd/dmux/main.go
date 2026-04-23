@@ -12,6 +12,12 @@ import (
 	"sync"
 
 	"github.com/dhamidi/dmux/internal/client"
+	// Blank imports populate the cmd registry at process start. This is
+	// the single point where the binary decides which commands exist;
+	// the server side looks everything up by name through cmd.Lookup.
+	_ "github.com/dhamidi/dmux/internal/cmd/attachsession"
+	_ "github.com/dhamidi/dmux/internal/cmd/killserver"
+	_ "github.com/dhamidi/dmux/internal/cmd/newsession"
 	"github.com/dhamidi/dmux/internal/platform"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/server"
@@ -74,12 +80,8 @@ func clientMain() error {
 	// "dmux -S X" both come through with flag.NArg()==0 — those
 	// hit the attach path. "dmux kill-server" and any future
 	// command-only invocation land on the command-only path,
-	// which must not open the tty.
-	//
-	// TODO(m1:server-cmd-registry): once internal/cmd exists, the
-	// dispatch here shrinks to "build argv, send CommandList, wait
-	// for results" regardless of the command name — every name in
-	// the registry just routes through the same wire path.
+	// which must not open the tty. The server looks argv[0] up in
+	// cmd.Lookup; nothing on this side parses command names.
 	if flag.NArg() > 0 {
 		return runCommand(conn, flag.Args())
 	}

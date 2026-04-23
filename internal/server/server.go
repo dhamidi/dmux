@@ -11,6 +11,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/dhamidi/dmux/internal/cmd"
+	"github.com/dhamidi/dmux/internal/cmd/attachsession"
+	"github.com/dhamidi/dmux/internal/cmd/newsession"
+	"github.com/dhamidi/dmux/internal/cmdq"
 	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/pty"
@@ -136,10 +140,6 @@ func Run(path string) error {
 // a shared ctx + cancel, the wasm runtime, the one shared pane (lazy),
 // and the shutdown-reason handoff used to categorize Exit frames on
 // every attach pump at shutdown time.
-//
-// TODO(m1:server-cmd-registry): replace the hardcoded "kill-server"
-// string match in handle with a lookup into the cmd registry that
-// docs/m1.md describes (internal/cmd + internal/cmd/killserver).
 type serverState struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -265,19 +265,71 @@ func (s *serverState) shutdownPane() {
 	}
 }
 
+// serverItem is the cmd.Item implementation handed to every
+// Exec call in a single connection's drain. It carries the
+// per-connection ctx (so a command's Context cancels with the
+// client, not the whole server) and a pointer back to serverState
+// for the pieces that genuinely live server-wide (shutdown, pane
+// presence).
+//
+// Kept private to the server package so callers outside can only
+// see the narrow cmd.Item interface — commands never reach into
+// serverState directly.
+type serverItem struct {
+	state    *serverState
+	ctx      context.Context
+	shutdown bool
+}
+
+// Context returns the per-connection context.
+func (i *serverItem) Context() context.Context { return i.ctx }
+
+// Shutdown records the message on serverState (first writer wins
+// through setShutdown) and flips the local bit so the caller knows
+// one of its Items asked to tear the server down.
+func (i *serverItem) Shutdown(message string) {
+	i.shutdown = true
+	i.state.setShutdown(proto.ExitServerExit, message)
+}
+
+// HasSession reports whether the server owns a session to attach
+// to. The M1 walking-skeleton server has one implicit session that
+// exists from the moment Run starts — the shell pane is lazily
+// spawned on first attach via ensurePane, but the "there is a
+// session here" invariant is true any time this server is
+// answering a connection. Returning true matches the pre-refactor
+// behavior where attach-session from a fresh server enters pump
+// and spawns the pane in the process.
+//
+// TODO(m1:server-session-registry): consult internal/session for
+// the real lookup once it lands; then attach-session with no
+// sessions returns ErrNotFound naturally.
+func (i *serverItem) HasSession() bool { return true }
+
+// shutdownRequested is the read side of the local bit set by
+// Shutdown. Separate from serverState.shutdown() because we only
+// want "did one of my Items ask?" — racing kill-servers from other
+// connections should not redirect this handler down the shutdown
+// path.
+func (i *serverItem) shutdownRequested() bool { return i.shutdown }
+
 // handle runs one client connection. Sequence:
 //
 //  1. Read Identify. Anything else → Exit{ProtocolError}.
-//  2. Read the first CommandList. Dispatch by Commands[0].Argv[0]:
-//     - "kill-server": ack StatusOk for every command, write
-//       Exit{ServerExit, "kill-server"}, record the shutdown reason
-//       on serverState, cancel the server ctx, and return. No pane
-//       is spawned.
-//     - anything else (attach-session, new-session, empty argv):
-//       ensure the shared pane exists (spawns it on first attach),
-//       subscribe for dirty signals, ack commands, paint the
-//       initial frame, and enter pump.
-//  3. pump runs the render loop until the client sends Bye, the
+//  2. Read the first CommandList. For each entry, look up Argv[0]
+//     in the cmd registry and append a cmdq.Item; an unknown name
+//     short-circuits with Exit{ProtocolError} before any command
+//     runs.
+//  3. Drain the queue, writing one CommandResult per entry. The
+//     Results drive the post-drain decision:
+//     - Any Item whose serverItem.Shutdown was called: write
+//       Exit{<recorded reason>, <recorded msg>}, cancel server
+//       ctx, return. No pane is spawned.
+//     - Otherwise, if any drained command is in the attach-family
+//       (attach-session or new-session) and succeeded, enter
+//       handleAttach with the existing flow.
+//     - Otherwise return; connection closes normally.
+//  4. pump runs the render loop until the client sends Bye, the
 //     connection drops, or the server ctx is canceled (kill-server
 //     on another connection, or the pane's shell exited).
 func handle(conn net.Conn, state *serverState) error {
@@ -302,69 +354,120 @@ func handle(conn net.Conn, state *serverState) error {
 		return fmt.Errorf("server: protocol error: second frame was %s", first.Type())
 	}
 
-	if isKillServer(cl) {
-		return handleKillServer(cl, frameW, state)
+	// Per-connection ctx lets the command's Item.Context cancel with
+	// the client going away without tearing the whole server down.
+	connCtx, connCancel := context.WithCancel(state.ctx)
+	defer connCancel()
+	item := &serverItem{state: state, ctx: connCtx}
+
+	// Build the queue. An unknown argv[0] is a protocol error — we
+	// stop before executing anything so the client sees one clear
+	// reason.
+	var list cmdq.List
+	for _, c := range cl.Commands {
+		if len(c.Argv) == 0 {
+			_ = frameW.WriteFrame(&proto.Exit{
+				Reason:  proto.ExitProtocolError,
+				Message: "empty command argv",
+			})
+			return fmt.Errorf("server: protocol error: empty command argv")
+		}
+		found, ok := cmd.Lookup(c.Argv[0])
+		if !ok {
+			_ = frameW.WriteFrame(&proto.Exit{
+				Reason:  proto.ExitProtocolError,
+				Message: "unknown command: " + c.Argv[0],
+			})
+			return fmt.Errorf("server: protocol error: unknown command %q", c.Argv[0])
+		}
+		list.Append(cmdq.Item{
+			Cmd:     found,
+			Argv:    c.Argv,
+			CmdItem: item,
+		})
 	}
 
-	return handleAttach(ident, cl, conn, frameR, frameW, state)
-}
+	results := list.Drain()
 
-// isKillServer returns true when the first command's argv is exactly
-// ["kill-server"]. Anything else falls through to the attach path.
-//
-// TODO(m1:server-cmd-registry): the real server looks every command up
-// in the cmd registry (internal/cmd) and dispatches through cmdq.
-// Hardcoding the string here is the walking-skeleton shortcut.
-func isKillServer(cl *proto.CommandList) bool {
-	if len(cl.Commands) == 0 {
-		return false
-	}
-	argv := cl.Commands[0].Argv
-	return len(argv) >= 1 && argv[0] == "kill-server"
-}
-
-// handleKillServer acks every command in the list with StatusOk, records
-// the shutdown reason on serverState so attach pumps emit the correct
-// Exit category, writes this connection's own Exit{ServerExit}, then
-// cancels the server ctx so the Run loop closes the listener and every
-// concurrent attach pump tears itself down.
-func handleKillServer(cl *proto.CommandList, w xio.FrameWriter, state *serverState) error {
-	// Set the shutdown reason before we cancel so any pump racing the
-	// ctx.Done wake-up sees "server-exit / kill-server" rather than
-	// the generic fallback.
-	state.setShutdown(proto.ExitServerExit, "kill-server")
-
-	for _, cmd := range cl.Commands {
-		if err := w.WriteFrame(&proto.CommandResult{
-			ID:     cmd.ID,
-			Status: proto.StatusOk,
+	// Emit CommandResults in order. A write failure here means the
+	// client is gone; fall through to shutdown inspection so any
+	// Shutdown call still takes effect.
+	var writeErr error
+	for i, c := range cl.Commands {
+		status := proto.StatusOk
+		msg := ""
+		if !results[i].OK() {
+			status = proto.StatusError
+			msg = results[i].Error().Error()
+		}
+		if err := frameW.WriteFrame(&proto.CommandResult{
+			ID:      c.ID,
+			Status:  status,
+			Message: msg,
 		}); err != nil {
-			state.cancel()
-			return fmt.Errorf("server: write CommandResult: %w", err)
+			writeErr = fmt.Errorf("server: write CommandResult: %w", err)
+			break
 		}
 	}
-	if err := w.WriteFrame(&proto.Exit{
-		Reason:  proto.ExitServerExit,
-		Message: "kill-server",
-	}); err != nil {
+
+	// A command called item.Shutdown(...): the shutdown reason is
+	// already recorded on serverState. Emit our own Exit frame,
+	// cancel the server ctx so every other pump wakes up, and
+	// return.
+	if item.shutdownRequested() {
+		reason, msg := state.shutdown()
+		if reason == 0 && msg == "" {
+			reason = proto.ExitServerExit
+		}
+		if writeErr == nil {
+			_ = frameW.WriteFrame(&proto.Exit{Reason: reason, Message: msg})
+		}
 		state.cancel()
-		return fmt.Errorf("server: write Exit: %w", err)
+		return writeErr
 	}
-	state.cancel()
-	return nil
+
+	if writeErr != nil {
+		return writeErr
+	}
+
+	// Attach-family dispatch: any successful attach-session or
+	// new-session transitions this connection to the render pump.
+	// TODO(m1:server-attach-family-flag): replace this hardcoded
+	// name list with a Command-interface flag (e.g. TakesAttach()
+	// bool) once more commands land and the walking skeleton can
+	// afford the interface churn.
+	enterPump := false
+	for i, c := range cl.Commands {
+		if !results[i].OK() {
+			continue
+		}
+		name := c.Argv[0]
+		if name == attachsession.Name || name == newsession.Name {
+			enterPump = true
+			break
+		}
+	}
+
+	if !enterPump {
+		return nil
+	}
+
+	return enterAttachPump(ident, conn, frameR, frameW, state)
 }
 
-// handleAttach is the attach-client path: ensure the shared pane,
-// subscribe for dirty signals, ack commands, paint the initial frame,
-// enter pump.
+// enterAttachPump is the attach-client path: ensure the shared
+// pane, subscribe for dirty signals, paint the initial frame, enter
+// pump. CommandResults were already acked by the caller (handle)
+// before this is invoked — entering pump means the command queue
+// drained successfully and at least one attach-family command
+// returned Ok.
 //
 // Multiple attach handlers run concurrently — there is no attach
 // slot to contend for. Each handler's subscription, renderer, and
 // pump loop are independent; the pane is the only shared state and
 // is concurrency-safe.
-func handleAttach(
+func enterAttachPump(
 	ident *proto.Identify,
-	cl *proto.CommandList,
 	conn net.Conn,
 	frameR xio.FrameReader,
 	frameW xio.FrameWriter,
@@ -382,18 +485,6 @@ func handleAttach(
 	// Total rows includes the status line; the pane itself is rows-1
 	// cells tall (see ensurePane for the initial sizing).
 	totalRows := rows
-
-	// CommandResults go out after we have a pane so that if the
-	// ensurePane spawn fails the client sees Exit, not a phantom
-	// StatusOk followed by Exit.
-	for _, cmd := range cl.Commands {
-		if err := frameW.WriteFrame(&proto.CommandResult{
-			ID:     cmd.ID,
-			Status: proto.StatusOk,
-		}); err != nil {
-			return fmt.Errorf("server: write CommandResult: %w", err)
-		}
-	}
 
 	// Renderer per client. The profile came in on Identify; the client
 	// currently hard-codes Unknown (see client.handshake), which maps
@@ -652,9 +743,12 @@ func dispatchClientFrame(f proto.Frame, p *pane.Pane, w xio.FrameWriter) error {
 		// Extra CommandLists after the pane is spawned: ack StatusOk
 		// so the client's bookkeeping stays consistent. No-op on the
 		// server side — there's still only one pane.
-		// TODO(m1:server-cmd-registry): route through the real cmd
-		// registry once it exists; this is the same hardcoded path as
-		// handleKillServer but for in-session CommandLists.
+		// TODO(m1:server-midsession-cmd): route mid-session
+		// CommandLists through the cmd registry + cmdq.List drain
+		// path the same way the initial-handshake CommandList does.
+		// For the walking skeleton we rubber-stamp every entry
+		// because there is no other command to run once the pane is
+		// up.
 		for _, cmd := range m.Commands {
 			if err := w.WriteFrame(&proto.CommandResult{
 				ID:     cmd.ID,
