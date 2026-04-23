@@ -10,15 +10,15 @@ import (
 
 func TestNewSessionMonotonicID(t *testing.T) {
 	r := session.NewRegistry()
-	a, err := r.NewSession("a")
+	a, err := r.NewSession("a", nil)
 	if err != nil {
 		t.Fatalf("NewSession(a): %v", err)
 	}
-	b, err := r.NewSession("b")
+	b, err := r.NewSession("b", nil)
 	if err != nil {
 		t.Fatalf("NewSession(b): %v", err)
 	}
-	c, err := r.NewSession("c")
+	c, err := r.NewSession("c", nil)
 	if err != nil {
 		t.Fatalf("NewSession(c): %v", err)
 	}
@@ -29,7 +29,7 @@ func TestNewSessionMonotonicID(t *testing.T) {
 
 func TestFindSession(t *testing.T) {
 	r := session.NewRegistry()
-	a, _ := r.NewSession("a")
+	a, _ := r.NewSession("a", nil)
 	if got := r.FindSession(a.ID()); got != a {
 		t.Fatalf("FindSession returned different pointer: %p vs %p", got, a)
 	}
@@ -40,7 +40,7 @@ func TestFindSession(t *testing.T) {
 
 func TestFindSessionByName(t *testing.T) {
 	r := session.NewRegistry()
-	a, _ := r.NewSession("alpha")
+	a, _ := r.NewSession("alpha", nil)
 	if got := r.FindSessionByName("alpha"); got != a {
 		t.Fatalf("FindSessionByName returned different pointer: %p vs %p", got, a)
 	}
@@ -51,10 +51,10 @@ func TestFindSessionByName(t *testing.T) {
 
 func TestDuplicateSessionName(t *testing.T) {
 	r := session.NewRegistry()
-	if _, err := r.NewSession("dup"); err != nil {
+	if _, err := r.NewSession("dup", nil); err != nil {
 		t.Fatalf("first NewSession(dup): %v", err)
 	}
-	_, err := r.NewSession("dup")
+	_, err := r.NewSession("dup", nil)
 	if err == nil {
 		t.Fatalf("second NewSession(dup) returned nil error, want ErrDuplicateSession")
 	}
@@ -71,7 +71,7 @@ func TestSessionsOrderedByID(t *testing.T) {
 	r := session.NewRegistry()
 	names := []string{"z", "m", "a", "q"}
 	for _, n := range names {
-		if _, err := r.NewSession(n); err != nil {
+		if _, err := r.NewSession(n, nil); err != nil {
 			t.Fatalf("NewSession(%q): %v", n, err)
 		}
 	}
@@ -87,7 +87,7 @@ func TestSessionsOrderedByID(t *testing.T) {
 
 func TestRemoveSession(t *testing.T) {
 	r := session.NewRegistry()
-	a, _ := r.NewSession("a")
+	a, _ := r.NewSession("a", nil)
 	r.RemoveSession(a.ID())
 	if r.Len() != 0 {
 		t.Fatalf("Len after remove: got %d, want 0", r.Len())
@@ -104,7 +104,7 @@ func TestRemoveSession(t *testing.T) {
 
 func TestSessionAddWindow(t *testing.T) {
 	r := session.NewRegistry()
-	s, _ := r.NewSession("main")
+	s, _ := r.NewSession("main", nil)
 	if s.CurrentWindow() != nil {
 		t.Fatalf("fresh session has non-nil CurrentWindow")
 	}
@@ -129,7 +129,7 @@ func TestSessionAddWindow(t *testing.T) {
 
 func TestWindowSetActivePane(t *testing.T) {
 	r := session.NewRegistry()
-	s, _ := r.NewSession("main")
+	s, _ := r.NewSession("main", nil)
 	w, _ := s.AddWindow("bash")
 	if w.ActivePane() != nil {
 		t.Fatalf("fresh window has non-nil ActivePane")

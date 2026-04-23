@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 
+	"github.com/dhamidi/dmux/internal/options"
 	"github.com/dhamidi/dmux/internal/pane"
 )
 
@@ -107,11 +108,17 @@ func NewRegistry() *Registry {
 	}
 }
 
-// NewSession creates a fresh session named name and registers it.
-// Returns an error wrapping ErrDuplicateSession if a session with
-// this name already exists. The returned session has no windows yet
-// — call AddWindow to populate one.
-func (r *Registry) NewSession(name string) (*Session, error) {
+// NewSession creates a fresh session named name and registers it with
+// a session-scoped Options child parented at parentOpts. Returns an
+// error wrapping ErrDuplicateSession if a session with this name
+// already exists. The returned session has no windows yet — call
+// AddWindow to populate one.
+//
+// parentOpts is typically the server's options so Get on the session
+// walks server-scoped overrides before falling through to Table
+// defaults. Pass nil from tests that do not exercise option lookup;
+// the session will still have its own empty session-scoped Options.
+func (r *Registry) NewSession(name string, parentOpts *options.Options) (*Session, error) {
 	if _, exists := r.byName[name]; exists {
 		return nil, &Error{
 			Op:       "new",
@@ -121,8 +128,9 @@ func (r *Registry) NewSession(name string) (*Session, error) {
 	}
 	r.nextID++
 	s := &Session{
-		id:   r.nextID,
-		name: name,
+		id:      r.nextID,
+		name:    name,
+		options: options.NewScopedOptions(options.SessionScope, parentOpts),
 	}
 	r.byID[s.id] = s
 	r.byName[name] = s
@@ -186,9 +194,10 @@ func (r *Registry) Len() int { return len(r.byID) }
 // directly (no Winlink indirection). The window is the implicit
 // "current window"; its sole pane is the implicit "active pane."
 type Session struct {
-	id     ID
-	name   string
-	window *Window // M1: at most one
+	id      ID
+	name    string
+	window  *Window // M1: at most one
+	options *options.Options
 }
 
 // ID returns this session's registry id.
@@ -196,6 +205,10 @@ func (s *Session) ID() ID { return s.id }
 
 // Name returns this session's registered name.
 func (s *Session) Name() string { return s.name }
+
+// Options returns the session's session-scoped Options. Guaranteed
+// non-nil for sessions created through Registry.NewSession.
+func (s *Session) Options() *options.Options { return s.options }
 
 // CurrentWindow returns the session's current window, or nil if no
 // window has been added yet. M1 only ever has one window; the

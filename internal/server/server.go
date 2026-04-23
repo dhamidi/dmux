@@ -14,6 +14,7 @@ import (
 
 	"github.com/dhamidi/dmux/internal/cmd"
 	"github.com/dhamidi/dmux/internal/cmdq"
+	"github.com/dhamidi/dmux/internal/options"
 	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/pty"
@@ -83,6 +84,7 @@ func Run(path string) error {
 		cancel:         cancel,
 		rt:             rt,
 		registry:       session.NewRegistry(),
+		serverOptions:  options.NewServerOptions(),
 		serverSessions: make(map[session.ID]*serverSession),
 		attached:       make(map[uint64]*attachedClient),
 	}
@@ -162,6 +164,15 @@ type serverState struct {
 	// more than one connection goroutine (creation, resolution,
 	// teardown, and retirement on shell exit).
 	registry *session.Registry
+
+	// serverOptions is the root of the options parent-chain. Every
+	// session's Options is parented here so Get walks local → session
+	// → server → Table default. Guarded by registryMu for the same
+	// reason registry is: only the main-owned goroutine mutates.
+	// M1 never mutates it (no set-option command yet), but reads
+	// happen on every session create / attach / render, so it sits
+	// next to the registry. M5's .dmux.conf load writes here.
+	serverOptions *options.Options
 
 	// serverSessions pairs each live registry session with its
 	// server-side metadata (ctx, cancel, exit reason/message, pane
@@ -252,16 +263,24 @@ type attachedClient struct {
 }
 
 // createSession spawns a new session backed by its own window and
-// pane at (cols, rows-1). If name is empty the server picks the
-// first free numeric name ("0", "1", ...) to match tmux's
+// pane. Pane geometry depends on the session's `status` option: with
+// status on the pane takes rows-1 (the final row is the status bar);
+// with status off it takes the full rows. If name is empty the server
+// picks the first free numeric name ("0", "1", ...) to match tmux's
 // auto-naming convention; explicit names fail fast on duplicate.
+//
+// clientEnv is the attaching client's own environment (from Identify);
+// termEnv is the client's $TERM. createSession resolves default-shell
+// and default-terminal off the session's Options before calling
+// pane.Open so a future set-option landing in M2 takes effect on the
+// next new-session automatically.
 //
 // Must be called with registryMu held. Also registers the session's
 // server-side companion (serverSession) and starts its shell-exit
 // watcher before returning so the lifecycle is observed from birth.
 // On any failure after pane.Open, the pane is closed and the
 // registry/serverSessions state is rolled back.
-func (s *serverState) createSession(name string, cwd string, env []string, cols, rows int) (*session.Session, error) {
+func (s *serverState) createSession(name string, cwd string, clientEnv []string, termEnv string, cols, rows int) (*session.Session, error) {
 	if name == "" {
 		name = s.autogenSessionName()
 	}
@@ -272,24 +291,33 @@ func (s *serverState) createSession(name string, cwd string, env []string, cols,
 		rows = 24
 	}
 
-	argv := shellArgv()
+	sess, err := s.registry.NewSession(name, s.serverOptions)
+	if err != nil {
+		return nil, fmt.Errorf("server: new session: %w", err)
+	}
+
+	opts := sess.Options()
+	argv := shellArgvFor(opts)
+	env := childEnv(opts, clientEnv, termEnv)
+
+	paneRows := rows - 1
+	if !opts.GetBool("status") {
+		paneRows = rows
+	}
+
 	p, err := pane.Open(s.ctx, pane.Config{
 		Argv: argv,
 		Cwd:  cwd,
 		Env:  env,
 		Cols: cols,
-		Rows: rows - 1,
+		Rows: paneRows,
 		VT:   s.rt,
 	})
 	if err != nil {
+		s.registry.RemoveSession(sess.ID())
 		return nil, fmt.Errorf("server: open pane: %w", err)
 	}
 
-	sess, err := s.registry.NewSession(name)
-	if err != nil {
-		_ = p.Close()
-		return nil, fmt.Errorf("server: new session: %w", err)
-	}
 	w, err := sess.AddWindow(filepath.Base(argv[0]))
 	if err != nil {
 		_ = p.Close()
@@ -327,18 +355,29 @@ func (s *serverState) autogenSessionName() string {
 	}
 }
 
+// paneRowsFor returns how many pane rows fit under a client tty of
+// height rows given the session's `status` option. With status on the
+// final tty row is reserved for the status bar; with status off the
+// pane takes the whole tty.
+func paneRowsFor(opts *options.Options, rows int) int {
+	if !opts.GetBool("status") {
+		return rows
+	}
+	return rows - 1
+}
+
 // register adds an attached client at (cols, rows) and applies the
 // window-size=latest policy: the pane is resized so its dimensions
-// match this client's tty (cols, rows-1; the -1 reserves the bottom
-// row for the status bar). Returns an id used by resizeAttached and
-// deregister to refer back to this client.
+// match this client's tty, minus the status row when `status` is on.
+// Returns an id used by resizeAttached and deregister to refer back
+// to this client.
 //
 // The pane.Resize call signals every pump so older clients re-paint
 // against the new grid dimensions. They might be smaller or larger
 // than the new pane size; smaller ttys see the pane content wrap
 // (TODO(m1:server-pane-clip)), larger ones see padding around the
 // pane.
-func (s *serverState) register(p *pane.Pane, cols, rows int) (uint64, error) {
+func (s *serverState) register(p *pane.Pane, opts *options.Options, cols, rows int) (uint64, error) {
 	s.attachedMu.Lock()
 	defer s.attachedMu.Unlock()
 
@@ -349,7 +388,7 @@ func (s *serverState) register(p *pane.Pane, cols, rows int) (uint64, error) {
 	if cols <= 0 || rows < 2 {
 		return id, nil
 	}
-	if err := p.Resize(cols, rows-1); err != nil {
+	if err := p.Resize(cols, paneRowsFor(opts, rows)); err != nil {
 		return id, fmt.Errorf("server: resize on attach: %w", err)
 	}
 	return id, nil
@@ -360,7 +399,7 @@ func (s *serverState) register(p *pane.Pane, cols, rows int) (uint64, error) {
 // re-sizes the pane to the same dims; from an older client it makes
 // that one the new latest. Either way the pane and every pump's next
 // frame catch up to the requested size.
-func (s *serverState) resizeAttached(p *pane.Pane, id uint64, cols, rows int) error {
+func (s *serverState) resizeAttached(p *pane.Pane, opts *options.Options, id uint64, cols, rows int) error {
 	s.attachedMu.Lock()
 	defer s.attachedMu.Unlock()
 
@@ -373,7 +412,7 @@ func (s *serverState) resizeAttached(p *pane.Pane, id uint64, cols, rows int) er
 	if cols <= 0 || rows < 2 {
 		return nil
 	}
-	if err := p.Resize(cols, rows-1); err != nil {
+	if err := p.Resize(cols, paneRowsFor(opts, rows)); err != nil {
 		return fmt.Errorf("server: resize on client resize: %w", err)
 	}
 	return nil
@@ -558,7 +597,8 @@ func (l serverSessionLookup) Create(name string) (cmd.SessionRef, error) {
 	sess, err := state.createSession(
 		name,
 		chooseCwd(client.Cwd()),
-		childEnv(client.Env(), client.TermEnv()),
+		client.Env(),
+		client.TermEnv(),
 		client.Cols(),
 		client.Rows(),
 	)
@@ -787,10 +827,11 @@ func enterAttachPump(
 	}
 
 	// Register with the window-size=latest applier. The pane is
-	// resized to (cols, rows-1) so this client's tty determines the
-	// session's grid dimensions until another attach or Resize moves
-	// it. The pane.Resize wakes every other pump's subscription.
-	attachID, err := state.register(p, cols, rows)
+	// resized so this client's tty determines the session's grid
+	// dimensions until another attach or Resize moves it; the rows
+	// passed to the pane depend on the session's `status` option.
+	// pane.Resize wakes every other pump's subscription.
+	attachID, err := state.register(p, sess.Options(), cols, rows)
 	if err != nil {
 		_ = frameW.WriteFrame(&proto.Exit{
 			Reason:  proto.ExitServerExit,
@@ -822,7 +863,7 @@ func enterAttachPump(
 	// before the shell's first output lands. Without this, the user
 	// sees whatever was on their terminal before the attach until the
 	// prompt prints.
-	if err := renderAndSend(p, renderer, frameW, statusView(sess, w, cols), rows); err != nil {
+	if err := renderAndSend(p, renderer, frameW, sess, w, cols, rows); err != nil {
 		return err
 	}
 
@@ -892,7 +933,10 @@ func statusView(sess *session.Session, w *session.Window, cols int) status.View 
 
 // renderAndSend formats the pane's current screen via libghostty-vt,
 // wraps the bytes with the client-specific cursor/home/erase preamble,
-// and writes them as a proto.Output frame.
+// and writes them as a proto.Output frame. The session's `status` and
+// `status-position` options decide whether to paint the status row and
+// where; when status is off no row is painted and the pane fills the
+// whole tty.
 //
 // Both pane.Format and pane.Cursor lock against the pane's readLoop;
 // the WriteFrame call happens on the pump goroutine so xio.FrameWriter's
@@ -910,7 +954,14 @@ func statusView(sess *session.Session, w *session.Window, cols int) status.View 
 // produces several full-frame repaints when one would do. Add a small
 // coalescing timer (a few ms) so consecutive chunks fold into one
 // render.
-func renderAndSend(p *pane.Pane, r *termout.Renderer, w xio.FrameWriter, sv status.View, totalRows int) error {
+//
+// TODO(m1:server-status-position-top): status-position=top is read as
+// a regular option today but the renderer still paints the bar at the
+// bottom. Proper top support needs the formatter output shifted down
+// by one row (the formatter's internal CUPs use absolute row 1 as
+// home), which is a termout.Wrap change the walking skeleton does
+// not attempt.
+func renderAndSend(p *pane.Pane, r *termout.Renderer, w xio.FrameWriter, sess *session.Session, win *session.Window, cols, rows int) error {
 	formatted, err := p.Format(r.FormatOptions())
 	if err != nil {
 		return fmt.Errorf("server: format: %w", err)
@@ -923,8 +974,12 @@ func renderAndSend(p *pane.Pane, r *termout.Renderer, w xio.FrameWriter, sv stat
 	if err != nil {
 		return fmt.Errorf("server: placements: %w", err)
 	}
-	statusRow := status.Render(sv)
-	data := r.Wrap(formatted, cur, statusRow, totalRows)
+	opts := sess.Options()
+	var statusRow []byte
+	if opts.GetBool("status") {
+		statusRow = status.Render(statusView(sess, win, cols))
+	}
+	data := r.Wrap(formatted, cur, statusRow, rows)
 	if kitty := r.EmitKitty(placements); len(kitty) > 0 {
 		data = append(data, kitty...)
 	}
@@ -1097,7 +1152,7 @@ func pump(a pumpArgs) (retErr error) {
 			// TODO(m1:server-render-coalesce): drain any pending
 			// signals (non-blocking) before rendering so a burst
 			// produces one frame, not N.
-			if err := renderAndSend(a.pane, a.renderer, a.frameW, statusView(a.sess, a.win, cols), rows); err != nil {
+			if err := renderAndSend(a.pane, a.renderer, a.frameW, a.sess, a.win, cols, rows); err != nil {
 				return err
 			}
 
@@ -1122,7 +1177,7 @@ func pump(a pumpArgs) (retErr error) {
 					continue
 				}
 				cols, rows = newCols, newRows
-				if err := a.state.resizeAttached(a.pane, a.attachID, cols, rows); err != nil {
+				if err := a.state.resizeAttached(a.pane, a.sess.Options(), a.attachID, cols, rows); err != nil {
 					return err
 				}
 				continue
@@ -1194,17 +1249,27 @@ func dispatchClientFrame(f proto.Frame, p *pane.Pane, w xio.FrameWriter) error {
 	}
 }
 
-// shellArgv returns argv for the pane child. $SHELL wins when set,
-// else /bin/sh. Login-shell flag is not set — M1 runs the shell as
-// an interactive child under the pty; shell config will load per
-// whatever the invoking shell does on plain interactive start.
-// TODO(m1:server-shell): honor default-shell / default-command
-// options once internal/options lands.
-func shellArgv() []string {
-	if sh := os.Getenv("SHELL"); sh != "" {
-		return []string{sh}
+// shellArgvFor returns argv for the pane child, resolved from the
+// session's default-shell option. If the option is still at the Table
+// default ("/bin/sh") and the server process has a non-empty $SHELL,
+// prefer $SHELL — the rationale is that M1 has no .dmux.conf or
+// set-option command yet, so a user's inherited $SHELL is the only
+// ergonomic path to their real login shell. Once M2 lands set-option
+// and M5 lands .dmux.conf, an explicit set-option -g default-shell
+// wins over $SHELL (IsSetLocally on the server options would be true,
+// so this fallback would not trigger).
+//
+// Login-shell flag is not set — M1 runs the shell as an interactive
+// child under the pty; shell config loads per whatever the invoking
+// shell does on a plain interactive start.
+func shellArgvFor(opts *options.Options) []string {
+	shell := opts.GetString("default-shell")
+	if shell == "/bin/sh" {
+		if envShell := os.Getenv("SHELL"); envShell != "" {
+			shell = envShell
+		}
 	}
-	return []string{"/bin/sh"}
+	return []string{shell}
 }
 
 // chooseCwd falls back to the server process's cwd when the client
@@ -1223,13 +1288,11 @@ func chooseCwd(clientCwd string) string {
 
 // childEnv builds the env slice passed to the child shell. It starts
 // from the server's own environment, drops any existing TERM, and
-// appends TERM from the client's TermEnv (so the pane believes it's
-// the client's terminal type). The client-supplied Env is layered
-// last so session-level overrides from the attaching client take
-// effect.
-// TODO(m1:server-env): merge with the options-layered environment
-// once internal/options exists.
-func childEnv(clientEnv []string, termEnv string) []string {
+// picks the client's TermEnv when non-empty (so the pane believes
+// it's the client's terminal type) — else falls back to the session's
+// default-terminal option. The client-supplied Env is layered last so
+// session-level overrides from the attaching client take effect.
+func childEnv(opts *options.Options, clientEnv []string, termEnv string) []string {
 	base := os.Environ()
 	out := make([]string, 0, len(base)+len(clientEnv)+1)
 	for _, kv := range base {
@@ -1240,7 +1303,7 @@ func childEnv(clientEnv []string, termEnv string) []string {
 	if termEnv != "" {
 		out = append(out, "TERM="+termEnv)
 	} else {
-		out = append(out, "TERM=xterm-256color")
+		out = append(out, "TERM="+opts.GetString("default-terminal"))
 	}
 	out = append(out, clientEnv...)
 	return out
