@@ -10,9 +10,11 @@ import (
 
 type fakeItem struct{}
 
-func (fakeItem) Context() context.Context { return context.Background() }
-func (fakeItem) Shutdown(string)          {}
-func (fakeItem) HasSession() bool         { return false }
+func (fakeItem) Context() context.Context       { return context.Background() }
+func (fakeItem) Shutdown(string)                {}
+func (fakeItem) Client() cmd.Client             { return nil }
+func (fakeItem) Sessions() cmd.SessionLookup    { return nil }
+func (fakeItem) SetAttachTarget(cmd.SessionRef) {}
 
 type fakeCmd struct {
 	name   string

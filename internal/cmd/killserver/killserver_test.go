@@ -10,9 +10,11 @@ import (
 
 type recordingItem struct{ msg string }
 
-func (*recordingItem) Context() context.Context { return context.Background() }
-func (*recordingItem) HasSession() bool         { return false }
-func (i *recordingItem) Shutdown(m string)      { i.msg = m }
+func (*recordingItem) Context() context.Context       { return context.Background() }
+func (*recordingItem) Client() cmd.Client             { return nil }
+func (*recordingItem) Sessions() cmd.SessionLookup    { return nil }
+func (*recordingItem) SetAttachTarget(cmd.SessionRef) {}
+func (i *recordingItem) Shutdown(m string)            { i.msg = m }
 
 func TestExecCallsShutdown(t *testing.T) {
 	c, ok := cmd.Lookup(killserver.Name)

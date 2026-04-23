@@ -20,11 +20,13 @@ type Command interface {
 	Exec(item Item, argv []string) Result
 }
 
-// Item is what Exec receives: the handle into the server world. The
-// M1 surface is intentionally narrow — only what the three M1
-// commands actually call. The full doc.go Item (Sessions, Options,
-// Target, Client, Message, Log, Prompt, Confirm) lands alongside the
-// commands that need it in M2.
+// Item is what Exec receives: the handle into the server world.
+// Commands read the calling client's identity (cwd, env, tty size)
+// through Client, look sessions up or create new ones through
+// Sessions, and communicate "attach this connection to this session
+// once the queue drains" through SetAttachTarget. The rest of the
+// doc.go surface (Options, Target, Source, Message, Prompt, Confirm,
+// Log) lands alongside the commands that need it.
 type Item interface {
 	// Context cancels with the owning client or the server as a
 	// whole. Exec implementations may read it to bail on long work.
@@ -33,12 +35,76 @@ type Item interface {
 	// the Exit frame's Message field, so it ends up in front of the
 	// user.
 	Shutdown(message string)
-	// HasSession reports whether the server already owns a live
-	// session / pane. attach-session returns ErrNotFound when this
-	// is false. M1's world has at most one session so the predicate
-	// is a single-bit check; once internal/session lands this
-	// becomes a target-lookup.
-	HasSession() bool
+	// Client is the attach-client's view of its own identity —
+	// cwd, env, TERM, initial tty dims. Commands that spawn panes
+	// read from here to match the calling terminal.
+	Client() Client
+	// Sessions is the registry-facing slice of the world. Commands
+	// use it to Create new sessions, Find existing ones by name,
+	// or ask for MostRecent as the default attach target.
+	Sessions() SessionLookup
+	// SetAttachTarget records which session this connection should
+	// attach to once the command queue drains. Attach-family
+	// commands (new-session, attach-session) call this; the server
+	// reads it after the queue finishes to pick the pane to pump.
+	// A nil target means "no attach" — the connection closes after
+	// the command drain without entering pump.
+	SetAttachTarget(SessionRef)
+}
+
+// Client is the attach-client's view of its own identity. The
+// server uses these fields when opening panes on the client's
+// behalf (cwd, env, tty size). Kept narrow on purpose: commands
+// should not reach into protocol frames directly.
+type Client interface {
+	// Cwd is the client process's working directory at Identify
+	// time. Falls back to server process cwd when empty.
+	Cwd() string
+	// Env is the client-process environment, passed through to
+	// panes the command spawns. Includes TERM.
+	Env() []string
+	// TermEnv is the client's $TERM. Separate from Env so the
+	// server can overwrite the pane's TERM without scanning the
+	// whole environment.
+	TermEnv() string
+	// Cols / Rows are the client's initial tty dimensions. Used
+	// as the pane's starting geometry when Create spawns one.
+	Cols() int
+	Rows() int
+}
+
+// SessionLookup exposes the session registry to commands. Create
+// spawns a new session (with its initial window and pane); Find
+// resolves a name to a live session; MostRecent returns the
+// highest-id session (the closest thing to "the default target" in
+// M1); List returns every registered session. The concrete
+// implementation lives in the server package.
+type SessionLookup interface {
+	// Create makes a new session. An empty name triggers the
+	// server's auto-naming policy (numeric "0", "1", ... matching
+	// tmux's default). Returns ErrDuplicateSession when an
+	// explicit name already exists; the auto-naming path never
+	// collides.
+	Create(name string) (SessionRef, error)
+	// Find returns the session with the given name, or wraps
+	// ErrNotFound when none exists.
+	Find(name string) (SessionRef, error)
+	// MostRecent returns the session with the highest id, or nil
+	// when the registry is empty. attach-session uses this as the
+	// default target when no -t is given.
+	MostRecent() SessionRef
+	// List returns every session in ascending-id order. Used by
+	// diagnostic commands (list-sessions) once they land.
+	List() []SessionRef
+}
+
+// SessionRef identifies a session without exposing its internal
+// object graph. The server resolves refs back to live
+// session.Session instances when it needs to act on them; commands
+// only read ID and Name.
+type SessionRef interface {
+	ID() uint64
+	Name() string
 }
 
 // Result is opaque: callers inspect it through OK / Error, not by

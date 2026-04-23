@@ -6,22 +6,27 @@ import "github.com/dhamidi/dmux/internal/cmd"
 const Name = "new-session"
 
 // command is the zero-struct implementing cmd.Command for
-// new-session. M1 is a walking-skeleton stub: returns Ok
-// unconditionally. The server interprets a successful Result as
-// "enter pump", which matches the pre-refactor behavior where any
-// non-kill-server command fell through to the attach path.
+// new-session. Each invocation creates a fresh session (with its
+// initial window and pane) and records it as the attach target —
+// matching bare `tmux`'s behavior: running `tmux` twice gives you
+// two independent sessions, never auto-attach.
 //
-// TODO(m1:newsession-strict): error with "session already exists"
-// when the server already has a session. Today new-session from a
-// second terminal silently joins the existing pane — deferred so the
-// refactor stays behavior-preserving.
+// TODO(m1:newsession-flags): parse -d (detached) and -s (name) once
+// flag parsing lands. M1 always attaches and auto-names.
 type command struct{}
 
 // Name returns the registered command name.
 func (command) Name() string { return Name }
 
-// Exec returns Ok. See the strict-mode TODO on the command struct.
-func (command) Exec(_ cmd.Item, _ []string) cmd.Result {
+// Exec creates a new auto-named session and sets it as this
+// connection's attach target. Any error from the registry (pane
+// spawn failed, name collision on an explicit name) propagates.
+func (command) Exec(item cmd.Item, _ []string) cmd.Result {
+	ref, err := item.Sessions().Create("")
+	if err != nil {
+		return cmd.Err(err)
+	}
+	item.SetAttachTarget(ref)
 	return cmd.Ok()
 }
 

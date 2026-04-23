@@ -8,12 +8,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/dhamidi/dmux/internal/cmd"
-	"github.com/dhamidi/dmux/internal/cmd/attachsession"
-	"github.com/dhamidi/dmux/internal/cmd/newsession"
 	"github.com/dhamidi/dmux/internal/cmdq"
 	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
@@ -200,24 +199,18 @@ type attachedClient struct {
 	rows int
 }
 
-// ensureSession returns the shared session's active pane, creating
-// the session + window + pane on first call. The pane is opened at
-// (ident.InitialCols, ident.InitialRows-1); the actual ongoing size
-// is governed by the window-size=latest policy applied through
-// register / resizeAttached, not stored here.
+// createSession spawns a new session backed by its own window and
+// pane at (cols, rows-1). If name is empty the server picks the
+// first free numeric name ("0", "1", ...) to match tmux's
+// auto-naming convention; explicit names fail fast on duplicate.
 //
-// The returned *session.Session and *session.Window are the live
-// ones the caller should read names off for the status bar.
-func (s *serverState) ensureSession(ident *proto.Identify) (*session.Session, *session.Window, *pane.Pane, error) {
-	s.registryMu.Lock()
-	defer s.registryMu.Unlock()
-
-	if sess := s.registry.FindSessionByName("dmux"); sess != nil {
-		w := sess.CurrentWindow()
-		return sess, w, w.ActivePane(), nil
+// Must be called with registryMu held. The pane's shell-exit watcher
+// goroutine is started before returning so the session's lifecycle
+// is observed from birth.
+func (s *serverState) createSession(name string, cwd string, env []string, cols, rows int) (*session.Session, error) {
+	if name == "" {
+		name = s.autogenSessionName()
 	}
-
-	cols, rows := int(ident.InitialCols), int(ident.InitialRows)
 	if cols <= 0 {
 		cols = 80
 	}
@@ -228,40 +221,53 @@ func (s *serverState) ensureSession(ident *proto.Identify) (*session.Session, *s
 	argv := shellArgv()
 	p, err := pane.Open(s.ctx, pane.Config{
 		Argv: argv,
-		Cwd:  chooseCwd(ident.Cwd),
-		Env:  childEnv(ident.Env, ident.TermEnv),
+		Cwd:  cwd,
+		Env:  env,
 		Cols: cols,
 		Rows: rows - 1,
 		VT:   s.rt,
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("server: open pane: %w", err)
+		return nil, fmt.Errorf("server: open pane: %w", err)
 	}
 
-	// Wire up the object graph. NewSession / AddWindow only fail on
-	// duplicate-name, which cannot happen here: the fast path above
-	// short-circuits when "dmux" already exists. Any error is a
-	// logic bug, so wrap with %w and surface to the caller — they
-	// will translate to an Exit frame.
-	sess, err := s.registry.NewSession("dmux")
+	sess, err := s.registry.NewSession(name)
 	if err != nil {
 		_ = p.Close()
-		return nil, nil, nil, fmt.Errorf("server: new session: %w", err)
+		return nil, fmt.Errorf("server: new session: %w", err)
 	}
 	w, err := sess.AddWindow(filepath.Base(argv[0]))
 	if err != nil {
 		_ = p.Close()
 		s.registry.RemoveSession(sess.ID())
-		return nil, nil, nil, fmt.Errorf("server: add window: %w", err)
+		return nil, fmt.Errorf("server: add window: %w", err)
 	}
 	w.SetActivePane(p)
 
 	// Watch the pane for shell exit. When the child goes, mark the
 	// shutdown reason as ExitedShell so every attach pump writes the
 	// correct Exit category, then cancel the server ctx.
+	//
+	// TODO(m2:server-session-scope-exit): with multi-session support,
+	// a single shell exit should not tear the whole server down.
+	// Today every pane exit cancels the server ctx; that matches M1's
+	// one-pane world but will need per-session teardown when sessions
+	// outlive individual panes.
 	go s.watchPaneExit(p)
 
-	return sess, w, p, nil
+	return sess, nil
+}
+
+// autogenSessionName returns the first unused numeric name ("0",
+// "1", ...). Caller must hold registryMu. Matches tmux's default
+// session-naming scheme.
+func (s *serverState) autogenSessionName() string {
+	for i := 0; ; i++ {
+		name := strconv.Itoa(i)
+		if s.registry.FindSessionByName(name) == nil {
+			return name
+		}
+	}
 }
 
 // register adds an attached client at (cols, rows) and applies the
@@ -386,19 +392,30 @@ func (s *serverState) shutdownRegistry() {
 }
 
 // serverItem is the cmd.Item implementation handed to every
-// Exec call in a single connection's drain. It carries the
-// per-connection ctx (so a command's Context cancels with the
-// client, not the whole server) and a pointer back to serverState
-// for the pieces that genuinely live server-wide (shutdown, pane
-// presence).
+// Exec call in a single connection's drain. It carries:
+//
+//   - ctx: the per-connection context, cancelled when the client
+//     goes away, so command work bails with the client.
+//   - ident: the Identify frame the client sent at handshake, used
+//     by Client() and by session-creating commands to pull cwd,
+//     env, and tty size.
+//   - state: the server-wide registry and runtime. Commands reach
+//     it only through the Sessions() facade.
+//   - shutdown: set by Shutdown() so handle() can tell kill-server
+//     ran inside this drain.
+//   - attachTarget: set by SetAttachTarget from an attach-family
+//     command; handle() consults it after the drain to decide
+//     whether to enter pump and which session to pump.
 //
 // Kept private to the server package so callers outside can only
 // see the narrow cmd.Item interface — commands never reach into
 // serverState directly.
 type serverItem struct {
-	state    *serverState
-	ctx      context.Context
-	shutdown bool
+	state        *serverState
+	ctx          context.Context
+	ident        *proto.Identify
+	shutdown     bool
+	attachTarget cmd.SessionRef
 }
 
 // Context returns the per-connection context.
@@ -412,17 +429,20 @@ func (i *serverItem) Shutdown(message string) {
 	i.state.setShutdown(proto.ExitServerExit, message)
 }
 
-// HasSession reports whether the server owns a session to attach
-// to. With the session registry in place this is a real predicate:
-// attach-session on a fresh server (empty registry) returns
-// cmd.ErrNotFound, matching tmux's "no sessions" behavior. The
-// default client invocation is new-session (see
-// cmd/dmux.buildClientOptions) so bare `dmux` still spawns the
-// first pane on a fresh server.
-//
-// TODO(m1:server-session-target): consult the target-specific
-// session once -t parsing lands. M1 checks presence, not identity.
-func (i *serverItem) HasSession() bool { return i.state.registry.Len() > 0 }
+// Client returns this connection's client identity as seen by
+// commands. The underlying Identify frame is held by value-adapter
+// so commands cannot mutate it.
+func (i *serverItem) Client() cmd.Client { return clientAdapter{ident: i.ident} }
+
+// Sessions returns the registry facade. The returned value captures
+// a pointer back to this Item so its Create methods know which
+// client's cwd/env/geometry to use.
+func (i *serverItem) Sessions() cmd.SessionLookup { return serverSessionLookup{item: i} }
+
+// SetAttachTarget records the session this connection should attach
+// to after the command queue drains. handle() reads it back to
+// decide whether to enter pump and against which session.
+func (i *serverItem) SetAttachTarget(ref cmd.SessionRef) { i.attachTarget = ref }
 
 // shutdownRequested is the read side of the local bit set by
 // Shutdown. Separate from serverState.shutdown() because we only
@@ -430,6 +450,103 @@ func (i *serverItem) HasSession() bool { return i.state.registry.Len() > 0 }
 // connections should not redirect this handler down the shutdown
 // path.
 func (i *serverItem) shutdownRequested() bool { return i.shutdown }
+
+// clientAdapter wraps an *proto.Identify to satisfy cmd.Client.
+// Value-type on purpose so serverItem.Client hands out cheap copies;
+// no mutation plumbing is needed.
+type clientAdapter struct {
+	ident *proto.Identify
+}
+
+func (c clientAdapter) Cwd() string     { return c.ident.Cwd }
+func (c clientAdapter) Env() []string   { return c.ident.Env }
+func (c clientAdapter) TermEnv() string { return c.ident.TermEnv }
+func (c clientAdapter) Cols() int       { return int(c.ident.InitialCols) }
+func (c clientAdapter) Rows() int       { return int(c.ident.InitialRows) }
+
+// serverSessionLookup implements cmd.SessionLookup. It captures the
+// calling Item so Create can resolve cwd / env / cols / rows from
+// the attaching client without an extra parameter on the interface.
+type serverSessionLookup struct {
+	item *serverItem
+}
+
+// Create spawns a new session + window + pane using the calling
+// client's identity for cwd, env, TERM, and initial tty dims. An
+// empty name auto-generates via autogenSessionName. Returns
+// ErrDuplicateSession (wrapped by session.Error) when an explicit
+// name already exists.
+func (l serverSessionLookup) Create(name string) (cmd.SessionRef, error) {
+	state := l.item.state
+	client := l.item.Client()
+
+	state.registryMu.Lock()
+	defer state.registryMu.Unlock()
+
+	sess, err := state.createSession(
+		name,
+		chooseCwd(client.Cwd()),
+		childEnv(client.Env(), client.TermEnv()),
+		client.Cols(),
+		client.Rows(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return sessionRef{sess: sess}, nil
+}
+
+// Find resolves a session by name. Returns cmd.ErrNotFound when the
+// registry has no match.
+func (l serverSessionLookup) Find(name string) (cmd.SessionRef, error) {
+	state := l.item.state
+	state.registryMu.Lock()
+	defer state.registryMu.Unlock()
+	sess := state.registry.FindSessionByName(name)
+	if sess == nil {
+		return nil, cmd.ErrNotFound
+	}
+	return sessionRef{sess: sess}, nil
+}
+
+// MostRecent returns the session with the highest id, or nil when
+// the registry is empty. The registry iterator yields in ascending
+// id order, so the last value wins.
+func (l serverSessionLookup) MostRecent() cmd.SessionRef {
+	state := l.item.state
+	state.registryMu.Lock()
+	defer state.registryMu.Unlock()
+	var latest *session.Session
+	for s := range state.registry.Sessions() {
+		latest = s
+	}
+	if latest == nil {
+		return nil
+	}
+	return sessionRef{sess: latest}
+}
+
+// List returns every session as a snapshot in ascending-id order.
+func (l serverSessionLookup) List() []cmd.SessionRef {
+	state := l.item.state
+	state.registryMu.Lock()
+	defer state.registryMu.Unlock()
+	var out []cmd.SessionRef
+	for s := range state.registry.Sessions() {
+		out = append(out, sessionRef{sess: s})
+	}
+	return out
+}
+
+// sessionRef is the cmd.SessionRef implementation. It holds a
+// pointer to the live session.Session so the server can resolve it
+// back when entering pump; commands see only ID() and Name().
+type sessionRef struct {
+	sess *session.Session
+}
+
+func (r sessionRef) ID() uint64   { return uint64(r.sess.ID()) }
+func (r sessionRef) Name() string { return r.sess.Name() }
 
 // handle runs one client connection. Sequence:
 //
@@ -476,7 +593,7 @@ func handle(conn net.Conn, state *serverState) error {
 	// the client going away without tearing the whole server down.
 	connCtx, connCancel := context.WithCancel(state.ctx)
 	defer connCancel()
-	item := &serverItem{state: state, ctx: connCtx}
+	item := &serverItem{state: state, ctx: connCtx, ident: ident}
 
 	// Build the queue. An unknown argv[0] is a protocol error — we
 	// stop before executing anything so the client sees one clear
@@ -548,38 +665,25 @@ func handle(conn net.Conn, state *serverState) error {
 		return writeErr
 	}
 
-	// Attach-family dispatch: any successful attach-session or
-	// new-session transitions this connection to the render pump.
-	// TODO(m1:server-attach-family-flag): replace this hardcoded
-	// name list with a Command-interface flag (e.g. TakesAttach()
-	// bool) once more commands land and the walking skeleton can
-	// afford the interface churn.
-	enterPump := false
-	for i, c := range cl.Commands {
-		if !results[i].OK() {
-			continue
-		}
-		name := c.Argv[0]
-		if name == attachsession.Name || name == newsession.Name {
-			enterPump = true
-			break
-		}
-	}
-
-	if !enterPump {
+	// Attach dispatch: a successful attach-family command records a
+	// target on the item via SetAttachTarget. If one landed, enter
+	// pump against it; otherwise the connection closes after the
+	// command drain. The check against the command name list is
+	// gone — it's implicit in "did the command set a target?"
+	if item.attachTarget == nil {
 		return nil
 	}
 
-	return enterAttachPump(ident, conn, frameR, frameW, state)
+	return enterAttachPump(ident, conn, frameR, frameW, item)
 }
 
-// enterAttachPump is the attach-client path: ensure the shared
-// pane, register this client's tty size with the latest-policy
-// applier, subscribe for dirty signals, paint the initial frame,
-// enter pump. CommandResults were already acked by the caller
-// (handle) before this is invoked — entering pump means the command
-// queue drained successfully and at least one attach-family command
-// returned Ok.
+// enterAttachPump is the attach-client path: resolve the session
+// the attach-family command recorded on item.attachTarget, register
+// this client's tty size with the latest-policy applier, subscribe
+// for dirty signals, paint the initial frame, enter pump.
+// CommandResults were already acked by the caller (handle) before
+// this is invoked — entering pump means the queue drained
+// successfully and a command set a target.
 //
 // Multiple attach handlers run concurrently — there is no attach
 // slot to contend for. Each handler's subscription, renderer, and
@@ -590,13 +694,14 @@ func enterAttachPump(
 	conn net.Conn,
 	frameR xio.FrameReader,
 	frameW xio.FrameWriter,
-	state *serverState,
+	item *serverItem,
 ) error {
-	sess, w, p, err := state.ensureSession(ident)
+	state := item.state
+	sess, w, p, err := resolveAttachTarget(state, item.attachTarget)
 	if err != nil {
 		_ = frameW.WriteFrame(&proto.Exit{
 			Reason:  proto.ExitServerExit,
-			Message: "spawn: " + err.Error(),
+			Message: err.Error(),
 		})
 		return err
 	}
@@ -663,6 +768,32 @@ func enterAttachPump(
 		attachID: attachID,
 		state:    state,
 	})
+}
+
+// resolveAttachTarget looks a SessionRef back up in the registry,
+// returning the live session/window/pane triple for pump use. A
+// target that vanished between command drain and pump entry (or
+// that never existed) returns an error the caller translates to an
+// Exit frame.
+func resolveAttachTarget(state *serverState, ref cmd.SessionRef) (*session.Session, *session.Window, *pane.Pane, error) {
+	if ref == nil {
+		return nil, nil, nil, fmt.Errorf("server: no attach target")
+	}
+	state.registryMu.Lock()
+	defer state.registryMu.Unlock()
+	sess := state.registry.FindSession(session.ID(ref.ID()))
+	if sess == nil {
+		return nil, nil, nil, fmt.Errorf("server: attach target vanished: id=%d", ref.ID())
+	}
+	w := sess.CurrentWindow()
+	if w == nil {
+		return nil, nil, nil, fmt.Errorf("server: attach target has no window: id=%d", ref.ID())
+	}
+	p := w.ActivePane()
+	if p == nil {
+		return nil, nil, nil, fmt.Errorf("server: attach target has no pane: id=%d", ref.ID())
+	}
+	return sess, w, p, nil
 }
 
 // statusView builds the status.View for one client at the given tty

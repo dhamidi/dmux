@@ -266,13 +266,10 @@ func buildClientOptions() (client.Options, error) {
 		TTYName: os.Stdin.Name(),
 		TermEnv: os.Getenv("TERM"),
 		Env:     os.Environ(),
-		// TODO(m1:default-cmd): tmux's real behavior for bare `tmux`
-		// is "attach if any session exists, otherwise new-session."
-		// We'll wire that up once -t target parsing and a real
-		// client-side fallback chain land. For M1 we default to
-		// new-session so a fresh server still spawns its first pane
-		// — with the server's real HasSession check, bare attach on
-		// an empty registry would now error with "no sessions."
+		// Bare `tmux` creates a new session every invocation
+		// (running it from a second terminal does not auto-attach
+		// to the first). Matching that: the default client command
+		// is new-session.
 		Commands: []proto.Command{
 			{ID: 1, Argv: []string{"new-session"}},
 		},
