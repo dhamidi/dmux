@@ -181,6 +181,13 @@ func handle(conn net.Conn, rt *vt.Runtime) error {
 // the WriteFrame call happens on the pump goroutine so xio.FrameWriter's
 // single-writer contract holds without extra coordination.
 //
+// Kitty graphics placements captured by the pane's vt parser are
+// appended to the Output payload after the formatter wrap. The
+// renderer drops them entirely for clients whose profile lacks
+// kitty graphics support; for capable clients the first frame
+// transmits image bytes and subsequent frames re-place the cached
+// image ID.
+//
 // TODO(m1:server-render-coalesce): today we render on every pane-byte
 // chunk, which is correct but wasteful — bursty output (shell prompts)
 // produces several full-frame repaints when one would do. Add a small
@@ -195,7 +202,14 @@ func renderAndSend(p *pane.Pane, r *termout.Renderer, w xio.FrameWriter) error {
 	if err != nil {
 		return fmt.Errorf("server: cursor: %w", err)
 	}
+	placements, err := p.Placements()
+	if err != nil {
+		return fmt.Errorf("server: placements: %w", err)
+	}
 	data := r.Wrap(formatted, cur.Visible)
+	if kitty := r.EmitKitty(placements); len(kitty) > 0 {
+		data = append(data, kitty...)
+	}
 	if err := w.WriteFrame(&proto.Output{Data: data}); err != nil {
 		return fmt.Errorf("server: write Output: %w", err)
 	}

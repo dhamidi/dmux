@@ -251,3 +251,67 @@ func firstLine(s string) string {
 	}
 	return s
 }
+
+// TestPlacementsCapturesRGBImage feeds a kitty-graphics transmit+display
+// command carrying a 1x1 RGB pixel and checks that the placement
+// iterator surfaces it. Raw RGB (f=24) is used instead of PNG because
+// libghostty-vt's PNG path needs a decoder callback installed via
+// ghostty_sys_set; the wasm embedding has no mechanism to register one
+// from Go — see the TODO(m1:kitty-png-decoder) note on Placements.
+func TestPlacementsCapturesRGBImage(t *testing.T) {
+	r := newRuntime(t)
+	term := newTerminal(t, r, 40, 5)
+
+	// Seed pixel sizes so placement_grid_size has a divisor. resize
+	// takes cols/rows for grid, plus width/height per cell; the
+	// existing Resize hardcodes 8x16 for cell pixel size, which
+	// matches the C kitty example.
+	if err := term.Resize(40, 5); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+
+	// One RGB pixel: 0xFF 0x00 0x00. Base64-encoded is "/wAA".
+	// kitty requires s=<width>,v=<height> for raw formats so the
+	// terminal knows the pixel geometry.
+	apc := "\x1b_Ga=T,f=24,i=1,s=1,v=1,q=2;/wAA\x1b\\"
+	if err := term.Feed([]byte(apc)); err != nil {
+		t.Fatalf("Feed: %v", err)
+	}
+
+	placements, err := term.Placements()
+	if err != nil {
+		t.Fatalf("Placements: %v", err)
+	}
+	if len(placements) != 1 {
+		t.Fatalf("Placements count = %d, want 1", len(placements))
+	}
+	p := placements[0]
+	if p.ImageID != 1 {
+		t.Errorf("ImageID = %d, want 1", p.ImageID)
+	}
+	if p.Format != KittyFormatRGB {
+		t.Errorf("Format = %d, want RGB(%d)", p.Format, KittyFormatRGB)
+	}
+	if p.PixelWidth != 1 || p.PixelHeight != 1 {
+		t.Errorf("pixel dims = %dx%d, want 1x1", p.PixelWidth, p.PixelHeight)
+	}
+	if len(p.Data) != 3 || p.Data[0] != 0xFF || p.Data[1] != 0x00 || p.Data[2] != 0x00 {
+		t.Errorf("Data = %v, want [0xFF 0x00 0x00]", p.Data)
+	}
+}
+
+// TestPlacementsEmptyWhenNothingSent ensures Placements on a fresh
+// terminal returns an empty slice, not an error. Downstream callers
+// treat a nil return as "no kitty content on this frame."
+func TestPlacementsEmptyWhenNothingSent(t *testing.T) {
+	r := newRuntime(t)
+	term := newTerminal(t, r, 20, 5)
+
+	placements, err := term.Placements()
+	if err != nil {
+		t.Fatalf("Placements: %v", err)
+	}
+	if len(placements) != 0 {
+		t.Errorf("placements on empty terminal = %d, want 0", len(placements))
+	}
+}

@@ -189,6 +189,12 @@ type Terminal struct {
 	feedBuf    uint32
 	feedBufLen uint32
 
+	// kitty graphics passthrough: APC G commands are intercepted
+	// before they reach libghostty-vt. Bytes that are not part of an
+	// APC G sequence still pass through to vt_write unchanged. See
+	// kitty.go for why this lives in Go and not in the wasm.
+	kitty *kittyParser
+
 	closed bool
 }
 
@@ -213,6 +219,7 @@ func (r *Runtime) NewTerminal(ctx context.Context, cols, rows int) (*Terminal, e
 		ctx:    ctx,
 		mod:    mod,
 		memory: mod.Memory(),
+		kitty:  newKittyParser(),
 	}
 
 	// Resolve every export up front. A missing export means the
@@ -467,6 +474,13 @@ func (t *Terminal) writeU32(ptr uint32, v uint32) bool {
 // pipeline equivalent of "PTY wrote this; parse it." It never fails
 // on malformed input — libghostty-vt explicitly documents that
 // ghostty_terminal_vt_write treats its input as untrusted.
+//
+// Kitty graphics commands (APC G ... ST) are stripped here before
+// the bytes reach libghostty-vt. The wasm build of libghostty-vt
+// has kitty graphics compiled out, so feeding APC G bytes to it
+// would just waste cycles; instead we capture the placements into
+// the parser, where Placements() can hand them to the renderer for
+// passthrough re-emission to capable clients.
 func (t *Terminal) Feed(b []byte) error {
 	if t.closed {
 		return vtErr(OpFeed, ErrClosed, nil, "")
@@ -474,17 +488,56 @@ func (t *Terminal) Feed(b []byte) error {
 	if len(b) == 0 {
 		return nil
 	}
-	if err := t.ensureFeedBuf(t.ctx, uint32(len(b))); err != nil {
+
+	// Filter APC G out of the byte stream. The parser invokes our
+	// write callback once per contiguous run of non-kitty bytes; we
+	// buffer those into vtBytes and forward them to libghostty-vt in
+	// one vt_write call, avoiding wasm round-trips per fragment.
+	vtBytes := b
+	if t.kitty != nil {
+		vtBytes = vtBytes[:0:0]
+		err := t.kitty.process(b, func(chunk []byte) error {
+			vtBytes = append(vtBytes, chunk...)
+			return nil
+		})
+		if err != nil {
+			return vtErr(OpFeed, nil, err, "kitty parser")
+		}
+	}
+	if len(vtBytes) == 0 {
+		return nil
+	}
+	if err := t.ensureFeedBuf(t.ctx, uint32(len(vtBytes))); err != nil {
 		return err
 	}
-	if !t.memory.Write(t.feedBuf, b) {
+	if !t.memory.Write(t.feedBuf, vtBytes) {
 		return vtErr(OpFeed, nil, nil, "copy into wasm memory")
 	}
-	_, err := t.fnTermVTWrite.Call(t.ctx, uint64(t.termH), uint64(t.feedBuf), uint64(len(b)))
+	_, err := t.fnTermVTWrite.Call(t.ctx, uint64(t.termH), uint64(t.feedBuf), uint64(len(vtBytes)))
 	if err != nil {
 		return vtErr(OpFeed, nil, err, "vt_write")
 	}
 	return nil
+}
+
+// Placements returns the kitty graphics placements that have been
+// captured since the last call. Callers (typically a per-frame
+// render loop) consume the slice; the parser starts the next batch
+// empty.
+//
+// The returned slice is owned by the caller. Each Placement.Data is
+// a private copy of the assembled image bytes — safe to retain
+// across subsequent Feed/Placements calls.
+//
+// Returns nil (not an error) when no placements are pending.
+func (t *Terminal) Placements() ([]Placement, error) {
+	if t.closed {
+		return nil, vtErr(OpPlacements, ErrClosed, nil, "")
+	}
+	if t.kitty == nil {
+		return nil, nil
+	}
+	return t.kitty.take(), nil
 }
 
 // ensureFeedBuf grows the Feed scratch buffer if it cannot hold n

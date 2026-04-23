@@ -44,6 +44,7 @@ const (
 	OpSnapshot    Op = "snapshot"
 	OpCursor      Op = "cursor"
 	OpFormat      Op = "format"
+	OpPlacements  Op = "placements"
 	OpClose       Op = "close"
 )
 

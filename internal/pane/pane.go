@@ -56,14 +56,15 @@ var (
 type Op string
 
 const (
-	OpOpen     Op = "open"
-	OpWrite    Op = "write"
-	OpResize   Op = "resize"
-	OpSignal   Op = "signal"
-	OpClose    Op = "close"
-	OpSnapshot Op = "snapshot"
-	OpCursor   Op = "cursor"
-	OpFormat   Op = "format"
+	OpOpen       Op = "open"
+	OpWrite      Op = "write"
+	OpResize     Op = "resize"
+	OpSignal     Op = "signal"
+	OpClose      Op = "close"
+	OpSnapshot   Op = "snapshot"
+	OpCursor     Op = "cursor"
+	OpFormat     Op = "format"
+	OpPlacements Op = "placements"
 )
 
 // PaneError is the concrete error type returned by this package.
@@ -383,6 +384,25 @@ func (p *Pane) Format(opts vt.FormatOptions) ([]byte, error) {
 	out, err := p.vt.Format(opts)
 	if err != nil {
 		return nil, paneErr(OpFormat, nil, err, "")
+	}
+	return out, nil
+}
+
+// Placements returns the kitty graphics placements captured from the
+// pty stream since the last call. The vt.Terminal's parser owns the
+// state; this method only adapts the lock and the error type.
+//
+// Returns ErrNoVT when the pane was opened without a vt.Runtime, and
+// nil/nil when the parser has nothing pending.
+func (p *Pane) Placements() ([]vt.Placement, error) {
+	if p.vt == nil {
+		return nil, paneErr(OpPlacements, ErrNoVT, nil, "")
+	}
+	p.vtMu.Lock()
+	defer p.vtMu.Unlock()
+	out, err := p.vt.Placements()
+	if err != nil {
+		return nil, paneErr(OpPlacements, nil, err, "")
 	}
 	return out, nil
 }

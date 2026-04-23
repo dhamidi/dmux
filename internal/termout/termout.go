@@ -2,6 +2,8 @@ package termout
 
 import (
 	"bytes"
+	"encoding/base64"
+	"strconv"
 
 	"github.com/dhamidi/dmux/internal/termcaps"
 	"github.com/dhamidi/dmux/internal/vt"
@@ -22,13 +24,28 @@ import (
 // TODO(m1:termout-compose): rewrite formatter output to place a pane
 // inside a sub-rectangle of the real tty for multi-pane layouts.
 
+// kittyChunkSize is the maximum payload length per kitty graphics
+// command (the protocol caps it at 4096 base64 characters per chunk).
+// Sticking to the limit means even legacy terminals that buffer
+// per-APC parse it correctly.
+const kittyChunkSize = 4096
+
 // Renderer wraps libghostty-vt formatter output for one client. It
 // carries the client's profile so the appropriate format options
 // (hyperlinks only where the client supports them) are derived
 // automatically. One Renderer per client; cheap to construct.
+//
+// Renderer also tracks which kitty graphics image IDs we have
+// already transmitted to this client. The first frame for an image
+// emits transmit+place (a=T); subsequent frames re-place the same
+// image ID without resending the bytes (a=p). Multi-pane M2 will
+// remap server-side image IDs into a per-client ID space here so two
+// panes can independently use ID 1 without collision —
+// see TODO(m1:termout-kitty-rewrite).
 type Renderer struct {
-	profile termcaps.Profile
-	opts    vt.FormatOptions
+	profile  termcaps.Profile
+	opts     vt.FormatOptions
+	sentIDs  map[uint32]struct{}
 }
 
 // NewRenderer constructs a Renderer for the given profile. The profile
@@ -45,6 +62,7 @@ func NewRenderer(p termcaps.Profile) *Renderer {
 			Cursor:    true,
 			Hyperlink: f.OSC8,
 		},
+		sentIDs: make(map[uint32]struct{}),
 	}
 }
 
@@ -53,6 +71,155 @@ func NewRenderer(p termcaps.Profile) *Renderer {
 // Wrap on the result.
 func (r *Renderer) FormatOptions() vt.FormatOptions {
 	return r.opts
+}
+
+// EmitKitty serialises kitty graphics placements as APC G commands
+// for capable clients. Returns nil bytes when the renderer's profile
+// does not support kitty graphics (see termcaps.Features.KittyGraphics)
+// or when placements is empty.
+//
+// The first time a given ImageID is seen, EmitKitty emits a full
+// transmit+display command (a=T) carrying the base64-encoded image
+// data, chunked at the protocol's per-command limit. Subsequent
+// frames for the same ImageID emit a place-only command (a=p) so we
+// do not retransmit static images on every render.
+//
+// Output ordering: the formatter wrap (Wrap) emits cursor home +
+// erase, then the cell grid, then the cursor restore. APC G commands
+// emitted here go *after* the wrap so the image overlays the
+// formatter's grid at whatever cursor position the formatter left.
+// The kitty terminal is responsible for placing the image at the
+// current cursor unless the command specifies otherwise.
+//
+// TODO(m1:termout-kitty-rewrite): when multiple panes share one
+// client, image IDs from different panes must be rewritten into a
+// per-client ID space to avoid collision. The hook is here: walk
+// placements once, allocate a fresh client-side ID per
+// (paneID, ImageID), substitute it into the emitted commands. M1 is
+// single-pane so the substitution is the identity.
+func (r *Renderer) EmitKitty(placements []vt.Placement) []byte {
+	if len(placements) == 0 {
+		return nil
+	}
+	if !r.profile.Features().KittyGraphics {
+		return nil
+	}
+
+	var buf bytes.Buffer
+	for _, p := range placements {
+		_, alreadySent := r.sentIDs[p.ImageID]
+		if alreadySent {
+			r.emitPlace(&buf, p)
+			continue
+		}
+		r.emitTransmitAndPlace(&buf, p)
+		r.sentIDs[p.ImageID] = struct{}{}
+	}
+	return buf.Bytes()
+}
+
+// emitTransmitAndPlace writes a chunked APC G transmission for p,
+// using a=T on the first chunk and a=t on the rest. The kitty
+// protocol requires a=T (or a=t followed by a=p) on the *first*
+// chunk and m=1 on every chunk except the last; m=0 on the last
+// chunk also signals "now display."
+func (r *Renderer) emitTransmitAndPlace(buf *bytes.Buffer, p vt.Placement) {
+	encoded := base64.StdEncoding.EncodeToString(p.Data)
+
+	// Single-chunk fast path: build one APC with a=T plus the full
+	// payload. Most placements (raw RGB, small PNGs) fit.
+	if len(encoded) <= kittyChunkSize {
+		buf.WriteString("\x1b_G")
+		writeKittyHeader(buf, p, true /* withDisplay */, false /* more */)
+		buf.WriteByte(';')
+		buf.WriteString(encoded)
+		buf.WriteString("\x1b\\")
+		return
+	}
+
+	// Multi-chunk: first chunk carries the metadata + a=T + m=1,
+	// middle chunks carry only m=1, last chunk carries m=0.
+	for i := 0; i < len(encoded); i += kittyChunkSize {
+		end := i + kittyChunkSize
+		if end > len(encoded) {
+			end = len(encoded)
+		}
+		isFirst := i == 0
+		isLast := end == len(encoded)
+
+		buf.WriteString("\x1b_G")
+		if isFirst {
+			writeKittyHeader(buf, p, true /* withDisplay */, !isLast)
+		} else {
+			// Continuation chunks only carry the more flag.
+			buf.WriteString("m=")
+			if isLast {
+				buf.WriteByte('0')
+			} else {
+				buf.WriteByte('1')
+			}
+		}
+		buf.WriteByte(';')
+		buf.WriteString(encoded[i:end])
+		buf.WriteString("\x1b\\")
+	}
+}
+
+// emitPlace writes a place-existing-image command for p. We drop
+// payload bytes entirely; the receiving terminal already has the
+// image keyed by ImageID from our earlier transmit.
+func (r *Renderer) emitPlace(buf *bytes.Buffer, p vt.Placement) {
+	buf.WriteString("\x1b_Ga=p,i=")
+	buf.WriteString(strconv.FormatUint(uint64(p.ImageID), 10))
+	if p.PlacementID != 0 {
+		buf.WriteString(",p=")
+		buf.WriteString(strconv.FormatUint(uint64(p.PlacementID), 10))
+	}
+	buf.WriteString(",q=2")
+	buf.WriteString("\x1b\\")
+}
+
+// writeKittyHeader writes the comma-delimited control fields for an
+// APC G transmission command (everything between "\x1b_G" and ";").
+// withDisplay toggles a=T vs a=t; more sets m=1 vs m=0. The image
+// metadata (format, dimensions, ID) is always emitted on the first
+// chunk so the receiver can size its decoder.
+func writeKittyHeader(buf *bytes.Buffer, p vt.Placement, withDisplay, more bool) {
+	if withDisplay {
+		buf.WriteString("a=T")
+	} else {
+		buf.WriteString("a=t")
+	}
+	buf.WriteString(",f=")
+	buf.WriteString(strconv.FormatUint(uint64(p.Format), 10))
+	buf.WriteString(",i=")
+	buf.WriteString(strconv.FormatUint(uint64(p.ImageID), 10))
+	if p.PlacementID != 0 {
+		buf.WriteString(",p=")
+		buf.WriteString(strconv.FormatUint(uint64(p.PlacementID), 10))
+	}
+	if p.PixelWidth != 0 {
+		buf.WriteString(",s=")
+		buf.WriteString(strconv.FormatUint(uint64(p.PixelWidth), 10))
+	}
+	if p.PixelHeight != 0 {
+		buf.WriteString(",v=")
+		buf.WriteString(strconv.FormatUint(uint64(p.PixelHeight), 10))
+	}
+	if p.Cols != 0 {
+		buf.WriteString(",c=")
+		buf.WriteString(strconv.Itoa(p.Cols))
+	}
+	if p.Rows != 0 {
+		buf.WriteString(",r=")
+		buf.WriteString(strconv.Itoa(p.Rows))
+	}
+	buf.WriteString(",q=2")
+	if more {
+		buf.WriteString(",m=1")
+	} else {
+		buf.WriteString(",m=0")
+	}
 }
 
 // Wrap bookends the raw formatter output with the sequences every
