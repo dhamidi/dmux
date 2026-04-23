@@ -6,10 +6,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/dhamidi/dmux/internal/pty"
+	"github.com/dhamidi/dmux/internal/vt"
 )
 
 // drainUntilClosed collects every chunk from the pane's Bytes()
@@ -226,6 +228,74 @@ func TestOpenEmptyArgv(t *testing.T) {
 	}
 	if pe.Op != OpOpen {
 		t.Fatalf("expected Op=%s, got %s", OpOpen, pe.Op)
+	}
+}
+
+func TestSnapshotFromFeed(t *testing.T) {
+	ctx := context.Background()
+	rt, err := vt.NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("vt.NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { _ = rt.Close(ctx) })
+
+	p, err := Open(ctx, Config{
+		Argv: []string{"/bin/sh", "-c", "printf hello"},
+		Cols: 40, Rows: 5,
+		VT: rt,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer p.Close()
+
+	// Drain bytesCh to close (implying readLoop finished all Feeds)
+	// before snapshotting.
+	drainUntilClosed(t, p, 3*time.Second)
+	waitExited(t, p, 3*time.Second)
+
+	g, err := p.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if g.Rows < 1 || g.Cols < 5 {
+		t.Fatalf("grid too small: rows=%d cols=%d", g.Rows, g.Cols)
+	}
+	var line strings.Builder
+	for _, c := range g.Cells[0] {
+		if c.Rune == 0 {
+			break
+		}
+		line.WriteRune(c.Rune)
+	}
+	if !strings.HasPrefix(line.String(), "hello") {
+		t.Errorf("first row = %q, want prefix %q", line.String(), "hello")
+	}
+
+	cur, err := p.Cursor()
+	if err != nil {
+		t.Fatalf("Cursor: %v", err)
+	}
+	if cur.X != 5 || cur.Y != 0 {
+		t.Errorf("cursor = (%d,%d), want (5,0)", cur.X, cur.Y)
+	}
+}
+
+func TestSnapshotNoVTReturnsErrNoVT(t *testing.T) {
+	p, err := Open(context.Background(), Config{
+		Argv: []string{"/bin/sh", "-c", "printf hi"},
+		Cols: 40, Rows: 5,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer p.Close()
+
+	if _, err := p.Snapshot(); !errors.Is(err, ErrNoVT) {
+		t.Errorf("Snapshot without VT: expected ErrNoVT, got %v", err)
+	}
+	if _, err := p.Cursor(); !errors.Is(err, ErrNoVT) {
+		t.Errorf("Cursor without VT: expected ErrNoVT, got %v", err)
 	}
 }
 

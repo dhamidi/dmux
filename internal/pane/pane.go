@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/dhamidi/dmux/internal/pty"
+	"github.com/dhamidi/dmux/internal/vt"
 )
 
 // Current scope (M1 walking skeleton):
@@ -41,6 +42,12 @@ var (
 	// underlying pty sentinel (ErrOpenPty, ErrStartProcess, etc.)
 	// remains reachable via errors.Is.
 	ErrSpawn = errors.New("pane: spawn failed")
+
+	// ErrNoVT is returned by Snapshot and Cursor when the pane was
+	// opened without a vt.Runtime (Config.VT == nil). Callers that
+	// need structured grid state must provide a runtime at Open
+	// time; callers that only need raw bytes use Bytes().
+	ErrNoVT = errors.New("pane: no vt runtime")
 )
 
 // Op describes what the package was doing when an error arose.
@@ -49,11 +56,13 @@ var (
 type Op string
 
 const (
-	OpOpen   Op = "open"
-	OpWrite  Op = "write"
-	OpResize Op = "resize"
-	OpSignal Op = "signal"
-	OpClose  Op = "close"
+	OpOpen     Op = "open"
+	OpWrite    Op = "write"
+	OpResize   Op = "resize"
+	OpSignal   Op = "signal"
+	OpClose    Op = "close"
+	OpSnapshot Op = "snapshot"
+	OpCursor   Op = "cursor"
 )
 
 // PaneError is the concrete error type returned by this package.
@@ -129,12 +138,19 @@ func paneErr(op Op, sentinel, cause error, format string, args ...any) error {
 // already resolved Argv (Argv[0] is the executable path, not a
 // name to look up), merged Env from the appropriate option scopes,
 // picked Cwd, and chosen initial dimensions.
+//
+// VT is optional. When nil (M1 skeleton), Feed is a no-op and
+// Snapshot/Cursor return ErrNoVT — the server falls back to its
+// raw-bytes passthrough path. When non-nil, each pty chunk is fed
+// into a per-pane vt.Terminal before being forwarded on bytesCh,
+// and Snapshot/Cursor return live grid state.
 type Config struct {
-	Argv []string // resolved argv; Argv[0] is the executable path
-	Cwd  string   // cwd for the child
-	Env  []string // merged environment
-	Cols int      // initial cols (>0)
-	Rows int      // initial rows (>0)
+	Argv []string     // resolved argv; Argv[0] is the executable path
+	Cwd  string       // cwd for the child
+	Env  []string     // merged environment
+	Cols int          // initial cols (>0)
+	Rows int          // initial rows (>0)
+	VT   *vt.Runtime  // optional; when set the pane owns a vt.Terminal
 }
 
 // bytesChanBuffer is the slot count on the pty-output channel. Each
@@ -155,6 +171,13 @@ const readBufSize = 4096
 // exit status on Exited().
 //
 // All methods are goroutine-safe. Close is idempotent.
+//
+// vt access is serialized through vtMu. The contract is stricter
+// than the vt package's doc.go assumes: readLoop (goroutine A) calls
+// Feed, while the server goroutine (goroutine B) can call Snapshot,
+// Cursor, Resize, and Close. A single mutex is the simplest way to
+// keep vt.Terminal's single-goroutine rule honest across those
+// callers without a dedicated control-channel goroutine.
 type Pane struct {
 	pty *pty.PTY
 
@@ -169,6 +192,9 @@ type Pane struct {
 	closeOnce sync.Once
 	closeErr  error
 	closed    atomic.Bool
+
+	vtMu sync.Mutex
+	vt   *vt.Terminal // nil when Config.VT was nil
 }
 
 // Open spawns the child under a fresh pty and starts the helper
@@ -196,6 +222,17 @@ func Open(ctx context.Context, cfg Config) (*Pane, error) {
 		bytesCh:  make(chan []byte, bytesChanBuffer),
 		exitedCh: make(chan pty.ExitStatus, 1),
 	}
+
+	if cfg.VT != nil {
+		term, err := cfg.VT.NewTerminal(pCtx, cfg.Cols, cfg.Rows)
+		if err != nil {
+			cancel()
+			_ = p.Close()
+			return nil, paneErr(OpOpen, nil, err, "vt terminal")
+		}
+		pane.vt = term
+	}
+
 
 	pane.wg.Add(2)
 	go pane.readLoop()
@@ -227,6 +264,14 @@ func (p *Pane) Write(b []byte) (int, error) {
 func (p *Pane) Resize(cols, rows int) error {
 	if p.closed.Load() {
 		return paneErr(OpResize, ErrClosed, nil, "")
+	}
+	if p.vt != nil {
+		p.vtMu.Lock()
+		err := p.vt.Resize(cols, rows)
+		p.vtMu.Unlock()
+		if err != nil {
+			return paneErr(OpResize, nil, err, "vt resize cols=%d rows=%d", cols, rows)
+		}
 	}
 	if err := p.pty.Resize(cols, rows); err != nil {
 		return paneErr(OpResize, nil, err, "cols=%d rows=%d", cols, rows)
@@ -282,8 +327,46 @@ func (p *Pane) Close() error {
 		p.closeErr = p.pty.Close()
 
 		p.wg.Wait()
+
+		if p.vt != nil {
+			p.vtMu.Lock()
+			_ = p.vt.Close()
+			p.vtMu.Unlock()
+		}
 	})
 	return p.closeErr
+}
+
+// Snapshot returns a reified view of the terminal's live screen. Safe
+// to call from any goroutine; serialized against readLoop's Feed via
+// vtMu so the wasm module sees one caller at a time. Returns ErrNoVT
+// when the pane was opened without a vt.Runtime.
+func (p *Pane) Snapshot() (vt.Grid, error) {
+	if p.vt == nil {
+		return vt.Grid{}, paneErr(OpSnapshot, ErrNoVT, nil, "")
+	}
+	p.vtMu.Lock()
+	defer p.vtMu.Unlock()
+	g, err := p.vt.Snapshot()
+	if err != nil {
+		return vt.Grid{}, paneErr(OpSnapshot, nil, err, "")
+	}
+	return g, nil
+}
+
+// Cursor returns the cursor position of the live screen. Same
+// goroutine-safety and ErrNoVT contract as Snapshot.
+func (p *Pane) Cursor() (vt.Cursor, error) {
+	if p.vt == nil {
+		return vt.Cursor{}, paneErr(OpCursor, ErrNoVT, nil, "")
+	}
+	p.vtMu.Lock()
+	defer p.vtMu.Unlock()
+	c, err := p.vt.Cursor()
+	if err != nil {
+		return vt.Cursor{}, paneErr(OpCursor, nil, err, "")
+	}
+	return c, nil
 }
 
 // readLoop is the pty reader helper. It runs a Read loop, emitting
@@ -302,11 +385,21 @@ func (p *Pane) readLoop() {
 	for {
 		n, err := p.pty.Read(buf)
 		if n > 0 {
-			// TODO(m1:pane-vt): once internal/vt lands, feed buf[:n]
-			// to vt.Terminal.Feed here (on the pane goroutine) and
-			// push snapshots to the server rather than raw bytes.
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
+			if p.vt != nil {
+				p.vtMu.Lock()
+				feedErr := p.vt.Feed(chunk)
+				p.vtMu.Unlock()
+				if feedErr != nil && !errors.Is(feedErr, vt.ErrClosed) {
+					// Feed only fails on wasm-side problems. Drop the
+					// chunk from the vt pipeline but still forward the
+					// raw bytes so the skeleton output path keeps
+					// working. The caller sees the error next time they
+					// call Snapshot.
+					_ = feedErr
+				}
+			}
 			select {
 			case p.bytesCh <- chunk:
 			case <-p.ctx.Done():

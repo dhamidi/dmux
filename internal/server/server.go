@@ -14,6 +14,7 @@ import (
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/pty"
 	"github.com/dhamidi/dmux/internal/socket"
+	"github.com/dhamidi/dmux/internal/vt"
 	"github.com/dhamidi/dmux/internal/xio"
 )
 
@@ -48,6 +49,16 @@ func Run(path string) error {
 	}
 	defer l.Close()
 
+	// One Runtime per server process: compiling the wasm module is
+	// expensive, and each Terminal gets its own Module instance anyway
+	// so the runtime is safe to share across panes.
+	rtCtx := context.Background()
+	rt, err := vt.NewRuntime(rtCtx)
+	if err != nil {
+		return fmt.Errorf("server: vt runtime: %w", err)
+	}
+	defer rt.Close(rtCtx)
+
 	conn, err := l.Accept()
 	if err != nil {
 		return fmt.Errorf("server: accept: %w", err)
@@ -57,7 +68,7 @@ func Run(path string) error {
 	// goroutine unblocking; this defer covers error paths between
 	// Accept and pump and is a no-op after an earlier Close.
 	defer conn.Close()
-	return handle(conn)
+	return handle(conn, rt)
 }
 
 // handle runs one client. Sequence:
@@ -75,7 +86,7 @@ func Run(path string) error {
 //  4. On Bye → Exit{Detached}; on pane exit → Exit{ExitedShell}; on
 //     client-side EOF → return without sending Exit (connection is
 //     already gone).
-func handle(conn net.Conn) error {
+func handle(conn net.Conn, rt *vt.Runtime) error {
 	frameR := xio.NewReader(conn)
 	frameW := xio.NewWriter(conn)
 
@@ -117,6 +128,7 @@ func handle(conn net.Conn) error {
 		Env:  childEnv(ident.Env, ident.TermEnv),
 		Cols: cols,
 		Rows: rows,
+		VT:   rt,
 	})
 	if err != nil {
 		msg := err.Error()
