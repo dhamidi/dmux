@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"github.com/dhamidi/dmux/internal/options"
 )
 
 // Command is the minimal interface every registered command
@@ -50,6 +52,27 @@ type Item interface {
 	// A nil target means "no attach" — the connection closes after
 	// the command drain without entering pump.
 	SetAttachTarget(SessionRef)
+	// Options exposes the scope-chain options view this Item
+	// reads from. Commands that store state scoped to the running
+	// server (including user options like @client/<name>) write
+	// here; inheritance propagates the value to narrower scopes.
+	Options() *options.Options
+	// Clients exposes the in-process client manager. Commands
+	// that spawn synthetic clients (test harnesses, AI agents,
+	// hooks) call Spawn to create one and Kill to tear it down.
+	Clients() ClientManager
+}
+
+// ClientManager is the Item-facing surface of the server's
+// in-process client table. Spawn creates a client attached to the
+// same server process (via the real wire protocol, not a shortcut)
+// and returns an opaque reference string the caller stores for later
+// lookup. Kill tears down the client named by ref; a ref that does
+// not correspond to a live client returns an error wrapping
+// ErrStaleClient so callers can tolerate bookkeeping drift.
+type ClientManager interface {
+	Spawn(profile string, cols, rows int) (ref string, err error)
+	Kill(ref string) error
 }
 
 // Client is the attach-client's view of its own identity. The
@@ -163,6 +186,12 @@ var (
 	// ErrParseFailure: argv failed flag.Parse or the command-line
 	// syntax parser rejected it. Reserved for M2.
 	ErrParseFailure = errors.New("cmd: parse failure")
+
+	// ErrStaleClient: a Kill was requested on a client reference
+	// that no longer corresponds to a live client. Callers that
+	// keep bookkeeping in user options (e.g. @client/<name>) use
+	// errors.Is to distinguish "already gone" from real failures.
+	ErrStaleClient = errors.New("cmd: stale client reference")
 )
 
 // registry is the global name-to-Command map populated by Register

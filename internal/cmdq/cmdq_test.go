@@ -6,6 +6,7 @@ import (
 
 	"github.com/dhamidi/dmux/internal/cmd"
 	"github.com/dhamidi/dmux/internal/cmdq"
+	"github.com/dhamidi/dmux/internal/options"
 )
 
 type fakeItem struct{}
@@ -15,6 +16,8 @@ func (fakeItem) Shutdown(string)                {}
 func (fakeItem) Client() cmd.Client             { return nil }
 func (fakeItem) Sessions() cmd.SessionLookup    { return nil }
 func (fakeItem) SetAttachTarget(cmd.SessionRef) {}
+func (fakeItem) Options() *options.Options      { return nil }
+func (fakeItem) Clients() cmd.ClientManager     { return nil }
 
 type recordingCmd struct {
 	name  string

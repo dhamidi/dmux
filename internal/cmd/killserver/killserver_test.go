@@ -6,6 +6,7 @@ import (
 
 	"github.com/dhamidi/dmux/internal/cmd"
 	"github.com/dhamidi/dmux/internal/cmd/killserver"
+	"github.com/dhamidi/dmux/internal/options"
 )
 
 type recordingItem struct{ msg string }
@@ -15,6 +16,8 @@ func (*recordingItem) Client() cmd.Client             { return nil }
 func (*recordingItem) Sessions() cmd.SessionLookup    { return nil }
 func (*recordingItem) SetAttachTarget(cmd.SessionRef) {}
 func (i *recordingItem) Shutdown(m string)            { i.msg = m }
+func (*recordingItem) Options() *options.Options      { return nil }
+func (*recordingItem) Clients() cmd.ClientManager     { return nil }
 
 func TestExecCallsShutdown(t *testing.T) {
 	c, ok := cmd.Lookup(killserver.Name)

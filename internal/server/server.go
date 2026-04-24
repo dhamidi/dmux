@@ -555,6 +555,28 @@ func (i *serverItem) Sessions() cmd.SessionLookup { return serverSessionLookup{i
 // decide whether to enter pump and against which session.
 func (i *serverItem) SetAttachTarget(ref cmd.SessionRef) { i.attachTarget = ref }
 
+// Options returns the server-scope options table. Commands that
+// store cross-connection state (user options @client/<name>, hook
+// bookkeeping, scriptable references) write here; inheritance
+// propagates to narrower scopes.
+func (i *serverItem) Options() *options.Options { return i.state.serverOptions }
+
+// Clients returns the in-process client manager. The stub returned
+// here reports ErrNotImplemented from Spawn/Kill; real implementation
+// arrives alongside the dmuxtest harness when it lands.
+func (i *serverItem) Clients() cmd.ClientManager { return stubClientManager{} }
+
+// stubClientManager is a placeholder ClientManager whose Spawn and
+// Kill both report ErrNotImplemented. Replaced once the in-process
+// client table lands.
+type stubClientManager struct{}
+
+func (stubClientManager) Spawn(string, int, int) (string, error) {
+	return "", cmd.ErrNotImplemented
+}
+
+func (stubClientManager) Kill(string) error { return cmd.ErrNotImplemented }
+
 // shutdownRequested is the read side of the local bit set by
 // Shutdown. Separate from serverState.shutdown() because we only
 // want "did one of my Items ask?" — racing kill-servers from other

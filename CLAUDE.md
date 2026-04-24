@@ -85,3 +85,95 @@ What makes a good error in this codebase:
    tests for a string, that string is load-bearing. Prefer adding
    structured fields over changing wording; call out wording
    changes in the commit message when unavoidable.
+
+## Implementing commands
+
+Commands live in `internal/cmd/<name>/` and share a small set of
+conventions. New commands should follow them so the queue, the
+argv parser, and the option-table integration stay uniform.
+
+1. **One package per command; zero-struct implementation.** Each
+   command exports a `Name` constant and registers a zero-sized
+   `command struct{}` in `init()`:
+
+   ```go
+   const Name = "new-session"
+   type command struct{}
+   func (command) Name() string { return Name }
+   func (command) Exec(item cmd.Item, argv []string) cmd.Result { ... }
+   func init() { cmd.Register(command{}) }
+   ```
+
+   The struct is stateless on purpose: everything mutable lives on
+   `cmd.Item`. Registration happens at init-time, so importing the
+   package (usually via a blank import in `cmd/dmux/main.go`) is
+   what wires the command into the registry.
+
+2. **Parse argv with `internal/cmd/args`, not raw `flag`.** The
+   `args` package bundles a `flag.FlagSet` with an ordered list of
+   typed positionals. Declare dashed flags with `s.String` /
+   `s.Bool` / `s.Int` and positionals with `s.StringArg` /
+   `s.BoolArg` / `s.IntArg`. `s.Parse(argv[1:])` fills both; extra
+   tokens are available via `s.Rest()`. Parse failures come back
+   as `*args.ParseError` so call sites that care about phase
+   ("flags" vs "positional") can `errors.As` into it. Required
+   positionals are checked by the command after Parse — treat a
+   missing handle as a `*args.ParseError` with the positional's
+   name so diagnostics are uniform with flag errors.
+
+3. **TCL-style ensembles when a command has subcommands.** When a
+   command groups related operations (`client spawn`, `client
+   kill`), implement one registered command whose Exec dispatches
+   on `argv[1]`. Unknown subcommands return a `*args.ParseError`
+   (Phase: `"positional"`, Name: `"subcommand"`, Value: the bad
+   token) so callers get the same structured diagnostic as any
+   other parse failure. Keep each subcommand's flag set local to
+   its handler; do not share a `args.Set` across branches.
+
+4. **Extending `cmd.Item` is how commands get new capabilities.**
+   When a command needs a facility the Item interface does not
+   expose (option table access, client manager, hook firing,
+   logging sink), add a narrow accessor to `cmd.Item` and a
+   matching method on `serverItem`. Define the capability as its
+   own interface (`ClientManager`, `SessionLookup`) so fakes in
+   tests can implement just the surface they need. Commands read
+   through `item.Options()` / `item.Clients()` / etc. — never
+   import server internals directly.
+
+5. **User options (`@<name>`) are the symbol table for named
+   handles.** When a command needs to remember a handle across
+   invocations (spawned clients, AI agents, pending prompts), write
+   the opaque reference to a user option (`@client/<name>`,
+   `@agent/<name>`) as a `String` value and read it back on later
+   invocations. This unifies scenario scripts with production use:
+   both reach the handle by name through the normal options
+   scope-chain, no separate namespace. `options.IsUserOption`
+   identifies the prefix; unset user options read as the empty
+   string, which is the signal for "no such handle yet".
+
+6. **Tolerate stale references.** Any command that acts on a
+   previously-stored handle must tolerate the underlying resource
+   already being gone. The convention is: the capability interface
+   (e.g. `ClientManager.Kill`) returns an error wrapping
+   `cmd.ErrStaleClient` (or the package's equivalent sentinel) when
+   the ref no longer resolves; the calling command uses
+   `errors.Is` to treat that as success. Unset the user option
+   *before* calling the underlying tear-down so repeated
+   invocations converge regardless of outcome.
+
+7. **Roll back on partial failure.** When a command performs two
+   steps that must both succeed (spawn a client, then record its
+   ref), undo the first if the second fails. The `client spawn`
+   path is the template: if `Options().Set` fails after a
+   successful `Clients().Spawn`, call `Clients().Kill(ref)` before
+   returning. Leaking an untracked resource is worse than returning
+   the original error — the caller can retry, but only if the
+   world is back to a known state.
+
+8. **Test with fakes that implement only the surface the command
+   uses.** Each command's test file declares a local `fakeItem`
+   that satisfies `cmd.Item` by returning `nil` from every method
+   it does not exercise, plus a dedicated fake for each capability
+   it does (e.g. a `fakeClients` that tracks spawn/kill calls in a
+   map). Keep the fakes in the `_test.go` file — they are
+   per-command scaffolding, not shared infrastructure.

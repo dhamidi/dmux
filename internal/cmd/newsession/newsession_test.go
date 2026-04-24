@@ -6,6 +6,7 @@ import (
 
 	"github.com/dhamidi/dmux/internal/cmd"
 	"github.com/dhamidi/dmux/internal/cmd/newsession"
+	"github.com/dhamidi/dmux/internal/options"
 )
 
 type fakeSessionRef struct{ id uint64 }
@@ -33,6 +34,8 @@ func (*fakeItem) Shutdown(string)                    {}
 func (*fakeItem) Client() cmd.Client                 { return nil }
 func (i *fakeItem) Sessions() cmd.SessionLookup      { return i.sessions }
 func (i *fakeItem) SetAttachTarget(r cmd.SessionRef) { i.target = r }
+func (*fakeItem) Options() *options.Options          { return nil }
+func (*fakeItem) Clients() cmd.ClientManager         { return nil }
 
 func TestExecCreatesSessionAndSetsTarget(t *testing.T) {
 	c, ok := cmd.Lookup(newsession.Name)
