@@ -1,0 +1,7 @@
+# basic.scenario — walking skeleton. A session exists, a synthetic
+# client attaches, then detaches. No assertions — this just proves
+# the harness drives real commands through a real server.
+
+new-session
+client spawn c
+client kill c
