@@ -7,17 +7,19 @@ import (
 	"github.com/dhamidi/dmux/internal/cmd"
 	"github.com/dhamidi/dmux/internal/cmdq"
 	"github.com/dhamidi/dmux/internal/options"
+	"github.com/dhamidi/dmux/internal/proto"
 )
 
 type fakeItem struct{}
 
-func (fakeItem) Context() context.Context       { return context.Background() }
-func (fakeItem) Shutdown(string)                {}
-func (fakeItem) Client() cmd.Client             { return nil }
-func (fakeItem) Sessions() cmd.SessionLookup    { return nil }
-func (fakeItem) SetAttachTarget(cmd.SessionRef) {}
-func (fakeItem) Options() *options.Options      { return nil }
-func (fakeItem) Clients() cmd.ClientManager     { return nil }
+func (fakeItem) Context() context.Context             { return context.Background() }
+func (fakeItem) Shutdown(string)                      {}
+func (fakeItem) Client() cmd.Client                   { return nil }
+func (fakeItem) Sessions() cmd.SessionLookup          { return nil }
+func (fakeItem) SetAttachTarget(cmd.SessionRef)       {}
+func (fakeItem) SetDetach(proto.ExitReason, string)   {}
+func (fakeItem) Options() *options.Options            { return nil }
+func (fakeItem) Clients() cmd.ClientManager           { return nil }
 
 type recordingCmd struct {
 	name  string

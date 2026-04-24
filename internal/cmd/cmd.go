@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/dhamidi/dmux/internal/options"
+	"github.com/dhamidi/dmux/internal/proto"
 )
 
 // Command is the minimal interface every registered command
@@ -52,6 +53,13 @@ type Item interface {
 	// A nil target means "no attach" — the connection closes after
 	// the command drain without entering pump.
 	SetAttachTarget(SessionRef)
+	// SetDetach records the detach intent for this connection. After
+	// the queue drains, the server reads the recorded (reason,
+	// message) pair, writes proto.Exit{Reason: reason, Message:
+	// message}, and closes the connection. Mutually exclusive with
+	// SetAttachTarget within a single invocation — if both are set,
+	// detach wins.
+	SetDetach(reason proto.ExitReason, message string)
 	// Options exposes the scope-chain options view this Item
 	// reads from. Commands that store state scoped to the running
 	// server (including user options like @client/<name>) write

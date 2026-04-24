@@ -1,75 +1,127 @@
 // Package detachclient implements the detach-client command.
 //
-// detach-client cleanly disconnects a synthetic client previously
-// created by attach-client. It simulates the client closing its end
-// of the socket — the same code path the server exercises when a
-// user closes their terminal window or SIGHUPs a real dmux binary.
+// detach-client is the user-facing, tmux-compatible command that
+// tells an attached client to leave its session. Invoked without
+// arguments from inside an attached session, it detaches the calling
+// client — the same effect a user gets from the default prefix-d
+// binding. The server sends the client a proto.Exit frame with
+// reason proto.ExitDetached and then closes the connection; the
+// client exits cleanly and the user's terminal returns to the shell
+// that ran dmux.
 //
-// This is distinct from any server-initiated detach (future
-// detach-session, or the server's response to prefix-d): those
-// originate in the server and close the connection from the server
-// side. detach-client closes from the client side, letting the
-// server observe the drop through its reader goroutine.
+// This command is distinct from the "client" ensemble
+// (internal/cmd/client), which is scenario tooling for driving
+// synthetic in-process clients by name. `client kill` tears a
+// synthetic client down from the outside; `detach-client` asks the
+// server to detach a real attached client from the inside. The two
+// address different layers and must not be conflated.
 //
 // # Synopsis
 //
-//	detach-client <handle>
+//	detach-client
+//
+// Milestone one accepts no flags and no arguments: the command
+// detaches the calling client only.
 //
 // # Typed args
 //
 //	type Args struct {
-//	    Handle string  // positional: =A, =B
-//	    Hard   bool    // -H, close socket without sending Bye
+//	    Target     string `dmux:"t=target-client"  help:"detach the named client"`
+//	    Session    string `dmux:"s=target-session" help:"detach every client on the session"`
+//	    AllExcept  bool   `dmux:"a"                help:"with -s, detach every client except the caller"`
+//	    Parent     bool   `dmux:"P"                help:"send SIGHUP to the client process instead of closing"`
+//	    ShellExec  string `dmux:"E=shell-command"  help:"run shell-command on the client before detaching"`
 //	}
 //
-// # Behaviour
+// No flags are implemented in milestone one.
 //
-//  1. Look up the synthetic client by handle. Fail if unknown.
-//  2. Send a proto.Bye frame on the connection (unless -H).
-//  3. Wait for the Exit frame from the server.
-//  4. Close the connection.
-//  5. Remove the handle from the client table.
-//  6. Return cmd.Ok.
+// Deferred (not on the struct yet): Target, Session, AllExcept,
+// Parent, ShellExec. Target and Session both require a server-side
+// client registry that M1 does not expose; Parent and ShellExec
+// require additional exit-path plumbing that is out of scope for the
+// walking skeleton.
 //
-// # Why not reuse some server-side detach?
+// # Behavior
 //
-// A server-side detach runs inside the server's main goroutine and
-// closes the connection from that end. The server picks the Exit
-// reason, sends it, and tears down. detach-client instead simulates
-// the passive-disconnect path: user closes terminal, network drops,
-// dmux process gets SIGHUP. The two have different server code
-// paths:
+//  1. Read the calling client off the Item. The M1 invocation always
+//     originates from the very connection that will be detached;
+//     there is no target resolution to perform.
+//  2. Record the detach intent on the Item by calling
+//     SetDetach(proto.ExitDetached, "detach-client"). The command
+//     does not itself send a frame; the server reads the recorded
+//     intent after the queue drains and emits the Exit frame along
+//     the normal exit path.
+//  3. Return cmd.Ok. The successful Result is the signal to the
+//     server that "this connection should exit with the recorded
+//     reason once the queue finishes" rather than "enter pump
+//     against an attach target."
 //
-//	server-initiated   server decides, sends Exit, closes socket
-//	detach-client      client closes socket, server notices via
-//	                   reader goroutine's read error
+// # Attachment semantics
 //
-// Both paths matter and are exercised separately.
+// detach-client is the inverse of attach-session: attach-session
+// records a SessionRef on the Item for the server to enter pump
+// against after the queue drains, detach-client records an
+// ExitReason for the server to emit and then close. The two paths
+// are mutually exclusive within a single command invocation — a
+// successful Exec sets at most one of attach-target or detach-intent,
+// and the server picks the corresponding post-drain action.
 //
-// For scenarios testing user-initiated detach via prefix-d (M2-2),
-// write `client at =A "\x02d"` instead — that drives the same
-// server-initiated path a real user would trigger.
+// Matches tmux: a detached client is fully disconnected. It does not
+// linger in the session's client list, its key-table state and
+// render frame cache are dropped, and its socket is closed. Other
+// clients attached to the same session are unaffected.
 //
-// # Ungraceful disconnect
+// # Server integration
 //
-// For scenarios testing "what if the network drops", use
-// detach-client with -H (hard):
+// The implementation requires one narrow addition to the cmd.Item
+// interface, symmetric to SetAttachTarget:
 //
-//	detach-client =A -H
+//	SetDetach(reason proto.ExitReason, message string)
 //
-// This closes the socket without sending Bye, simulating an unclean
-// disconnect. The server sees read error on the connection and
-// synthesizes Exit{Lost}.
+// The server's serverItem records the pair on the per-connection
+// command context. After the queue drains, the server checks for a
+// recorded detach intent before considering attach: if present, it
+// writes proto.Exit{Reason: reason, Message: message} and closes
+// the connection; otherwise it falls through to the existing
+// attach-or-exit logic. A nil-or-unset detach intent preserves
+// current behavior for every other command.
+//
+// # Exit reasons
+//
+// Milestone one emits proto.ExitDetached on the calling client.
+// When -t (deferred) lands, the targeted other client receives
+// proto.ExitDetachedOther; the caller itself still sees a normal
+// CommandResult because its own connection is not detached. The
+// -s (deferred) path fans proto.ExitDetachedOther out to every
+// matching client; with -a the caller is excluded from the fan-out.
+//
+// # Error sentinels
+//
+// The M1 no-arg case introduces no new failure modes: there is no
+// target to resolve, no argument to validate, and the calling client
+// is always known. Exec returns cmd.Ok unconditionally.
+//
+// TODO(m2:detach-target): once -t and -s land, resolve targets
+// through a ClientLookup capability on Item. Unknown clients wrap
+// cmd.ErrNotFound; syntactically-ill-formed target specs wrap
+// cmd.ErrInvalidTarget. Both sentinels are already defined in
+// internal/cmd.
 //
 // # Registration
 //
-//	var Cmd = cmd.New("detach-client", nil, exec)
+//	const Name = "detach-client"
 //
-//	func init() { cmd.Register(Cmd) }
+//	type command struct{}
 //
-// # Scope boundary
+//	func (command) Name() string { return Name }
+//	func (command) Exec(item cmd.Item, _ []string) cmd.Result {
+//	    item.SetDetach(proto.ExitDetached, Name)
+//	    return cmd.Ok()
+//	}
 //
-// Affects only the synthetic client named. No server-side cleanup
-// beyond what the server does in response to a real client
-// disconnect.
+//	func init() { cmd.Register(command{}) }
+//
+// # Corresponding tmux code
+//
+// cmd-detach-client.c.
 package detachclient

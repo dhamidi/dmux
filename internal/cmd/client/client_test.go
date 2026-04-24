@@ -10,6 +10,7 @@ import (
 	"github.com/dhamidi/dmux/internal/cmd/args"
 	"github.com/dhamidi/dmux/internal/cmd/client"
 	"github.com/dhamidi/dmux/internal/options"
+	"github.com/dhamidi/dmux/internal/proto"
 )
 
 type fakeClients struct {
@@ -77,13 +78,14 @@ type fakeItem struct {
 	clients *fakeClients
 }
 
-func (*fakeItem) Context() context.Context       { return context.Background() }
-func (*fakeItem) Shutdown(string)                {}
-func (*fakeItem) Client() cmd.Client             { return nil }
-func (*fakeItem) Sessions() cmd.SessionLookup    { return nil }
-func (*fakeItem) SetAttachTarget(cmd.SessionRef) {}
-func (i *fakeItem) Options() *options.Options    { return i.opts }
-func (i *fakeItem) Clients() cmd.ClientManager   { return i.clients }
+func (*fakeItem) Context() context.Context             { return context.Background() }
+func (*fakeItem) Shutdown(string)                      {}
+func (*fakeItem) Client() cmd.Client                   { return nil }
+func (*fakeItem) Sessions() cmd.SessionLookup          { return nil }
+func (*fakeItem) SetAttachTarget(cmd.SessionRef)       {}
+func (*fakeItem) SetDetach(proto.ExitReason, string)   {}
+func (i *fakeItem) Options() *options.Options          { return i.opts }
+func (i *fakeItem) Clients() cmd.ClientManager         { return i.clients }
 
 func newFakeItem() *fakeItem {
 	return &fakeItem{

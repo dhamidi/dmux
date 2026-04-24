@@ -522,11 +522,14 @@ func (s *serverState) shutdownRegistry() {
 // see the narrow cmd.Item interface — commands never reach into
 // serverState directly.
 type serverItem struct {
-	state        *serverState
-	ctx          context.Context
-	ident        *proto.Identify
-	shutdown     bool
-	attachTarget cmd.SessionRef
+	state         *serverState
+	ctx           context.Context
+	ident         *proto.Identify
+	shutdown      bool
+	attachTarget  cmd.SessionRef
+	detachSet     bool
+	detachReason  proto.ExitReason
+	detachMessage string
 }
 
 // Context returns the per-connection context.
@@ -554,6 +557,16 @@ func (i *serverItem) Sessions() cmd.SessionLookup { return serverSessionLookup{i
 // to after the command queue drains. handle() reads it back to
 // decide whether to enter pump and against which session.
 func (i *serverItem) SetAttachTarget(ref cmd.SessionRef) { i.attachTarget = ref }
+
+// SetDetach records the detach intent for this connection. handle()
+// consults it after the queue drains: when set, it writes the
+// recorded Exit frame and returns without considering attachTarget,
+// so detach wins over any attach-family command in the same queue.
+func (i *serverItem) SetDetach(reason proto.ExitReason, message string) {
+	i.detachSet = true
+	i.detachReason = reason
+	i.detachMessage = message
+}
 
 // Options returns the server-scope options table. Commands that
 // store cross-connection state (user options @client/<name>, hook
@@ -799,6 +812,19 @@ func handle(conn net.Conn, state *serverState) error {
 
 	if writeErr != nil {
 		return writeErr
+	}
+
+	// Detach dispatch: detach-family commands record an exit intent
+	// via SetDetach. A recorded intent wins over any attach target in
+	// the same queue — the connection is supposed to leave, not enter
+	// pump. Emit the recorded Exit frame and return; the deferred
+	// conn.Close closes the socket.
+	if item.detachSet {
+		_ = frameW.WriteFrame(&proto.Exit{
+			Reason:  item.detachReason,
+			Message: item.detachMessage,
+		})
+		return nil
 	}
 
 	// Attach dispatch: a successful attach-family command records a

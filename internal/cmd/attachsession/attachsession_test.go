@@ -8,6 +8,7 @@ import (
 	"github.com/dhamidi/dmux/internal/cmd"
 	"github.com/dhamidi/dmux/internal/cmd/attachsession"
 	"github.com/dhamidi/dmux/internal/options"
+	"github.com/dhamidi/dmux/internal/proto"
 )
 
 type fakeSessionRef struct{}
@@ -27,13 +28,14 @@ type fakeItem struct {
 	target   cmd.SessionRef
 }
 
-func (*fakeItem) Context() context.Context            { return context.Background() }
-func (*fakeItem) Shutdown(string)                     {}
-func (*fakeItem) Client() cmd.Client                  { return nil }
-func (i *fakeItem) Sessions() cmd.SessionLookup      { return i.sessions }
-func (i *fakeItem) SetAttachTarget(r cmd.SessionRef) { i.target = r }
-func (*fakeItem) Options() *options.Options          { return nil }
-func (*fakeItem) Clients() cmd.ClientManager         { return nil }
+func (*fakeItem) Context() context.Context             { return context.Background() }
+func (*fakeItem) Shutdown(string)                      {}
+func (*fakeItem) Client() cmd.Client                   { return nil }
+func (i *fakeItem) Sessions() cmd.SessionLookup        { return i.sessions }
+func (i *fakeItem) SetAttachTarget(r cmd.SessionRef)   { i.target = r }
+func (*fakeItem) SetDetach(proto.ExitReason, string)   {}
+func (*fakeItem) Options() *options.Options            { return nil }
+func (*fakeItem) Clients() cmd.ClientManager           { return nil }
 
 func TestExec(t *testing.T) {
 	c, ok := cmd.Lookup(attachsession.Name)

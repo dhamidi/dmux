@@ -11,6 +11,7 @@ import (
 	"github.com/dhamidi/dmux/internal/cmd/args"
 	"github.com/dhamidi/dmux/internal/cmd/recorder"
 	"github.com/dhamidi/dmux/internal/options"
+	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/record"
 )
 
@@ -19,13 +20,14 @@ import (
 // flips state through the package-level record.SetLevel.
 type fakeItem struct{}
 
-func (*fakeItem) Context() context.Context       { return context.Background() }
-func (*fakeItem) Shutdown(string)                {}
-func (*fakeItem) Client() cmd.Client             { return nil }
-func (*fakeItem) Sessions() cmd.SessionLookup    { return nil }
-func (*fakeItem) SetAttachTarget(cmd.SessionRef) {}
-func (*fakeItem) Options() *options.Options      { return nil }
-func (*fakeItem) Clients() cmd.ClientManager     { return nil }
+func (*fakeItem) Context() context.Context             { return context.Background() }
+func (*fakeItem) Shutdown(string)                      {}
+func (*fakeItem) Client() cmd.Client                   { return nil }
+func (*fakeItem) Sessions() cmd.SessionLookup          { return nil }
+func (*fakeItem) SetAttachTarget(cmd.SessionRef)       {}
+func (*fakeItem) SetDetach(proto.ExitReason, string)   {}
+func (*fakeItem) Options() *options.Options            { return nil }
+func (*fakeItem) Clients() cmd.ClientManager           { return nil }
 
 func lookupRecorder(t *testing.T) cmd.Command {
 	t.Helper()

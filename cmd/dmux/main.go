@@ -15,7 +15,6 @@ import (
 	// Blank imports populate the cmd registry at process start. This is
 	// the single point where the binary decides which commands exist;
 	// the server side looks everything up by name through cmd.Lookup.
-	_ "github.com/dhamidi/dmux/internal/cmd/attachclient"
 	_ "github.com/dhamidi/dmux/internal/cmd/attachsession"
 	_ "github.com/dhamidi/dmux/internal/cmd/client"
 	_ "github.com/dhamidi/dmux/internal/cmd/detachclient"

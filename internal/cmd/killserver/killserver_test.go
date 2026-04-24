@@ -7,17 +7,19 @@ import (
 	"github.com/dhamidi/dmux/internal/cmd"
 	"github.com/dhamidi/dmux/internal/cmd/killserver"
 	"github.com/dhamidi/dmux/internal/options"
+	"github.com/dhamidi/dmux/internal/proto"
 )
 
 type recordingItem struct{ msg string }
 
-func (*recordingItem) Context() context.Context       { return context.Background() }
-func (*recordingItem) Client() cmd.Client             { return nil }
-func (*recordingItem) Sessions() cmd.SessionLookup    { return nil }
-func (*recordingItem) SetAttachTarget(cmd.SessionRef) {}
-func (i *recordingItem) Shutdown(m string)            { i.msg = m }
-func (*recordingItem) Options() *options.Options      { return nil }
-func (*recordingItem) Clients() cmd.ClientManager     { return nil }
+func (*recordingItem) Context() context.Context             { return context.Background() }
+func (*recordingItem) Client() cmd.Client                   { return nil }
+func (*recordingItem) Sessions() cmd.SessionLookup          { return nil }
+func (*recordingItem) SetAttachTarget(cmd.SessionRef)       {}
+func (*recordingItem) SetDetach(proto.ExitReason, string)   {}
+func (i *recordingItem) Shutdown(m string)                  { i.msg = m }
+func (*recordingItem) Options() *options.Options            { return nil }
+func (*recordingItem) Clients() cmd.ClientManager           { return nil }
 
 func TestExecCallsShutdown(t *testing.T) {
 	c, ok := cmd.Lookup(killserver.Name)
