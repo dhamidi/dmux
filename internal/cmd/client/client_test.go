@@ -86,6 +86,13 @@ func (*fakeItem) SetAttachTarget(cmd.SessionRef)       {}
 func (*fakeItem) SetDetach(proto.ExitReason, string)   {}
 func (i *fakeItem) Options() *options.Options          { return i.opts }
 func (i *fakeItem) Clients() cmd.ClientManager         { return i.clients }
+func (*fakeItem) CurrentSession() cmd.SessionRef       { return nil }
+func (*fakeItem) SpawnWindow(cmd.SessionRef, string) (cmd.WindowRef, error) {
+	return nil, nil
+}
+func (*fakeItem) AdvanceWindow(cmd.SessionRef, int) (cmd.WindowRef, error) {
+	return nil, nil
+}
 
 func newFakeItem() *fakeItem {
 	return &fakeItem{

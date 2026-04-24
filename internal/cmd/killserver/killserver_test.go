@@ -20,6 +20,13 @@ func (*recordingItem) SetDetach(proto.ExitReason, string)   {}
 func (i *recordingItem) Shutdown(m string)                  { i.msg = m }
 func (*recordingItem) Options() *options.Options            { return nil }
 func (*recordingItem) Clients() cmd.ClientManager           { return nil }
+func (*recordingItem) CurrentSession() cmd.SessionRef       { return nil }
+func (*recordingItem) SpawnWindow(cmd.SessionRef, string) (cmd.WindowRef, error) {
+	return nil, nil
+}
+func (*recordingItem) AdvanceWindow(cmd.SessionRef, int) (cmd.WindowRef, error) {
+	return nil, nil
+}
 
 func TestExecCallsShutdown(t *testing.T) {
 	c, ok := cmd.Lookup(killserver.Name)

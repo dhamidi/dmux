@@ -38,6 +38,13 @@ func (i *fakeItem) SetAttachTarget(r cmd.SessionRef)   { i.target = r }
 func (*fakeItem) SetDetach(proto.ExitReason, string)   {}
 func (*fakeItem) Options() *options.Options            { return nil }
 func (*fakeItem) Clients() cmd.ClientManager           { return nil }
+func (*fakeItem) CurrentSession() cmd.SessionRef       { return nil }
+func (*fakeItem) SpawnWindow(cmd.SessionRef, string) (cmd.WindowRef, error) {
+	return nil, nil
+}
+func (*fakeItem) AdvanceWindow(cmd.SessionRef, int) (cmd.WindowRef, error) {
+	return nil, nil
+}
 
 func TestExecCreatesSessionAndSetsTarget(t *testing.T) {
 	c, ok := cmd.Lookup(newsession.Name)

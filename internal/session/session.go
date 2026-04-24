@@ -23,10 +23,9 @@ var (
 	ErrNoSuchSession = errors.New("session: no such session")
 
 	// ErrDuplicateSession is returned by Registry.NewSession when a
-	// session with the requested name already exists. M1's policy is
-	// fail-fast on duplicate names; the server's default flow never
-	// hits this because it always asks for name="dmux" on a fresh
-	// registry.
+	// session with the requested name already exists. The server's
+	// default flow never hits this because it always asks for
+	// name="dmux" on a fresh registry.
 	ErrDuplicateSession = errors.New("session: duplicate name")
 )
 
@@ -112,7 +111,7 @@ func NewRegistry() *Registry {
 // a session-scoped Options child parented at parentOpts. Returns an
 // error wrapping ErrDuplicateSession if a session with this name
 // already exists. The returned session has no windows yet — call
-// AddWindow to populate one.
+// AppendWindow to populate one.
 //
 // parentOpts is typically the server's options so Get on the session
 // walks server-scoped overrides before falling through to Table
@@ -128,9 +127,10 @@ func (r *Registry) NewSession(name string, parentOpts *options.Options) (*Sessio
 	}
 	r.nextID++
 	s := &Session{
-		id:      r.nextID,
-		name:    name,
-		options: options.NewScopedOptions(options.SessionScope, parentOpts),
+		id:         r.nextID,
+		name:       name,
+		currentIdx: -1,
+		options:    options.NewScopedOptions(options.SessionScope, parentOpts),
 	}
 	r.byID[s.id] = s
 	r.byName[name] = s
@@ -190,14 +190,22 @@ func (r *Registry) Sessions() iter.Seq[*Session] {
 // return ErrNotFound.
 func (r *Registry) Len() int { return len(r.byID) }
 
-// Session is one named session. M1 scope: a single window attached
-// directly (no Winlink indirection). The window is the implicit
-// "current window"; its sole pane is the implicit "active pane."
+// Session is one named session. It owns an ordered slice of windows
+// (creation order) and an index into that slice identifying the
+// current window. The current-index cursor is -1 on a fresh session
+// with no windows and advances to the tail as windows are appended.
+//
+// Once appended, a Window's Index never changes — even if earlier
+// windows are later closed. This matches tmux's behavior
+// (select-window -t :3 always hits window 3 regardless of intervening
+// closes). M1 does not implement window-close; the stability
+// invariant is future-proofing for M2.
 type Session struct {
-	id      ID
-	name    string
-	window  *Window // M1: at most one
-	options *options.Options
+	id         ID
+	name       string
+	windows    []*Window
+	currentIdx int // -1 when windows is empty
+	options    *options.Options
 }
 
 // ID returns this session's registry id.
@@ -210,30 +218,68 @@ func (s *Session) Name() string { return s.name }
 // non-nil for sessions created through Registry.NewSession.
 func (s *Session) Options() *options.Options { return s.options }
 
-// CurrentWindow returns the session's current window, or nil if no
-// window has been added yet. M1 only ever has one window; the
-// "current" distinction becomes real when select-window lands.
-func (s *Session) CurrentWindow() *Window { return s.window }
-
-// AddWindow creates and attaches a fresh window named name. M1
-// permits at most one window per session; calling AddWindow twice
-// returns an error wrapping ErrDuplicateSession — the nearest-fit
-// sentinel until a dedicated ErrDuplicateWindow lands in M2.
-func (s *Session) AddWindow(name string) (*Window, error) {
-	if s.window != nil {
-		return nil, &Error{
-			Op:       "add-window",
-			Sentinel: ErrDuplicateSession,
-			Name:     name,
-			ID:       s.id,
-		}
+// CurrentWindow returns the session's current window, or nil if the
+// session has no windows. Navigation commands (next-window,
+// previous-window) advance the underlying current-index cursor; a
+// fresh AppendWindow also sets the new window as current.
+func (s *Session) CurrentWindow() *Window {
+	if s.currentIdx < 0 || s.currentIdx >= len(s.windows) {
+		return nil
 	}
+	return s.windows[s.currentIdx]
+}
+
+// Windows returns a snapshot of the session's windows in creation
+// order. The returned slice is a copy; callers may retain or mutate
+// it without affecting the session. Used by diagnostic callers
+// (list-windows); navigation commands use the CurrentWindow /
+// NextWindow / PreviousWindow cursor instead.
+func (s *Session) Windows() []*Window {
+	return append([]*Window(nil), s.windows...)
+}
+
+// AppendWindow creates a fresh window named name, appends it to the
+// session's window list, and sets it as the current window. The new
+// window's Index is its position at append time (len(windows) before
+// the append). Never errors in M1: there is no duplicate-name
+// constraint across windows, and every append succeeds.
+//
+// Callers that need to wire an active pane into the new window do so
+// via (*Window).SetActivePane after AppendWindow returns.
+func (s *Session) AppendWindow(name string) (*Window, error) {
 	w := &Window{
-		index: 0,
+		index: len(s.windows),
 		name:  name,
 	}
-	s.window = w
+	s.windows = append(s.windows, w)
+	s.currentIdx = len(s.windows) - 1
 	return w, nil
+}
+
+// NextWindow advances the current-window cursor by one, wrapping
+// from the last window back to the first. Returns the new current
+// window, or nil if the session has no windows. A single-window
+// session is a no-op: NextWindow returns the sole window with the
+// cursor unchanged.
+func (s *Session) NextWindow() *Window {
+	if len(s.windows) == 0 {
+		return nil
+	}
+	s.currentIdx = (s.currentIdx + 1) % len(s.windows)
+	return s.windows[s.currentIdx]
+}
+
+// PreviousWindow rewinds the current-window cursor by one, wrapping
+// from the first window back to the last. Returns the new current
+// window, or nil if the session has no windows. A single-window
+// session is a no-op: PreviousWindow returns the sole window with
+// the cursor unchanged.
+func (s *Session) PreviousWindow() *Window {
+	if len(s.windows) == 0 {
+		return nil
+	}
+	s.currentIdx = (s.currentIdx - 1 + len(s.windows)) % len(s.windows)
+	return s.windows[s.currentIdx]
 }
 
 // Window holds the active pane for one tiled group. M1: exactly one
@@ -244,7 +290,9 @@ type Window struct {
 	active *pane.Pane
 }
 
-// Index returns the window's index within its session. M1: always 0.
+// Index returns the window's index within its session. Stable for
+// the lifetime of the window: never renumbered when earlier windows
+// close.
 func (w *Window) Index() int { return w.index }
 
 // Name returns the window's name. Typically derived from the pane's

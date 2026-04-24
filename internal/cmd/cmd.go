@@ -69,6 +69,26 @@ type Item interface {
 	// that spawn synthetic clients (test harnesses, AI agents,
 	// hooks) call Spawn to create one and Kill to tear it down.
 	Clients() ClientManager
+	// CurrentSession returns the session this connection is
+	// currently attached to, or nil when the connection is not
+	// attached. Commands triggered by a key binding typed inside an
+	// attached session read the session here; commands that run
+	// before attach (during the initial handshake) see nil and must
+	// handle that by returning ErrNotFound or equivalent.
+	CurrentSession() SessionRef
+	// SpawnWindow appends a new window to sess using the server's
+	// default shell, spawning the pane and wiring it as the window's
+	// active pane. An empty name lets the server pick a default
+	// (typically the shell basename). Returns a WindowRef for the
+	// new window, or an error wrapping a server-level failure such
+	// as pane spawn or pty allocation.
+	SpawnWindow(sess SessionRef, name string) (WindowRef, error)
+	// AdvanceWindow moves sess's current-window cursor by delta
+	// (typically +1 or -1; larger magnitudes wrap multiple times).
+	// Returns a WindowRef for the new current window, or an error
+	// wrapping ErrNotFound when sess has no windows to advance
+	// through.
+	AdvanceWindow(sess SessionRef, delta int) (WindowRef, error)
 }
 
 // ClientManager is the Item-facing surface of the server's
@@ -141,6 +161,16 @@ type SessionLookup interface {
 // only read ID and Name.
 type SessionRef interface {
 	ID() uint64
+	Name() string
+}
+
+// WindowRef identifies a window without exposing its internal
+// object graph. Commands read Index and Name; the server resolves
+// refs back to live session.Window instances when it needs to act
+// on them. Shape-matched to SessionRef so command code that
+// shuttles both looks uniform.
+type WindowRef interface {
+	Index() int
 	Name() string
 }
 

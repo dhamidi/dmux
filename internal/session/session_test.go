@@ -102,15 +102,15 @@ func TestRemoveSession(t *testing.T) {
 	r.RemoveSession(9999)
 }
 
-func TestSessionAddWindow(t *testing.T) {
+func TestSessionAppendWindowFirst(t *testing.T) {
 	r := session.NewRegistry()
 	s, _ := r.NewSession("main", nil)
 	if s.CurrentWindow() != nil {
 		t.Fatalf("fresh session has non-nil CurrentWindow")
 	}
-	w, err := s.AddWindow("bash")
+	w, err := s.AppendWindow("bash")
 	if err != nil {
-		t.Fatalf("AddWindow: %v", err)
+		t.Fatalf("AppendWindow: %v", err)
 	}
 	if w.Index() != 0 {
 		t.Fatalf("window index: got %d, want 0", w.Index())
@@ -119,18 +119,96 @@ func TestSessionAddWindow(t *testing.T) {
 		t.Fatalf("window name: got %q, want %q", w.Name(), "bash")
 	}
 	if s.CurrentWindow() != w {
-		t.Fatalf("CurrentWindow did not return added window")
+		t.Fatalf("CurrentWindow did not return appended window")
 	}
-	// M1 is single-window per session: a second AddWindow errors.
-	if _, err := s.AddWindow("second"); err == nil {
-		t.Fatalf("second AddWindow returned nil error, want failure")
+}
+
+func TestSessionAppendWindowMultiple(t *testing.T) {
+	r := session.NewRegistry()
+	s, _ := r.NewSession("main", nil)
+	w0, _ := s.AppendWindow("bash")
+	w1, err := s.AppendWindow("vim")
+	if err != nil {
+		t.Fatalf("second AppendWindow: %v", err)
+	}
+	if w1.Index() != 1 {
+		t.Fatalf("second window index: got %d, want 1", w1.Index())
+	}
+	// Newly appended window becomes the current one.
+	if s.CurrentWindow() != w1 {
+		t.Fatalf("CurrentWindow after second AppendWindow: got %v, want w1", s.CurrentWindow())
+	}
+	// Windows snapshot returns every window in creation order.
+	got := s.Windows()
+	if len(got) != 2 || got[0] != w0 || got[1] != w1 {
+		t.Fatalf("Windows snapshot: got %v, want [w0 w1]", got)
+	}
+	// Windows returns a copy — mutating it does not alter internal state.
+	got[0] = nil
+	if s.CurrentWindow() != w1 {
+		t.Fatalf("Windows snapshot mutation leaked into session")
+	}
+}
+
+func TestSessionNextWindowWraps(t *testing.T) {
+	r := session.NewRegistry()
+	s, _ := r.NewSession("main", nil)
+	// With no windows, NextWindow returns nil.
+	if got := s.NextWindow(); got != nil {
+		t.Fatalf("NextWindow on empty session: got %v, want nil", got)
+	}
+	w0, _ := s.AppendWindow("a")
+	// Single window: NextWindow is a no-op and returns that window.
+	if got := s.NextWindow(); got != w0 {
+		t.Fatalf("NextWindow on single-window session: got %v, want w0", got)
+	}
+	if s.CurrentWindow() != w0 {
+		t.Fatalf("CurrentWindow after single-window NextWindow moved")
+	}
+	w1, _ := s.AppendWindow("b")
+	w2, _ := s.AppendWindow("c")
+	// After AppendWindow, current is w2 (last appended).
+	if s.CurrentWindow() != w2 {
+		t.Fatalf("CurrentWindow after three appends: got %v, want w2", s.CurrentWindow())
+	}
+	// NextWindow wraps from index 2 back to index 0.
+	if got := s.NextWindow(); got != w0 {
+		t.Fatalf("NextWindow wrap: got %v, want w0", got)
+	}
+	if got := s.NextWindow(); got != w1 {
+		t.Fatalf("NextWindow after wrap: got %v, want w1", got)
+	}
+}
+
+func TestSessionPreviousWindowWraps(t *testing.T) {
+	r := session.NewRegistry()
+	s, _ := r.NewSession("main", nil)
+	// With no windows, PreviousWindow returns nil.
+	if got := s.PreviousWindow(); got != nil {
+		t.Fatalf("PreviousWindow on empty session: got %v, want nil", got)
+	}
+	w0, _ := s.AppendWindow("a")
+	if got := s.PreviousWindow(); got != w0 {
+		t.Fatalf("PreviousWindow on single-window session: got %v, want w0", got)
+	}
+	w1, _ := s.AppendWindow("b")
+	w2, _ := s.AppendWindow("c")
+	// Current is w2. Previous wraps backward through w1, w0, then back to w2.
+	if got := s.PreviousWindow(); got != w1 {
+		t.Fatalf("PreviousWindow: got %v, want w1", got)
+	}
+	if got := s.PreviousWindow(); got != w0 {
+		t.Fatalf("PreviousWindow: got %v, want w0", got)
+	}
+	if got := s.PreviousWindow(); got != w2 {
+		t.Fatalf("PreviousWindow wrap: got %v, want w2", got)
 	}
 }
 
 func TestWindowSetActivePane(t *testing.T) {
 	r := session.NewRegistry()
 	s, _ := r.NewSession("main", nil)
-	w, _ := s.AddWindow("bash")
+	w, _ := s.AppendWindow("bash")
 	if w.ActivePane() != nil {
 		t.Fatalf("fresh window has non-nil ActivePane")
 	}

@@ -24,6 +24,13 @@ func (*fakeItem) Sessions() cmd.SessionLookup    { return nil }
 func (*fakeItem) SetAttachTarget(cmd.SessionRef) {}
 func (*fakeItem) Options() *options.Options      { return nil }
 func (*fakeItem) Clients() cmd.ClientManager     { return nil }
+func (*fakeItem) CurrentSession() cmd.SessionRef { return nil }
+func (*fakeItem) SpawnWindow(cmd.SessionRef, string) (cmd.WindowRef, error) {
+	return nil, nil
+}
+func (*fakeItem) AdvanceWindow(cmd.SessionRef, int) (cmd.WindowRef, error) {
+	return nil, nil
+}
 func (i *fakeItem) SetDetach(reason proto.ExitReason, message string) {
 	i.detachSet = true
 	i.detachReason = reason

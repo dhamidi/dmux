@@ -318,11 +318,11 @@ func (s *serverState) createSession(name string, cwd string, clientEnv []string,
 		return nil, fmt.Errorf("server: open pane: %w", err)
 	}
 
-	w, err := sess.AddWindow(filepath.Base(argv[0]))
+	w, err := sess.AppendWindow(filepath.Base(argv[0]))
 	if err != nil {
 		_ = p.Close()
 		s.registry.RemoveSession(sess.ID())
-		return nil, fmt.Errorf("server: add window: %w", err)
+		return nil, fmt.Errorf("server: append window: %w", err)
 	}
 	w.SetActivePane(p)
 
@@ -353,6 +353,59 @@ func (s *serverState) autogenSessionName() string {
 			return name
 		}
 	}
+}
+
+// spawnWindowInSession appends a fresh window to sess backed by its
+// own pane, mirroring the session-creation path in createSession. An
+// empty name defaults to the shell's argv[0] basename — matching
+// tmux's default-window-name behaviour. Pane geometry mirrors
+// createSession: status option decides whether the pane gives up
+// the final row.
+//
+// Must be called with registryMu held. On failure after pane.Open,
+// the pane is closed and any appended window is left on the session
+// only if AppendWindow succeeded (AppendWindow itself never errors).
+// A successful return leaves the new window as sess's current
+// window because AppendWindow advances the cursor.
+func (s *serverState) spawnWindowInSession(sess *session.Session, name, cwd string, clientEnv []string, termEnv string, cols, rows int) (*session.Window, error) {
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows < 2 {
+		rows = 24
+	}
+
+	opts := sess.Options()
+	argv := shellArgvFor(opts)
+	env := childEnv(opts, clientEnv, termEnv)
+
+	paneRows := rows - 1
+	if !opts.GetBool("status") {
+		paneRows = rows
+	}
+
+	p, err := pane.Open(s.ctx, pane.Config{
+		Argv: argv,
+		Cwd:  cwd,
+		Env:  env,
+		Cols: cols,
+		Rows: paneRows,
+		VT:   s.rt,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("server: open pane: %w", err)
+	}
+
+	if name == "" {
+		name = filepath.Base(argv[0])
+	}
+	w, err := sess.AppendWindow(name)
+	if err != nil {
+		_ = p.Close()
+		return nil, fmt.Errorf("server: append window: %w", err)
+	}
+	w.SetActivePane(p)
+	return w, nil
 }
 
 // paneRowsFor returns how many pane rows fit under a client tty of
@@ -530,6 +583,15 @@ type serverItem struct {
 	detachSet     bool
 	detachReason  proto.ExitReason
 	detachMessage string
+	// attachedSession is the session this connection is attached to
+	// when the Item dispatches a command mid-session (typically from
+	// a key binding inside pump). Nil during the initial handshake
+	// drain — CurrentSession surfaces that as a nil SessionRef so
+	// commands can distinguish "not attached yet" from a real error.
+	//
+	// The pump integration that populates this field lands in a
+	// later subagent; until then CurrentSession always returns nil.
+	attachedSession *session.Session
 }
 
 // Context returns the per-connection context.
@@ -578,6 +640,92 @@ func (i *serverItem) Options() *options.Options { return i.state.serverOptions }
 // here reports ErrNotImplemented from Spawn/Kill; real implementation
 // arrives alongside the dmuxtest harness when it lands.
 func (i *serverItem) Clients() cmd.ClientManager { return stubClientManager{} }
+
+// CurrentSession returns this connection's attached session wrapped
+// in a sessionRef, or nil when the connection is not yet attached.
+// The pump-side wiring that populates attachedSession mid-session
+// lands in a later subagent; during the initial handshake drain
+// this always returns nil.
+func (i *serverItem) CurrentSession() cmd.SessionRef {
+	if i.attachedSession == nil {
+		return nil
+	}
+	return sessionRef{sess: i.attachedSession}
+}
+
+// SpawnWindow resolves sess back to a live session.Session, opens a
+// new pane under the session's default shell, and appends a window
+// backed by that pane. The returned WindowRef wraps the newly
+// appended window. Errors come back as fmt.Errorf %w chains so
+// callers can use errors.Is/As to inspect the cause (pane.Open,
+// registry mismatches, etc.).
+func (i *serverItem) SpawnWindow(ref cmd.SessionRef, name string) (cmd.WindowRef, error) {
+	if ref == nil {
+		return nil, fmt.Errorf("server: spawn-window: %w", cmd.ErrNotFound)
+	}
+	state := i.state
+	client := i.Client()
+
+	state.registryMu.Lock()
+	defer state.registryMu.Unlock()
+
+	sess := state.registry.FindSession(session.ID(ref.ID()))
+	if sess == nil {
+		return nil, fmt.Errorf("server: spawn-window: %w", cmd.ErrNotFound)
+	}
+	w, err := state.spawnWindowInSession(
+		sess,
+		name,
+		chooseCwd(client.Cwd()),
+		client.Env(),
+		client.TermEnv(),
+		client.Cols(),
+		client.Rows(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return windowRef{win: w}, nil
+}
+
+// AdvanceWindow shifts sess's current-window cursor by delta,
+// calling NextWindow (delta > 0) or PreviousWindow (delta < 0) the
+// requested number of times. A delta of zero returns the current
+// window without moving. An empty session returns an error wrapping
+// ErrNotFound — the session has no windows to advance through.
+func (i *serverItem) AdvanceWindow(ref cmd.SessionRef, delta int) (cmd.WindowRef, error) {
+	if ref == nil {
+		return nil, fmt.Errorf("server: advance-window: %w", cmd.ErrNotFound)
+	}
+	state := i.state
+	state.registryMu.Lock()
+	defer state.registryMu.Unlock()
+
+	sess := state.registry.FindSession(session.ID(ref.ID()))
+	if sess == nil {
+		return nil, fmt.Errorf("server: advance-window: %w", cmd.ErrNotFound)
+	}
+	if sess.CurrentWindow() == nil {
+		return nil, fmt.Errorf("server: advance-window: %w", cmd.ErrNotFound)
+	}
+	var w *session.Window
+	switch {
+	case delta == 0:
+		w = sess.CurrentWindow()
+	case delta > 0:
+		for n := 0; n < delta; n++ {
+			w = sess.NextWindow()
+		}
+	case delta < 0:
+		for n := 0; n < -delta; n++ {
+			w = sess.PreviousWindow()
+		}
+	}
+	if w == nil {
+		return nil, fmt.Errorf("server: advance-window: %w", cmd.ErrNotFound)
+	}
+	return windowRef{win: w}, nil
+}
 
 // stubClientManager is a placeholder ClientManager whose Spawn and
 // Kill both report ErrNotImplemented. Replaced once the in-process
@@ -696,6 +844,18 @@ type sessionRef struct {
 
 func (r sessionRef) ID() uint64   { return uint64(r.sess.ID()) }
 func (r sessionRef) Name() string { return r.sess.Name() }
+
+// windowRef is the cmd.WindowRef implementation, shape-matched to
+// sessionRef. It wraps a live session.Window so server paths that
+// hand a WindowRef to command code can resolve it back when
+// entering pump; commands outside the server package see only
+// Index() and Name().
+type windowRef struct {
+	win *session.Window
+}
+
+func (r windowRef) Index() int    { return r.win.Index() }
+func (r windowRef) Name() string  { return r.win.Name() }
 
 // handle runs one client connection. Sequence:
 //
