@@ -205,6 +205,7 @@ type Session struct {
 	name       string
 	windows    []*Window
 	currentIdx int // -1 when windows is empty
+	nextWinIdx int // monotonic counter for Window.index assignment
 	options    *options.Options
 }
 
@@ -248,12 +249,50 @@ func (s *Session) Windows() []*Window {
 // via (*Window).SetActivePane after AppendWindow returns.
 func (s *Session) AppendWindow(name string) (*Window, error) {
 	w := &Window{
-		index: len(s.windows),
+		index: s.nextWinIdx,
 		name:  name,
 	}
+	s.nextWinIdx++
 	s.windows = append(s.windows, w)
 	s.currentIdx = len(s.windows) - 1
 	return w, nil
+}
+
+// RemoveWindow removes w from the session's window list. Returns true
+// if w was present and removed, false otherwise. When the removed
+// window was the current one, the cursor advances to the window that
+// was at the next slice position (or wraps to 0 if the removed window
+// was the last). When the removed window sat before the cursor, the
+// cursor shifts down by one so it still points at the same Window.
+// When the last remaining window is removed, currentIdx returns to -1
+// and CurrentWindow reports nil.
+//
+// Window.Index values of surviving windows never change: they were
+// assigned from a monotonic counter at AppendWindow time, and
+// RemoveWindow does not renumber.
+func (s *Session) RemoveWindow(w *Window) bool {
+	pos := -1
+	for i, cand := range s.windows {
+		if cand == w {
+			pos = i
+			break
+		}
+	}
+	if pos < 0 {
+		return false
+	}
+	s.windows = append(s.windows[:pos], s.windows[pos+1:]...)
+	switch {
+	case len(s.windows) == 0:
+		s.currentIdx = -1
+	case pos < s.currentIdx:
+		s.currentIdx--
+	case pos == s.currentIdx:
+		if s.currentIdx >= len(s.windows) {
+			s.currentIdx = 0
+		}
+	}
+	return true
 }
 
 // NextWindow advances the current-window cursor by one, wrapping

@@ -17,11 +17,11 @@ func visible(b []byte) string {
 
 func TestRender80Cells(t *testing.T) {
 	out := Render(View{
-		Session:    "dmux",
-		WindowIdx:  0,
-		WindowName: "bash",
-		Current:    true,
-		Cols:       80,
+		Session: "dmux",
+		Windows: []WindowSlot{
+			{Idx: 0, Name: "bash", Current: true},
+		},
+		Cols: 80,
 	})
 
 	if !bytes.HasPrefix(out, []byte("\x1b[7m")) {
@@ -43,13 +43,29 @@ func TestRender80Cells(t *testing.T) {
 	}
 }
 
+func TestRenderMultipleWindows(t *testing.T) {
+	out := Render(View{
+		Session: "dmux",
+		Windows: []WindowSlot{
+			{Idx: 0, Name: "bash"},
+			{Idx: 1, Name: "vim", Current: true},
+			{Idx: 3, Name: "logs"}, // gap: idx 2 was closed
+		},
+		Cols: 80,
+	})
+	v := visible(out)
+	if !strings.HasPrefix(v, "[dmux] 0:bash 1:vim* 3:logs") {
+		t.Fatalf("window list shape: %q", v)
+	}
+}
+
 func TestRenderTruncates(t *testing.T) {
 	out := Render(View{
-		Session:    "dmux",
-		WindowIdx:  0,
-		WindowName: "bash",
-		Current:    true,
-		Cols:       10,
+		Session: "dmux",
+		Windows: []WindowSlot{
+			{Idx: 0, Name: "bash", Current: true},
+		},
+		Cols: 10,
 	})
 
 	v := visible(out)
@@ -64,11 +80,11 @@ func TestRenderTruncates(t *testing.T) {
 
 func TestRenderEmptySession(t *testing.T) {
 	out := Render(View{
-		Session:    "",
-		WindowIdx:  0,
-		WindowName: "bash",
-		Current:    true,
-		Cols:       20,
+		Session: "",
+		Windows: []WindowSlot{
+			{Idx: 0, Name: "bash", Current: true},
+		},
+		Cols: 20,
 	})
 
 	v := visible(out)
@@ -83,5 +99,16 @@ func TestRenderEmptySession(t *testing.T) {
 func TestRenderZeroColsReturnsNil(t *testing.T) {
 	if out := Render(View{Cols: 0}); out != nil {
 		t.Fatalf("Cols=0 should yield nil, got %q", out)
+	}
+}
+
+func TestRenderNoWindows(t *testing.T) {
+	out := Render(View{Session: "dmux", Cols: 20})
+	v := visible(out)
+	if !strings.HasPrefix(v, "[dmux]") {
+		t.Fatalf("empty-windows content = %q, want prefix %q", v, "[dmux]")
+	}
+	if len(v) != 20 {
+		t.Fatalf("visible width = %d, want 20", len(v))
 	}
 }

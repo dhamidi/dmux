@@ -233,19 +233,68 @@ type serverState struct {
 // It owns the session's own cancellable context (derived from nothing
 // — independent of state.ctx so kill-server and shell-exit arms stay
 // distinguishable in pump's select) and the exit reason/message
-// recorded by watchPaneExit when the shell dies. Pane pointer kept
-// for cleanup after retirement.
+// recorded by watchWindow when the last window's shell dies.
 type serverSession struct {
 	id     session.ID
-	pane   *pane.Pane
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// winSubsMu guards winSubs. Taken on subscribe / unsubscribe
+	// (pump attach / detach) and on every notify (background window
+	// watcher). All access is quick.
+	winSubsMu sync.Mutex
+	// winSubs is the set of per-pump notification channels. A
+	// window-list change from watchWindow fans out a non-blocking
+	// send to each; coalescing per channel (buffer cap 1). One
+	// channel per pump so every attached client rebinds, rather
+	// than only one winning a shared signal.
+	winSubs []chan struct{}
+
 	// exitMu guards exitReason and exitMessage. Written once by
-	// watchPaneExit, read by pump after sessCtx fires.
+	// watchWindow before cancelling the session ctx.
 	exitMu      sync.Mutex
 	exitReason  proto.ExitReason
 	exitMessage string
+}
+
+// subscribeWindowChanges registers a notification channel for one
+// attached pump. The returned channel receives a struct{}{} whenever
+// watchWindow removes a window from this session (coalescing: at
+// most one pending signal per subscriber). unsubscribe must be
+// called on pump teardown so the session does not hold onto a dead
+// pump's channel.
+func (ss *serverSession) subscribeWindowChanges() (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	ss.winSubsMu.Lock()
+	ss.winSubs = append(ss.winSubs, ch)
+	ss.winSubsMu.Unlock()
+	unsubscribe := func() {
+		ss.winSubsMu.Lock()
+		defer ss.winSubsMu.Unlock()
+		for i, c := range ss.winSubs {
+			if c == ch {
+				ss.winSubs = append(ss.winSubs[:i], ss.winSubs[i+1:]...)
+				return
+			}
+		}
+	}
+	return ch, unsubscribe
+}
+
+// notifyWindowChanged wakes every pump attached to this session so it
+// re-resolves sess.CurrentWindow. Non-blocking per subscriber: if a
+// subscriber has a pending signal, the new notify is dropped for
+// that subscriber — pumps always observe the latest state when they
+// do run.
+func (ss *serverSession) notifyWindowChanged() {
+	ss.winSubsMu.Lock()
+	defer ss.winSubsMu.Unlock()
+	for _, ch := range ss.winSubs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // setExit records the session's exit reason/message. Called once by
@@ -351,13 +400,12 @@ func (s *serverState) createSession(name string, cwd string, clientEnv []string,
 	ssCtx, ssCancel := context.WithCancel(context.Background())
 	ss := &serverSession{
 		id:     sess.ID(),
-		pane:   p,
 		ctx:    ssCtx,
 		cancel: ssCancel,
 	}
 	s.serverSessions[sess.ID()] = ss
 
-	go s.watchPaneExit(ss)
+	go s.watchWindow(ss, sess, w, p)
 
 	return sess, nil
 }
@@ -424,6 +472,21 @@ func (s *serverState) spawnWindowInSession(sess *session.Session, name, cwd stri
 		return nil, fmt.Errorf("server: append window: %w", err)
 	}
 	w.SetActivePane(p)
+
+	// Start a per-window exit watcher so the window closes when its
+	// shell dies, matching tmux's one-pane-per-window behavior. The
+	// watcher removes the window from the session when the pane
+	// exits; if it was the last surviving window, the whole session
+	// retires the same way the initial window would.
+	ss, ok := s.serverSessions[sess.ID()]
+	if !ok {
+		// Should not happen: spawnWindowInSession is only called
+		// against sessions created via createSession, which always
+		// registers a serverSession. Defend anyway.
+		_ = p.Close()
+		return nil, fmt.Errorf("server: spawn window: %w", cmd.ErrNotFound)
+	}
+	go s.watchWindow(ss, sess, w, p)
 	return w, nil
 }
 
@@ -500,31 +563,48 @@ func (s *serverState) deregister(id uint64) {
 	delete(s.attached, id)
 }
 
-// watchPaneExit blocks on the session's pane Exited channel and,
-// when the child goes away, records the exit reason on the session,
-// cancels the session's ctx (so only pumps attached to THIS session
-// observe it), and retires the session from the registry so later
-// attach-session lookups skip it. Runs exactly once per session
-// lifetime; ends when the pane closes.
+// watchWindow blocks on one window's pane Exited channel and, when
+// the child goes away, removes the window from the session. If other
+// windows survive, attached pumps are notified so they re-resolve
+// CurrentWindow (and swap their active pane if they were pinned on
+// the removed one). If the removed window was the last, the session
+// itself retires: exit reason/message are recorded and the session's
+// ctx is cancelled so every pump attached to it observes shell-exit.
+// Runs exactly once per window; ends when the pane closes.
 //
-// The pane is NOT closed here — pumps attached to this session are
-// still about to read from it to emit their final frame. Pane
-// cleanup happens in Run.shutdownRegistry via retiredPanes.
-func (s *serverState) watchPaneExit(ss *serverSession) {
-	st, ok := <-ss.pane.Exited()
+// The pane IS closed here rather than parked in retiredPanes: its
+// child is already gone and there's no other subscriber; holding the
+// vt/pty resources open until server shutdown would leak one per
+// retired window. Pumps whose pinned pane is the one closing observe
+// sub.Ch closing and fall back to waiting on winChanged / ctx.Done
+// on the next select iteration.
+func (s *serverState) watchWindow(ss *serverSession, sess *session.Session, w *session.Window, p *pane.Pane) {
+	st, ok := <-p.Exited()
 	if !ok {
 		// Pane was closed externally (Run teardown). Nothing to
 		// announce — that path records its own shutdown reason.
 		return
 	}
-	ss.setExit(proto.ExitExitedShell, exitMessage(st))
-	ss.cancel()
 
 	s.registryMu.Lock()
-	s.registry.RemoveSession(ss.id)
-	delete(s.serverSessions, ss.id)
-	s.retiredPanes = append(s.retiredPanes, ss.pane)
+	sess.RemoveWindow(w)
+	lastWindow := sess.CurrentWindow() == nil
+	if lastWindow {
+		s.registry.RemoveSession(ss.id)
+		delete(s.serverSessions, ss.id)
+	}
 	s.registryMu.Unlock()
+
+	if lastWindow {
+		ss.setExit(proto.ExitExitedShell, exitMessage(st))
+		ss.cancel()
+	} else {
+		ss.notifyWindowChanged()
+	}
+
+	// Release the pane's pty and vt resources. Idempotent; safe
+	// alongside any Close that fires from the Run-teardown path.
+	_ = p.Close()
 }
 
 // installDefaultKeyTables populates the server's root and prefix key
@@ -599,12 +679,10 @@ func (s *serverState) shutdownRegistry() {
 	s.registryMu.Lock()
 	defer s.registryMu.Unlock()
 	for sess := range s.registry.Sessions() {
-		w := sess.CurrentWindow()
-		if w == nil {
-			continue
-		}
-		if p := w.ActivePane(); p != nil {
-			_ = p.Close()
+		for _, w := range sess.Windows() {
+			if p := w.ActivePane(); p != nil {
+				_ = p.Close()
+			}
 		}
 	}
 	for _, p := range s.retiredPanes {
@@ -1197,13 +1275,20 @@ func resolveAttachTarget(state *serverState, ref cmd.SessionRef) (*session.Sessi
 // status bar fits the client's tty exactly — even when the pane
 // dimensions differ from the client (e.g. an older client whose tty
 // no longer matches the latest-policy pane size).
-func statusView(sess *session.Session, w *session.Window, cols int) status.View {
+func statusView(sess *session.Session, curWin *session.Window, cols int) status.View {
+	windows := sess.Windows()
+	slots := make([]status.WindowSlot, 0, len(windows))
+	for _, w := range windows {
+		slots = append(slots, status.WindowSlot{
+			Idx:     w.Index(),
+			Name:    w.Name(),
+			Current: w == curWin,
+		})
+	}
 	return status.View{
-		Session:    sess.Name(),
-		WindowIdx:  w.Index(),
-		WindowName: w.Name(),
-		Current:    true,
-		Cols:       cols,
+		Session: sess.Name(),
+		Windows: slots,
+		Cols:    cols,
 	}
 }
 
@@ -1352,6 +1437,14 @@ func pump(a pumpArgs) (retErr error) {
 	p := a.pane
 	sub := a.sub
 	attachID := a.attachID
+
+	// Subscribe to window-list change notifications. The background
+	// watcher fires this whenever it removes a window from the
+	// session after its pane exited; on the signal this pump calls
+	// resyncWindow, which is a no-op if the change did not move the
+	// current window.
+	winCh, unsubscribe := a.ss.subscribeWindowChanges()
+	defer unsubscribe()
 
 	// Key-routing state. parser owns ESC / CSI / UTF-8 decoding;
 	// curTable is the table the next keypress resolves against,
@@ -1574,14 +1667,23 @@ func pump(a pumpArgs) (retErr error) {
 			curTable = routeInput(emissions, curTable, a.state.rootTable, a.state.keyTables, dispatcher, p)
 			rearmEsc()
 
+		case <-winCh:
+			// A background watcher removed one of the session's
+			// windows after its pane exited. resyncWindow swaps this
+			// pump's pinned window/pane/subscription to the session's
+			// new current window. A no-op if the removed window
+			// wasn't this pump's current.
+			resyncWindow()
+
 		case _, ok := <-sub.Ch:
 			if !ok {
 				// Subscription channel closed: the pane's readLoop
-				// exited (child gone). The shell-exit watcher has
-				// either already fired or will in a moment; wait for
-				// ctx.Done on the next iteration rather than writing
-				// Exit here with no shutdown reason available yet.
+				// exited (child gone). If the window watcher has
+				// already moved the session to a surviving window,
+				// resyncWindow rebinds us to it now; otherwise it's a
+				// no-op and we wait for winChanged or ctx.Done.
 				sub.Ch = nil
+				resyncWindow()
 				continue
 			}
 			// Dirty signal: either the vt.Terminal has new bytes or

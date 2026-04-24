@@ -222,3 +222,68 @@ func TestWindowSetActivePane(t *testing.T) {
 		t.Fatalf("SetActivePane(nil) did not result in nil ActivePane")
 	}
 }
+
+func TestRemoveWindowKeepsSurvivingIndexStable(t *testing.T) {
+	r := session.NewRegistry()
+	s, _ := r.NewSession("main", nil)
+	w0, _ := s.AppendWindow("a")
+	w1, _ := s.AppendWindow("b")
+	w2, _ := s.AppendWindow("c")
+	if w0.Index() != 0 || w1.Index() != 1 || w2.Index() != 2 {
+		t.Fatalf("indices before remove: %d %d %d", w0.Index(), w1.Index(), w2.Index())
+	}
+	if !s.RemoveWindow(w1) {
+		t.Fatalf("RemoveWindow(w1) returned false")
+	}
+	if got := s.Windows(); len(got) != 2 || got[0] != w0 || got[1] != w2 {
+		t.Fatalf("windows after remove: %v", got)
+	}
+	if w0.Index() != 0 || w2.Index() != 2 {
+		t.Fatalf("indices after remove changed: w0=%d w2=%d", w0.Index(), w2.Index())
+	}
+	// A fresh append does NOT fill the gap — indices are monotonic.
+	w3, _ := s.AppendWindow("d")
+	if w3.Index() != 3 {
+		t.Fatalf("new window index after remove: got %d, want 3", w3.Index())
+	}
+}
+
+func TestRemoveWindowAdjustsCurrent(t *testing.T) {
+	r := session.NewRegistry()
+	s, _ := r.NewSession("main", nil)
+	w0, _ := s.AppendWindow("a")
+	w1, _ := s.AppendWindow("b")
+	w2, _ := s.AppendWindow("c")
+	// Current is w2 (last appended). Removing w0 (before cursor)
+	// shifts the cursor down so it still points at w2.
+	if !s.RemoveWindow(w0) {
+		t.Fatalf("RemoveWindow(w0) returned false")
+	}
+	if s.CurrentWindow() != w2 {
+		t.Fatalf("current after removing-before: got %v, want w2", s.CurrentWindow())
+	}
+	// Removing current (w2): cursor wraps to 0 because w2 was at the end.
+	if !s.RemoveWindow(w2) {
+		t.Fatalf("RemoveWindow(w2) returned false")
+	}
+	if s.CurrentWindow() != w1 {
+		t.Fatalf("current after removing-current-tail: got %v, want w1", s.CurrentWindow())
+	}
+	// Removing the last window: current becomes nil.
+	if !s.RemoveWindow(w1) {
+		t.Fatalf("RemoveWindow(w1) returned false")
+	}
+	if s.CurrentWindow() != nil {
+		t.Fatalf("current after removing-last: got %v, want nil", s.CurrentWindow())
+	}
+}
+
+func TestRemoveWindowMissingReturnsFalse(t *testing.T) {
+	r := session.NewRegistry()
+	s, _ := r.NewSession("main", nil)
+	s.AppendWindow("a")
+	var stranger session.Window
+	if s.RemoveWindow(&stranger) {
+		t.Fatalf("RemoveWindow on unknown window returned true")
+	}
+}
