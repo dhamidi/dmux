@@ -25,6 +25,7 @@ import (
 	_ "github.com/dhamidi/dmux/internal/cmd/nextwindow"
 	_ "github.com/dhamidi/dmux/internal/cmd/previouswindow"
 	_ "github.com/dhamidi/dmux/internal/cmd/recorder"
+	_ "github.com/dhamidi/dmux/internal/cmd/wait"
 	"github.com/dhamidi/dmux/internal/platform"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/server"
