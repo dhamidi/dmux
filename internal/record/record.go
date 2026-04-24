@@ -12,8 +12,10 @@ import (
 
 // Level controls which emission call sites are live. Normal is always
 // on; Debug adds the high-volume call sites listed in docs/testing.md
-// (`vt.feed`, `socket.read`, `loop.iter`). In production the level is
-// always Normal — SetLevel is a dmuxtest-only API.
+// (`vt.feed`, `socket.read`, `loop.iter`). Production defaults to
+// Normal; SetLevel promotes a running recorder to Debug on demand —
+// the `recorder set-level` command, inspector-style tooling, and
+// hooks all call it.
 type Level int32
 
 const (
@@ -59,9 +61,9 @@ var ErrAlreadyOpen = errors.New("record: recorder already open")
 // Recorder is the process-wide event sink. One instance is live
 // between Open and Close; the package-level Emit / Subscribe /
 // Unsubscribe / SetLevel functions operate on whichever recorder is
-// currently live. The type is exported so test code under the
-// dmuxtest build tag can reason about it, but normal callers route
-// through the package-level functions.
+// currently live. The type is exported so callers that want to
+// reason about it directly can, but normal code routes through the
+// package-level functions.
 type Recorder struct {
 	in     chan Event
 	logger *slog.Logger
@@ -172,8 +174,9 @@ func Dropped() uint64 {
 
 // CurrentLevel returns the current recorder's verbosity, or
 // LevelNormal when no recorder is open. Production code guarding
-// Debug emissions calls this rather than SetLevel's companion Level()
-// (which lives in the dmuxtest build tag).
+// Debug emissions (EmitDebug's fast path, inspector probes that
+// short-circuit when the level is Normal) calls this to decide
+// whether to pay the event-construction cost.
 func CurrentLevel() Level {
 	r := currentRecorder()
 	if r == nil {
