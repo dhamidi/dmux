@@ -273,6 +273,29 @@ func TestTableZeroValue(t *testing.T) {
 	}
 }
 
+// A Binding with a non-empty SwitchTable signals "swap to this named
+// table" instead of dispatching Argv. The fields are independent
+// storage; nothing enforces exclusivity at construction time — that's
+// the routing layer's job. The test pins the shape so downstream code
+// can rely on both fields landing in the map.
+func TestBindingSwitchTableField(t *testing.T) {
+	tbl := NewTable("root")
+	code := KeyCode{Key: KeyB, Mods: ModCtrl}
+	b := &Binding{Key: code, SwitchTable: "prefix", Note: "prefix"}
+	tbl.Bind(b)
+
+	got := tbl.Lookup(code)
+	if got == nil {
+		t.Fatal("Lookup returned nil after Bind")
+	}
+	if got.SwitchTable != "prefix" {
+		t.Errorf("SwitchTable = %q, want %q", got.SwitchTable, "prefix")
+	}
+	if len(got.Argv) != 0 {
+		t.Errorf("Argv unexpectedly populated: %v", got.Argv)
+	}
+}
+
 // Key.String spot-checks: a printable letter, a named functional key,
 // a punctuation key, and an out-of-range value all produce useful
 // text.

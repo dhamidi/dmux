@@ -11,9 +11,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dhamidi/dmux/internal/cmd"
 	"github.com/dhamidi/dmux/internal/cmdq"
+	"github.com/dhamidi/dmux/internal/keys"
+	"github.com/dhamidi/dmux/internal/log"
 	"github.com/dhamidi/dmux/internal/options"
 	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
@@ -22,6 +25,7 @@ import (
 	"github.com/dhamidi/dmux/internal/socket"
 	"github.com/dhamidi/dmux/internal/status"
 	"github.com/dhamidi/dmux/internal/termcaps"
+	"github.com/dhamidi/dmux/internal/termin"
 	"github.com/dhamidi/dmux/internal/termout"
 	"github.com/dhamidi/dmux/internal/vt"
 	"github.com/dhamidi/dmux/internal/xio"
@@ -88,6 +92,7 @@ func Run(path string) error {
 		serverSessions: make(map[session.ID]*serverSession),
 		attached:       make(map[uint64]*attachedClient),
 	}
+	state.installDefaultKeyTables()
 
 	// Closer goroutine: when ctx is canceled (kill-server or Run's
 	// defer), close the listener so the Accept loop unblocks. Without
@@ -208,6 +213,20 @@ type serverState struct {
 	shutdownOnce    sync.Once
 	shutdownReason  proto.ExitReason
 	shutdownMessage string
+
+	// rootTable is the key table every pump starts in. Built once at
+	// server startup with the default tmux-like bindings (prefix
+	// "C-b" → switch to "prefix" table) and handed out read-only to
+	// every pump via pumpArgs.state.
+	rootTable *keys.Table
+	// keyTables indexes the server's named key tables by name. The
+	// "root" and "prefix" entries are populated in Run; future
+	// configuration paths (.dmux.conf, bind-key) will mutate this
+	// map from the main goroutine before any pump looks at it. Since
+	// M1 populates the map at startup and treats it as read-only
+	// thereafter, no mutex protects it — adding one belongs with the
+	// first write path.
+	keyTables map[string]*keys.Table
 }
 
 // serverSession is the server-side companion to one session.Session.
@@ -506,6 +525,45 @@ func (s *serverState) watchPaneExit(ss *serverSession) {
 	delete(s.serverSessions, ss.id)
 	s.retiredPanes = append(s.retiredPanes, ss.pane)
 	s.registryMu.Unlock()
+}
+
+// installDefaultKeyTables populates the server's root and prefix key
+// tables with the M1 default bindings: "C-b" in root switches to
+// the prefix table; "n" / "p" / "c" in prefix dispatch next-window /
+// previous-window / new-window, respectively. Called once from Run
+// after serverState is constructed but before any client handles.
+// The resulting tables are handed to every pump read-only.
+func (s *serverState) installDefaultKeyTables() {
+	root := keys.NewTable("root")
+	prefix := keys.NewTable("prefix")
+
+	root.Bind(&keys.Binding{
+		Key:         keys.KeyCode{Key: keys.KeyB, Mods: keys.ModCtrl},
+		SwitchTable: "prefix",
+		Note:        "switch to prefix table",
+	})
+
+	prefix.Bind(&keys.Binding{
+		Key:  keys.KeyCode{Key: keys.KeyN},
+		Argv: []string{"next-window"},
+		Note: "select next window",
+	})
+	prefix.Bind(&keys.Binding{
+		Key:  keys.KeyCode{Key: keys.KeyP},
+		Argv: []string{"previous-window"},
+		Note: "select previous window",
+	})
+	prefix.Bind(&keys.Binding{
+		Key:  keys.KeyCode{Key: keys.KeyC},
+		Argv: []string{"new-window"},
+		Note: "create a new window",
+	})
+
+	s.rootTable = root
+	s.keyTables = map[string]*keys.Table{
+		"root":   root,
+		"prefix": prefix,
+	}
 }
 
 // setShutdown records why the server is going away. First writer
@@ -1027,6 +1085,12 @@ func enterAttachPump(
 		})
 		return err
 	}
+	// Populate attachedSession so commands dispatched from this
+	// connection's pump (typically via a key binding) can resolve
+	// CurrentSession. Safe to write here without synchronization:
+	// each serverItem is owned by its own connection goroutine, and
+	// no other goroutine reads this field.
+	item.attachedSession = sess
 
 	cols, rows := int(ident.InitialCols), int(ident.InitialRows)
 	if cols <= 0 {
@@ -1079,6 +1143,7 @@ func enterAttachPump(
 
 	return pump(pumpArgs{
 		conn:     conn,
+		ident:    ident,
 		pane:     p,
 		sub:      sub,
 		frameR:   frameR,
@@ -1091,6 +1156,7 @@ func enterAttachPump(
 		rows:     rows,
 		attachID: attachID,
 		state:    state,
+		item:     item,
 	})
 }
 
@@ -1223,6 +1289,7 @@ func readIdentify(r xio.FrameReader, w xio.FrameWriter) (*proto.Identify, error)
 // joined the original ctx + io plumbing.
 type pumpArgs struct {
 	conn     net.Conn
+	ident    *proto.Identify
 	pane     *pane.Pane
 	sub      pane.Subscription
 	frameR   xio.FrameReader
@@ -1235,6 +1302,7 @@ type pumpArgs struct {
 	rows     int // initial client tty rows
 	attachID uint64
 	state    *serverState
+	item     *serverItem
 }
 
 // pump is the render loop for one attached client. It owns frameW —
@@ -1273,6 +1341,144 @@ func pump(a pumpArgs) (retErr error) {
 	cols := a.cols
 	rows := a.rows
 
+	// Pump-local mutable views of the attached window, pane, and
+	// subscription. A window-switch binding (next-window, new-window)
+	// mutates the session's current window; resyncWindow below
+	// rebinds these to the new active pane and swaps the
+	// subscription. Keep these distinct from pumpArgs.pane / .win /
+	// .sub (which are only ever the initial values) so rebinding is
+	// a local assignment.
+	win := a.win
+	p := a.pane
+	sub := a.sub
+	attachID := a.attachID
+
+	// Key-routing state. parser owns ESC / CSI / UTF-8 decoding;
+	// curTable is the table the next keypress resolves against,
+	// starting at root. Both live here so a mid-session window
+	// switch doesn't lose the user's in-flight table position.
+	parser := termin.NewParser(termcaps.Profile(a.ident.Profile))
+	curTable := a.state.rootTable
+
+	// Lazy escape timer. The parser exposes a Deadline when a lone
+	// ESC has been buffered; we arm a time.Timer for that deadline
+	// and rearm after every Feed/Tick. When no deadline is pending
+	// the timer is stopped and its channel drained.
+	//
+	// Construction pattern: NewTimer with a far-future duration,
+	// then Stop + drain so the initial state is "not armed". Every
+	// subsequent transition is Stop + drain, optionally followed by
+	// Reset. This is the canonical drain-before-reset pattern from
+	// the time package docs.
+	escTimer := time.NewTimer(time.Hour)
+	if !escTimer.Stop() {
+		<-escTimer.C
+	}
+	escArmed := false
+	rearmEsc := func() {
+		deadline, ok := parser.Deadline()
+		if ok {
+			if escArmed {
+				if !escTimer.Stop() {
+					select {
+					case <-escTimer.C:
+					default:
+					}
+				}
+			}
+			d := time.Until(deadline)
+			if d < 0 {
+				d = 0
+			}
+			escTimer.Reset(d)
+			escArmed = true
+			return
+		}
+		if escArmed {
+			if !escTimer.Stop() {
+				select {
+				case <-escTimer.C:
+				default:
+				}
+			}
+			escArmed = false
+		}
+	}
+
+	// resyncWindow checks whether the session's current window has
+	// moved (next-window, previous-window, new-window all mutate it)
+	// and, if so, swaps this pump's pinned window / pane /
+	// subscription over to the new active pane so subsequent frames
+	// render the right grid. Also re-points the state.register
+	// attach record at the new pane so future resize-applier calls
+	// land on the correct pane.
+	logger := log.For("server", "session", a.sess.Name())
+	resyncWindow := func() {
+		newWin := a.sess.CurrentWindow()
+		if newWin == nil || newWin == win {
+			return
+		}
+		newPane := newWin.ActivePane()
+		if newPane == nil {
+			return
+		}
+		// Drop the subscription to the previous pane before taking
+		// the new one — otherwise the old signals keep waking us up
+		// after we've stopped caring about that pane.
+		sub.Close()
+		newSub := newPane.Subscribe()
+		// Drain the priming signal; the initial render below does
+		// the job.
+		select {
+		case <-newSub.Ch:
+		default:
+		}
+
+		// Retire the old attachID and register the new pane so the
+		// window-size=latest policy tracks the right pane from now
+		// on. A Resize-during-register failure only reflects the new
+		// pane's inability to resize — fall back to leaving the pane
+		// at its natural size rather than bailing out of the pump.
+		a.state.deregister(attachID)
+		newID, err := a.state.register(newPane, a.sess.Options(), cols, rows)
+		if err != nil {
+			logger.Warn("resize on window switch", "err", err)
+		}
+
+		win = newWin
+		p = newPane
+		sub = newSub
+		attachID = newID
+
+		if err := renderAndSend(p, a.renderer, a.frameW, a.sess, win, cols, rows); err != nil {
+			logger.Warn("render on window switch", "err", err)
+		}
+	}
+
+	// runBinding fires one command binding and swaps the pump's
+	// pane/subscription if the command moved the session's current
+	// window. Closed over pump-local state so window-switching
+	// commands compose without an explicit "here is the active
+	// pane" plumb.
+	runBinding := func(argv []string) {
+		if len(argv) == 0 {
+			return
+		}
+		found, ok := cmd.Lookup(argv[0])
+		if !ok {
+			logger.Warn("binding references unknown command", "argv", argv)
+			return
+		}
+		var list cmdq.List
+		list.Append(cmdq.Item{Cmd: found, Argv: argv, CmdItem: a.item})
+		results := list.Drain()
+		if len(results) > 0 && !results[0].OK() {
+			logger.Warn("binding dispatch failed", "argv", argv, "err", results[0].Error())
+		}
+		resyncWindow()
+	}
+	dispatcher := dispatcherFunc(runBinding)
+
 	// Reader goroutine: parse frames off the socket, deliver on
 	// inCh. A single-slot readErrCh carries the terminal error
 	// (io.EOF or a real failure) exactly once.
@@ -1305,6 +1511,23 @@ func pump(a pumpArgs) (retErr error) {
 		cancel()
 		_ = a.conn.Close()
 		readerWG.Wait()
+		sub.Close()
+		if attachID != a.attachID {
+			// resyncWindow swapped us onto a new attachID; the
+			// enterAttachPump defer only knows about the original
+			// one. Retire the current one so the window-size policy
+			// doesn't keep a stale entry.
+			a.state.deregister(attachID)
+		}
+		if !escArmed {
+			return
+		}
+		if !escTimer.Stop() {
+			select {
+			case <-escTimer.C:
+			default:
+			}
+		}
 	}()
 
 	for {
@@ -1345,14 +1568,20 @@ func pump(a pumpArgs) (retErr error) {
 			})
 			return nil
 
-		case _, ok := <-a.sub.Ch:
+		case <-escTimer.C:
+			escArmed = false
+			emissions := parser.Tick(time.Now())
+			curTable = routeInput(emissions, curTable, a.state.rootTable, a.state.keyTables, dispatcher, p)
+			rearmEsc()
+
+		case _, ok := <-sub.Ch:
 			if !ok {
 				// Subscription channel closed: the pane's readLoop
 				// exited (child gone). The shell-exit watcher has
 				// either already fired or will in a moment; wait for
 				// ctx.Done on the next iteration rather than writing
 				// Exit here with no shutdown reason available yet.
-				a.sub.Ch = nil
+				sub.Ch = nil
 				continue
 			}
 			// Dirty signal: either the vt.Terminal has new bytes or
@@ -1362,7 +1591,7 @@ func pump(a pumpArgs) (retErr error) {
 			// TODO(m1:server-render-coalesce): drain any pending
 			// signals (non-blocking) before rendering so a burst
 			// produces one frame, not N.
-			if err := renderAndSend(a.pane, a.renderer, a.frameW, a.sess, a.win, cols, rows); err != nil {
+			if err := renderAndSend(p, a.renderer, a.frameW, a.sess, win, cols, rows); err != nil {
 				return err
 			}
 
@@ -1387,12 +1616,22 @@ func pump(a pumpArgs) (retErr error) {
 					continue
 				}
 				cols, rows = newCols, newRows
-				if err := a.state.resizeAttached(a.pane, a.sess.Options(), a.attachID, cols, rows); err != nil {
+				if err := a.state.resizeAttached(p, a.sess.Options(), attachID, cols, rows); err != nil {
 					return err
 				}
 				continue
 			}
-			if err := dispatchClientFrame(f, a.pane, a.frameW); err != nil {
+			if in, isInput := f.(*proto.Input); isInput {
+				// Route every byte through the parser. Key events
+				// whose KeyCode resolves in the current table either
+				// switch tables or fire a command; everything else
+				// forwards raw bytes to the pane's pty.
+				emissions := parser.Feed(in.Data)
+				curTable = routeInput(emissions, curTable, a.state.rootTable, a.state.keyTables, dispatcher, p)
+				rearmEsc()
+				continue
+			}
+			if err := dispatchClientFrame(f, p, a.frameW); err != nil {
 				return err
 			}
 			if _, isBye := f.(*proto.Bye); isBye {
@@ -1407,14 +1646,13 @@ func pump(a pumpArgs) (retErr error) {
 // connection should end (e.g. an unrecoverable write error); normal
 // per-frame failures like pane.Write returning ErrClosed are treated
 // as "the pane is gone, let ctx.Done handle it."
-func dispatchClientFrame(f proto.Frame, p *pane.Pane, w xio.FrameWriter) error {
+//
+// proto.Input is intentionally absent from this switch: the pump
+// routes Input frames through the key-binding machinery directly so
+// it can mutate its local table / pane state on window-switch
+// commands without round-tripping through this helper.
+func dispatchClientFrame(f proto.Frame, _ *pane.Pane, w xio.FrameWriter) error {
 	switch m := f.(type) {
-	case *proto.Input:
-		// Short write or ErrClosed here means the pane went away; the
-		// ctx.Done arm will observe that and emit Exit on its own.
-		_, _ = p.Write(m.Data)
-		return nil
-
 	case *proto.CommandList:
 		// Extra CommandLists after the pane is spawned: ack StatusOk
 		// so the client's bookkeeping stays consistent. No-op on the

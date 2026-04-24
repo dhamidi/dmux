@@ -1,10 +1,19 @@
 package keys
 
-// Binding associates a KeyCode with a command invocation to run when
-// the key fires. Argv is stored pre-parsed: the server looks argv[0]
-// up in the cmd registry and hands the whole slice to Exec. Multi-
-// command bindings (tmux's "a ; b") are deferred; one argv per
-// binding today.
+// Binding associates a KeyCode with either a command invocation or a
+// table switch to perform when the key fires.
+//
+// A binding is exactly one of two shapes:
+//
+//   - Command binding: SwitchTable == "". Firing the binding runs
+//     Argv through the cmd registry and, after dispatch, the pump
+//     returns to the root table — matching tmux's default one-shot
+//     prefix-table behaviour.
+//   - Switch-table binding: SwitchTable != "". Firing the binding
+//     swaps the pump's current key table to the named one. No
+//     command dispatch happens; Argv is ignored. This is the shape
+//     used by the prefix key ("C-b" → SwitchTable: "prefix") so the
+//     next keystroke resolves against the prefix table.
 //
 // Note is the free-form description shown by list-keys; it carries
 // no semantics. Repeat controls whether the binding keeps firing
@@ -15,9 +24,12 @@ type Binding struct {
 	// Key is the normalized trigger for this binding.
 	Key KeyCode
 	// Argv is the command invocation, including argv[0] (the command
-	// name). It is never nil for an installed binding; empty argvs
-	// are a caller bug.
+	// name). Populated only for command bindings; ignored when
+	// SwitchTable is non-empty.
 	Argv []string
+	// SwitchTable names the key table the pump should activate when
+	// this binding fires. Empty for ordinary command bindings.
+	SwitchTable string
 	// Note is a human-readable description surfaced by list-keys.
 	Note string
 	// Repeat marks the binding as eligible for key-repeat within the

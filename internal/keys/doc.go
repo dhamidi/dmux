@@ -25,16 +25,24 @@
 // # Bindings and tables
 //
 //	type Binding struct {
-//	    Key     KeyCode
-//	    CmdList *cmd.List
-//	    Note    string
-//	    Repeat  bool
+//	    Key         KeyCode
+//	    Argv        []string
+//	    SwitchTable string
+//	    Note        string
+//	    Repeat      bool
 //	}
 //
 //	type Table struct {
 //	    Name     string
 //	    Bindings map[KeyCode]*Binding
 //	}
+//
+// Bindings come in two shapes: command bindings (SwitchTable == "")
+// dispatch Argv through the cmd registry and return the pump to the
+// root table afterwards; switch-table bindings (SwitchTable != "")
+// swap the pump's current table without running a command. The
+// prefix key uses the switch-table shape so the next key resolves
+// against the named prefix table.
 //
 // Tables are named: root, prefix, copy-mode, copy-mode-vi,
 // command-prompt, ... matching tmux. Lookup is a single map access.
