@@ -159,6 +159,67 @@ func TestUnsetRestoresParentValue(t *testing.T) {
 	}
 }
 
+func TestUserOptionSetGet(t *testing.T) {
+	srv := options.NewServerOptions()
+	sess := options.NewScopedOptions(options.SessionScope, srv)
+
+	if err := sess.Set("@client/shell", options.NewString("conn-17")); err != nil {
+		t.Fatalf("Set user option: %v", err)
+	}
+	if got := sess.GetString("@client/shell"); got != "conn-17" {
+		t.Fatalf("GetString user option: got %q, want %q", got, "conn-17")
+	}
+}
+
+func TestUserOptionUnsetReadsEmpty(t *testing.T) {
+	srv := options.NewServerOptions()
+	if got := srv.GetString("@unset/key"); got != "" {
+		t.Fatalf("unset user option: got %q, want empty string", got)
+	}
+}
+
+func TestUserOptionAcceptedOnAnyScope(t *testing.T) {
+	srv := options.NewServerOptions()
+	if err := srv.Set("@hook/on-attach", options.NewString("flash-status")); err != nil {
+		t.Fatalf("user option on ServerScope: %v", err)
+	}
+	sess := options.NewScopedOptions(options.SessionScope, srv)
+	if got := sess.GetString("@hook/on-attach"); got != "flash-status" {
+		t.Fatalf("inherit user option: got %q, want %q", got, "flash-status")
+	}
+}
+
+func TestUserOptionRejectsNonString(t *testing.T) {
+	srv := options.NewServerOptions()
+	err := srv.Set("@bool", options.NewBool(true))
+	if err == nil {
+		t.Fatalf("non-string user option returned nil, want error")
+	}
+	if !errors.Is(err, options.ErrTypeMismatch) {
+		t.Fatalf("errors.Is(ErrTypeMismatch) failed: %v", err)
+	}
+}
+
+func TestUserOptionUnset(t *testing.T) {
+	srv := options.NewServerOptions()
+	sess := options.NewScopedOptions(options.SessionScope, srv)
+	if err := sess.Set("@tmp", options.NewString("x")); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if !sess.IsSetLocally("@tmp") {
+		t.Fatalf("IsSetLocally after Set returned false")
+	}
+	if err := sess.Unset("@tmp"); err != nil {
+		t.Fatalf("Unset: %v", err)
+	}
+	if sess.IsSetLocally("@tmp") {
+		t.Fatalf("IsSetLocally after Unset returned true")
+	}
+	if got := sess.GetString("@tmp"); got != "" {
+		t.Fatalf("GetString after Unset: got %q, want empty", got)
+	}
+}
+
 func TestIsSetLocally(t *testing.T) {
 	srv := options.NewServerOptions()
 	sess := options.NewScopedOptions(options.SessionScope, srv)

@@ -7,7 +7,22 @@ package options
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
+
+// UserOptionPrefix marks a name as a user-defined option. Names
+// starting with this prefix bypass the closed Table: they are stored
+// as String values on whichever scope sets them and inherit down the
+// parent chain like any Table option. Unset user options read as
+// empty strings, mirroring tmux's `#{@my-var}` behavior.
+const UserOptionPrefix = "@"
+
+// IsUserOption reports whether name is a user-defined option. User
+// options have no Table entry; their validation rules are weaker
+// (String-only, any scope).
+func IsUserOption(name string) bool {
+	return strings.HasPrefix(name, UserOptionPrefix)
+}
 
 // Type tags the kind of value a Table entry holds. M1 only wires the
 // first four; Key, Color, and Command values exist in the enum so
@@ -196,14 +211,19 @@ func NewScopedOptions(scope Scope, parent *Options) *Options {
 }
 
 // Get returns the most-specific value for name, walking the parent
-// chain and finally falling back to the Table default. A name not in
-// the Table yields the zero Value. Callers that care about "is this
-// set locally" use IsSetLocally instead of comparing against zero.
+// chain and finally falling back to the Table default. Unset user
+// options (name starts with "@") read as NewString(""); other names
+// not in the Table yield the zero Value. Callers that care about
+// "is this set locally" use IsSetLocally instead of comparing
+// against zero.
 func (o *Options) Get(name string) Value {
 	for cur := o; cur != nil; cur = cur.parent {
 		if v, ok := cur.local[name]; ok {
 			return v
 		}
+	}
+	if IsUserOption(name) {
+		return NewString("")
 	}
 	if e, ok := lookupEntry(name); ok {
 		return e.Default
@@ -250,10 +270,25 @@ func (o *Options) GetNumber(name string) int64 {
 // Table entry: the name must exist, v.Type must match the entry, this
 // Options' scope bit must be present in entry.Scope, Choice values
 // must match one of entry.Choices, and Number values must lie in
-// [Min, Max] when Min/Max are non-zero. Errors are structured *Error
-// values wrapping the appropriate sentinel so callers can dispatch via
-// errors.Is or pull detail via errors.As.
+// [Min, Max] when Min/Max are non-zero. User options (name starts with
+// "@") skip the Table lookup and scope check; they are always
+// String-typed and accepted on any scope. Errors are structured
+// *Error values wrapping the appropriate sentinel so callers can
+// dispatch via errors.Is or pull detail via errors.As.
 func (o *Options) Set(name string, v Value) error {
+	if IsUserOption(name) {
+		if v.typ != String {
+			return &Error{
+				Op:       "set",
+				Name:     name,
+				Sentinel: ErrTypeMismatch,
+				Want:     String,
+				Got:      v.typ,
+			}
+		}
+		o.local[name] = v
+		return nil
+	}
 	e, ok := lookupEntry(name)
 	if !ok {
 		return &Error{Op: "set", Name: name, Sentinel: ErrUnknownOption}
@@ -310,9 +345,13 @@ func (o *Options) Set(name string, v Value) error {
 
 // Unset removes name from this scope's local map. After Unset, Get on
 // the same name walks the parent chain again. Returns ErrUnknownOption
-// (wrapped) if name is not in the Table; unsetting a name that was
-// never set locally is not an error.
+// (wrapped) if name is not in the Table and not a user option;
+// unsetting a name that was never set locally is not an error.
 func (o *Options) Unset(name string) error {
+	if IsUserOption(name) {
+		delete(o.local, name)
+		return nil
+	}
 	if _, ok := lookupEntry(name); !ok {
 		return &Error{Op: "unset", Name: name, Sentinel: ErrUnknownOption}
 	}
