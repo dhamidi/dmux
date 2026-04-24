@@ -51,19 +51,23 @@
 // roughly one event per user action plus a handful per second under
 // load.
 //
-// # Subscription (test-only)
+// # Subscription
 //
-// Under the `dmuxtest` build tag, recorder exposes a subscribe API:
+// Subscribe/Unsubscribe are always available. Scenarios consume them
+// for assertions; production hooks and plugins consume them to
+// observe the event stream in-process.
 //
 //	ch := record.Subscribe(ctx, filter)
 //	defer record.Unsubscribe(ch)
 //
 // Subscribers receive every matching event from the moment of
-// subscription until unsubscribe or ctx.Done. Multiple subscribers
-// are independent; one slow subscriber does not block others.
+// subscription until Unsubscribe or ctx.Done. Multiple subscribers
+// are independent; one slow subscriber does not block others (its
+// own channel fills and its events drop into the Dropped counter).
 //
 // The filter is a predicate function; scenarios compose these via
-// the matcher library in internal/dmuxtest.
+// the matcher library in internal/dmuxtest, and hooks can use any
+// predicate they like.
 //
 // # Event sampling for high-volume payloads
 //
@@ -84,14 +88,17 @@
 //
 // # Interface
 //
-//	// Production API (always available):
+//	// Always available:
 //	Emit(ctx context.Context, name string, kv ...any)
+//	EmitDebug(ctx context.Context, name string, kv ...any)
 //	Open(cfg Config) error
 //	Close() error
-//
-//	// Test-only API (dmuxtest build tag):
 //	Subscribe(ctx context.Context, filter Filter) <-chan Event
 //	Unsubscribe(ch <-chan Event)
+//	CurrentLevel() Level
+//	Dropped() uint64
+//
+//	// Test-only API (dmuxtest build tag):
 //	SetLevel(Level)
 //
 //	type Event struct {

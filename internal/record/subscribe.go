@@ -1,5 +1,3 @@
-//go:build dmuxtest
-
 package record
 
 import (
@@ -18,7 +16,9 @@ const subscriberCapacity = 256
 // fills and causes its own events to drop (counted via Dropped())
 // without affecting other subscribers.
 //
-// Subscribe is only compiled under the dmuxtest build tag.
+// Subscribe is always available: scenario runners consume it for
+// assertions, and production hooks/plugins consume it to observe the
+// server's event stream in-process.
 func Subscribe(ctx context.Context, filter Filter) <-chan Event {
 	r := currentRecorder()
 	if r == nil {
@@ -45,8 +45,6 @@ func Subscribe(ctx context.Context, filter Filter) <-chan Event {
 // Unsubscribe removes ch from the current recorder's fanout list and
 // closes it. Safe to call more than once with the same channel; safe
 // when no recorder is open.
-//
-// Unsubscribe is only compiled under the dmuxtest build tag.
 func Unsubscribe(ch <-chan Event) {
 	r := currentRecorder()
 	if r == nil {
@@ -65,19 +63,6 @@ func Unsubscribe(ch <-chan Event) {
 		kept = append(kept, s)
 	}
 	r.subs = kept
-}
-
-// SetLevel updates the current recorder's verbosity. Scenario files
-// invoke this through the test-set-recorder-level command. When no
-// recorder is open, SetLevel is a no-op.
-//
-// SetLevel is only compiled under the dmuxtest build tag.
-func SetLevel(lv Level) {
-	r := currentRecorder()
-	if r == nil {
-		return
-	}
-	r.level.Store(int32(lv))
 }
 
 func (r *Recorder) removeSubscription(s *subscription) {
