@@ -1,5 +1,3 @@
-//go:build dmuxtest
-
 package record_test
 
 import (

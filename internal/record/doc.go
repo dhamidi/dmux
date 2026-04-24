@@ -88,18 +88,15 @@
 //
 // # Interface
 //
-//	// Always available:
 //	Emit(ctx context.Context, name string, kv ...any)
 //	EmitDebug(ctx context.Context, name string, kv ...any)
 //	Open(cfg Config) error
 //	Close() error
 //	Subscribe(ctx context.Context, filter Filter) <-chan Event
 //	Unsubscribe(ch <-chan Event)
+//	SetLevel(Level)
 //	CurrentLevel() Level
 //	Dropped() uint64
-//
-//	// Test-only API (dmuxtest build tag):
-//	SetLevel(Level)
 //
 //	type Event struct {
 //	    At     time.Time
