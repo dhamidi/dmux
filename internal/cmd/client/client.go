@@ -3,6 +3,7 @@ package client
 import (
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/dhamidi/dmux/internal/cmd"
 	"github.com/dhamidi/dmux/internal/cmd/args"
@@ -18,8 +19,8 @@ const Name = "client"
 const OptionPrefix = "@client/"
 
 // command is the ensemble entry point. Its Exec dispatches on the
-// first positional to spawn or kill; unknown subcommands surface as
-// parse errors so callers see structured diagnostics instead of a
+// first positional to spawn, kill, or at; unknown subcommands surface
+// as parse errors so callers see structured diagnostics instead of a
 // silent no-op.
 type command struct{}
 
@@ -40,12 +41,14 @@ func (command) Exec(item cmd.Item, argv []string) cmd.Result {
 		return execSpawn(item, argv[1:])
 	case "kill":
 		return execKill(item, argv[1:])
+	case "at":
+		return execAt(item, argv[1:])
 	default:
 		return cmd.Err(&args.ParseError{
 			Phase: "positional",
 			Name:  "subcommand",
 			Value: argv[1],
-			Err:   fmt.Errorf("unknown subcommand: want spawn or kill"),
+			Err:   fmt.Errorf("unknown subcommand: want spawn, kill, or at"),
 		})
 	}
 }
@@ -107,6 +110,56 @@ func execKill(item cmd.Item, argv []string) cmd.Result {
 		return cmd.Err(err)
 	}
 	if err := item.Clients().Kill(ref); err != nil && !errors.Is(err, cmd.ErrStaleClient) {
+		return cmd.Err(err)
+	}
+	return cmd.Ok()
+}
+
+// execAt parses the at subcommand's argv, looks up the stored handle
+// for name, decodes the Go-quoted bytes literal, and asks the
+// ClientManager to inject the resulting bytes into the named client's
+// input stream. A stale reference (Inject returns an error wrapping
+// ErrStaleClient) unsets the @client/<name> option so the next spawn
+// does not collide, then surfaces the stale-ref error — unlike kill,
+// at's caller wanted bytes delivered, so the failure is real.
+func execAt(item cmd.Item, argv []string) cmd.Result {
+	s := args.New(Name + " at")
+	name := s.StringArg("name", "", "client handle")
+	bytes := s.StringArg("bytes", "", "Go-quoted byte literal")
+	if err := s.Parse(argv[1:]); err != nil {
+		return cmd.Err(err)
+	}
+	if *name == "" {
+		return cmd.Err(&args.ParseError{
+			Phase: "positional",
+			Name:  "name",
+			Err:   errors.New("handle required"),
+		})
+	}
+	if *bytes == "" {
+		return cmd.Err(&args.ParseError{
+			Phase: "positional",
+			Name:  "bytes",
+			Err:   errors.New("bytes required"),
+		})
+	}
+	unquoted, err := strconv.Unquote("\"" + *bytes + "\"")
+	if err != nil {
+		return cmd.Err(&args.ParseError{
+			Phase: "positional",
+			Name:  "bytes",
+			Value: *bytes,
+			Err:   err,
+		})
+	}
+	ref := item.Options().GetString(OptionPrefix + *name)
+	if ref == "" {
+		return cmd.Err(cmd.ErrNotFound)
+	}
+	if err := item.Clients().Inject(ref, []byte(unquoted)); err != nil {
+		if errors.Is(err, cmd.ErrStaleClient) {
+			_ = item.Options().Unset(OptionPrefix + *name)
+		}
 		return cmd.Err(err)
 	}
 	return cmd.Ok()

@@ -13,18 +13,25 @@ import (
 )
 
 type fakeClients struct {
-	next     int
-	live     map[string]bool
-	spawnErr error
-	killErr  error
-	spawned  []spawnCall
-	killed   []string
+	next      int
+	live      map[string]bool
+	spawnErr  error
+	killErr   error
+	injectErr error
+	spawned   []spawnCall
+	killed    []string
+	injected  []injectCall
 }
 
 type spawnCall struct {
 	profile string
 	cols    int
 	rows    int
+}
+
+type injectCall struct {
+	ref   string
+	bytes []byte
 }
 
 func newFakeClients() *fakeClients {
@@ -51,6 +58,17 @@ func (f *fakeClients) Kill(ref string) error {
 		return fmt.Errorf("kill %s: %w", ref, cmd.ErrStaleClient)
 	}
 	delete(f.live, ref)
+	return nil
+}
+
+func (f *fakeClients) Inject(ref string, bytes []byte) error {
+	f.injected = append(f.injected, injectCall{ref: ref, bytes: bytes})
+	if f.injectErr != nil {
+		return f.injectErr
+	}
+	if !f.live[ref] {
+		return fmt.Errorf("inject %s: %w", ref, cmd.ErrStaleClient)
+	}
 	return nil
 }
 
@@ -244,5 +262,159 @@ func TestSpawnErrorFromManagerPropagates(t *testing.T) {
 	}
 	if got := item.opts.GetString(client.OptionPrefix + "shell"); got != "" {
 		t.Fatalf("@client/shell = %q after spawn failure, want empty", got)
+	}
+}
+
+func TestAtDeliversBytesToLiveClient(t *testing.T) {
+	c := lookupClient(t)
+	item := newFakeItem()
+	if res := c.Exec(item, []string{client.Name, "spawn", "shell"}); !res.OK() {
+		t.Fatalf("setup spawn: %v", res.Error())
+	}
+	ref := item.opts.GetString(client.OptionPrefix + "shell")
+
+	res := c.Exec(item, []string{client.Name, "at", "shell", `echo hi\n`})
+	if !res.OK() {
+		t.Fatalf("at returned %v, want Ok", res.Error())
+	}
+	if len(item.clients.injected) != 1 {
+		t.Fatalf("Inject called %d times, want 1: %v", len(item.clients.injected), item.clients.injected)
+	}
+	got := item.clients.injected[0]
+	if got.ref != ref {
+		t.Fatalf("Inject ref = %q, want %q", got.ref, ref)
+	}
+	if string(got.bytes) != "echo hi\n" {
+		t.Fatalf("Inject bytes = %q, want %q", got.bytes, "echo hi\n")
+	}
+}
+
+func TestAtParsesGoEscapes(t *testing.T) {
+	c := lookupClient(t)
+
+	// Hex escape: "\x02d" → 0x02 'd' (Ctrl-B d).
+	item := newFakeItem()
+	if res := c.Exec(item, []string{client.Name, "spawn", "shell"}); !res.OK() {
+		t.Fatalf("setup spawn: %v", res.Error())
+	}
+	res := c.Exec(item, []string{client.Name, "at", "shell", `\x02d`})
+	if !res.OK() {
+		t.Fatalf("at with hex escape returned %v, want Ok", res.Error())
+	}
+	if len(item.clients.injected) != 1 {
+		t.Fatalf("Inject called %d times, want 1", len(item.clients.injected))
+	}
+	got := item.clients.injected[0].bytes
+	want := []byte{0x02, 'd'}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("Inject bytes = %v, want %v", got, want)
+	}
+
+	// Unicode escape: "\u00e9" → UTF-8 é.
+	item = newFakeItem()
+	if res := c.Exec(item, []string{client.Name, "spawn", "shell"}); !res.OK() {
+		t.Fatalf("setup spawn: %v", res.Error())
+	}
+	res = c.Exec(item, []string{client.Name, "at", "shell", `\u00e9`})
+	if !res.OK() {
+		t.Fatalf("at with unicode escape returned %v, want Ok", res.Error())
+	}
+	if len(item.clients.injected) != 1 {
+		t.Fatalf("Inject called %d times, want 1", len(item.clients.injected))
+	}
+	if string(item.clients.injected[0].bytes) != "é" {
+		t.Fatalf("Inject bytes = %q, want %q", item.clients.injected[0].bytes, "é")
+	}
+}
+
+func TestAtRejectsMalformedEscape(t *testing.T) {
+	c := lookupClient(t)
+	item := newFakeItem()
+	if res := c.Exec(item, []string{client.Name, "spawn", "shell"}); !res.OK() {
+		t.Fatalf("setup spawn: %v", res.Error())
+	}
+	res := c.Exec(item, []string{client.Name, "at", "shell", `\x`})
+	if res.OK() {
+		t.Fatalf("at with malformed escape returned Ok, want Err")
+	}
+	var perr *args.ParseError
+	if !errors.As(res.Error(), &perr) {
+		t.Fatalf("error not *args.ParseError: %v", res.Error())
+	}
+	if perr.Name != "bytes" {
+		t.Fatalf("ParseError.Name = %q, want %q", perr.Name, "bytes")
+	}
+	if len(item.clients.injected) != 0 {
+		t.Fatalf("Inject called despite parse failure: %v", item.clients.injected)
+	}
+}
+
+func TestAtRequiresName(t *testing.T) {
+	c := lookupClient(t)
+	item := newFakeItem()
+	res := c.Exec(item, []string{client.Name, "at"})
+	if res.OK() {
+		t.Fatalf("at without name returned Ok, want Err")
+	}
+	var perr *args.ParseError
+	if !errors.As(res.Error(), &perr) {
+		t.Fatalf("error not *args.ParseError: %v", res.Error())
+	}
+	if perr.Name != "name" {
+		t.Fatalf("ParseError.Name = %q, want %q", perr.Name, "name")
+	}
+}
+
+func TestAtRequiresBytes(t *testing.T) {
+	c := lookupClient(t)
+	item := newFakeItem()
+	res := c.Exec(item, []string{client.Name, "at", "shell"})
+	if res.OK() {
+		t.Fatalf("at without bytes returned Ok, want Err")
+	}
+	var perr *args.ParseError
+	if !errors.As(res.Error(), &perr) {
+		t.Fatalf("error not *args.ParseError: %v", res.Error())
+	}
+	if perr.Name != "bytes" {
+		t.Fatalf("ParseError.Name = %q, want %q", perr.Name, "bytes")
+	}
+}
+
+func TestAtUnknownNameIsNotFound(t *testing.T) {
+	c := lookupClient(t)
+	item := newFakeItem()
+	res := c.Exec(item, []string{client.Name, "at", "ghost", "hi"})
+	if res.OK() {
+		t.Fatalf("at with unknown name returned Ok, want Err")
+	}
+	if !errors.Is(res.Error(), cmd.ErrNotFound) {
+		t.Fatalf("at error does not wrap ErrNotFound: %v", res.Error())
+	}
+	if len(item.clients.injected) != 0 {
+		t.Fatalf("Inject called with no stored ref: %v", item.clients.injected)
+	}
+}
+
+func TestAtStaleRefClearsOption(t *testing.T) {
+	c := lookupClient(t)
+	item := newFakeItem()
+	if res := c.Exec(item, []string{client.Name, "spawn", "shell"}); !res.OK() {
+		t.Fatalf("setup spawn: %v", res.Error())
+	}
+	ref := item.opts.GetString(client.OptionPrefix + "shell")
+	// Simulate the client having exited — option still points at it,
+	// but fakeClients no longer tracks it as live.
+	delete(item.clients.live, ref)
+
+	res := c.Exec(item, []string{client.Name, "at", "shell", "hi"})
+	if res.OK() {
+		t.Fatalf("at against stale ref returned Ok, want Err")
+	}
+	if !errors.Is(res.Error(), cmd.ErrStaleClient) {
+		t.Fatalf("at error does not wrap ErrStaleClient: %v", res.Error())
+	}
+	if got := item.opts.GetString(client.OptionPrefix + "shell"); got != "" {
+		t.Fatalf("@client/shell = %q after stale-ref at, want empty", got)
 	}
 }

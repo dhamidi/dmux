@@ -577,6 +577,8 @@ func (stubClientManager) Spawn(string, int, int) (string, error) {
 
 func (stubClientManager) Kill(string) error { return cmd.ErrNotImplemented }
 
+func (stubClientManager) Inject(string, []byte) error { return cmd.ErrNotImplemented }
+
 // shutdownRequested is the read side of the local bit set by
 // Shutdown. Separate from serverState.shutdown() because we only
 // want "did one of my Items ask?" — racing kill-servers from other

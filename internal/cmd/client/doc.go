@@ -4,11 +4,27 @@
 //
 //	client spawn [-F profile] [-x cols] [-y rows] <name>
 //	client kill  <name>
+//	client at    <name> <bytes>
 //
 // The ensemble dispatches on its first positional argument: "spawn"
 // creates a new in-process client and records its opaque reference in
 // the user option @client/<name>; "kill" reads that option, tears the
-// client down, and unsets the option.
+// client down, and unsets the option; "at" reads the same option and
+// injects bytes into the named client's input stream so the server
+// sees them as Input frames exactly as if that client's tty had
+// emitted them.
+//
+// # Byte injection
+//
+// The bytes argument to "at" is a Go-quoted string literal: the
+// ensemble wraps it in double quotes and feeds it through
+// strconv.Unquote so escapes (`\n`, `\xNN`, `\uNNNN`) follow the
+// same rules as Go source literals. A malformed escape surfaces as a
+// *args.ParseError naming the "bytes" positional. An @client/<name>
+// ref that no longer resolves to a live client (Inject wraps
+// ErrStaleClient) unsets the option before surfacing the error, so
+// stale bookkeeping does not block the next "spawn" under the same
+// name.
 //
 // # Rationale
 //

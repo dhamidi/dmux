@@ -69,10 +69,16 @@ type Item interface {
 // and returns an opaque reference string the caller stores for later
 // lookup. Kill tears down the client named by ref; a ref that does
 // not correspond to a live client returns an error wrapping
-// ErrStaleClient so callers can tolerate bookkeeping drift.
+// ErrStaleClient so callers can tolerate bookkeeping drift. Inject
+// writes raw bytes into the named client's input stream, so the
+// server reads them as Input frames on that client's connection
+// identical to keystrokes from a real tty; a ref that no longer
+// corresponds to a live client returns an error wrapping
+// ErrStaleClient on the same contract as Kill.
 type ClientManager interface {
 	Spawn(profile string, cols, rows int) (ref string, err error)
 	Kill(ref string) error
+	Inject(ref string, bytes []byte) error
 }
 
 // Client is the attach-client's view of its own identity. The
