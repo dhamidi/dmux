@@ -92,6 +92,7 @@ func Run(path string) error {
 		serverSessions: make(map[session.ID]*serverSession),
 		attached:       make(map[uint64]*attachedClient),
 	}
+	state.clients = newClientManager(state)
 	state.installDefaultKeyTables()
 
 	// Closer goroutine: when ctx is canceled (kill-server or Run's
@@ -213,6 +214,13 @@ type serverState struct {
 	shutdownOnce    sync.Once
 	shutdownReason  proto.ExitReason
 	shutdownMessage string
+
+	// clients is the in-process client manager handed out from every
+	// serverItem's Clients() accessor. Initialized in Run after the
+	// serverState literal so it can back-reference state; torn down
+	// in shutdownRegistry so no syntheticClient goroutine outlives
+	// Run's return.
+	clients *clientManager
 
 	// rootTable is the key table every pump starts in. Built once at
 	// server startup with the default tmux-like bindings (prefix
@@ -675,7 +683,17 @@ func (s *serverState) shutdown() (proto.ExitReason, string) {
 // them. Called from Run's defer path after every per-connection
 // goroutine has drained, so there are no concurrent readers or
 // writers racing the close.
+//
+// Synthetic clients spawned via the ClientManager are torn down
+// first: their server-end handle() goroutines hold pane
+// subscriptions and must return before we close their panes. Kill
+// waits up to killWait per client for client.Run to drain, which
+// also lets the paired handle() goroutine exit on state.ctx
+// cancellation.
 func (s *serverState) shutdownRegistry() {
+	if s.clients != nil {
+		s.clients.shutdown()
+	}
 	s.registryMu.Lock()
 	defer s.registryMu.Unlock()
 	for sess := range s.registry.Sessions() {
@@ -772,10 +790,12 @@ func (i *serverItem) SetDetach(reason proto.ExitReason, message string) {
 // propagates to narrower scopes.
 func (i *serverItem) Options() *options.Options { return i.state.serverOptions }
 
-// Clients returns the in-process client manager. The stub returned
-// here reports ErrNotImplemented from Spawn/Kill; real implementation
-// arrives alongside the dmuxtest harness when it lands.
-func (i *serverItem) Clients() cmd.ClientManager { return stubClientManager{} }
+// Clients returns the in-process client manager. Backed by a real
+// net.Pipe()-driven synthetic-client table (see clients.go); Spawn
+// creates a client that attaches to the most-recent session via the
+// wire protocol, Kill tears it down, Inject feeds bytes as Input
+// frames.
+func (i *serverItem) Clients() cmd.ClientManager { return i.state.clients }
 
 // CurrentSession returns this connection's attached session wrapped
 // in a sessionRef, or nil when the connection is not yet attached.
@@ -862,19 +882,6 @@ func (i *serverItem) AdvanceWindow(ref cmd.SessionRef, delta int) (cmd.WindowRef
 	}
 	return windowRef{win: w}, nil
 }
-
-// stubClientManager is a placeholder ClientManager whose Spawn and
-// Kill both report ErrNotImplemented. Replaced once the in-process
-// client table lands.
-type stubClientManager struct{}
-
-func (stubClientManager) Spawn(string, int, int) (string, error) {
-	return "", cmd.ErrNotImplemented
-}
-
-func (stubClientManager) Kill(string) error { return cmd.ErrNotImplemented }
-
-func (stubClientManager) Inject(string, []byte) error { return cmd.ErrNotImplemented }
 
 // shutdownRequested is the read side of the local bit set by
 // Shutdown. Separate from serverState.shutdown() because we only
