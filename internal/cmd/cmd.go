@@ -102,11 +102,15 @@ type Item interface {
 // server reads them as Input frames on that client's connection
 // identical to keystrokes from a real tty; a ref that no longer
 // corresponds to a live client returns an error wrapping
-// ErrStaleClient on the same contract as Kill.
+// ErrStaleClient on the same contract as Kill. Screen returns a
+// snapshot of bytes the server has painted to the named client's
+// terminal so assertion commands can inspect rendered output; the
+// stale-ref contract matches Kill and Inject.
 type ClientManager interface {
 	Spawn(profile string, cols, rows int) (ref string, err error)
 	Kill(ref string) error
 	Inject(ref string, bytes []byte) error
+	Screen(ref string) ([]byte, error)
 }
 
 // Client is the attach-client's view of its own identity. The

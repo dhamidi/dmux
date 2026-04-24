@@ -73,6 +73,15 @@ func (f *fakeClients) Inject(ref string, bytes []byte) error {
 	return nil
 }
 
+// Screen is a stub: the client command does not exercise it. A real
+// screen snapshot is the assert command's concern.
+func (f *fakeClients) Screen(ref string) ([]byte, error) {
+	if !f.live[ref] {
+		return nil, fmt.Errorf("screen %s: %w", ref, cmd.ErrStaleClient)
+	}
+	return nil, nil
+}
+
 type fakeItem struct {
 	opts    *options.Options
 	clients *fakeClients

@@ -366,9 +366,8 @@ func (t *syntheticTerminal) close() {
 
 // Screen returns a snapshot of bytes written to the terminal. Copied
 // so callers can inspect without racing with concurrent Write calls.
-// Exposed on the concrete type (not cmd.ClientManager) so future
-// assert-command wiring can read per-client output without widening
-// the narrow interface.
+// Satisfies cmd.ClientManager.Screen; the assert command reads from
+// here via the narrow interface.
 func (m *clientManager) Screen(ref string) ([]byte, error) {
 	m.mu.Lock()
 	sc, ok := m.clients[ref]
