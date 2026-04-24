@@ -61,9 +61,17 @@ type Parser struct {
 	// pasteBuf accumulates data between CSI 200 ~ and CSI 201 ~.
 	pasteBuf []byte
 
-	// out is the event list under construction for the current
-	// Feed call. Reused across calls; reset at the top of Feed.
-	out []Event
+	// seqBuf accumulates the raw input bytes of the in-flight
+	// sequence (ESC+letter, CSI, SS3, UTF-8 multi-byte, or the
+	// full paste envelope including both bracketed-paste markers).
+	// Copied out into an Emission when the sequence emits; reset
+	// at each transition back to stateGround.
+	seqBuf []byte
+
+	// out is the emission list under construction for the current
+	// Feed or Tick call. Reused across calls; reset at the top of
+	// each entry point.
+	out []Emission
 }
 
 // NewParser returns a Parser primed for profile p. The returned
@@ -76,14 +84,18 @@ func NewParser(p termcaps.Profile) *Parser {
 	}
 }
 
-// Feed consumes b and returns the events recognized in it. The
-// returned slice is only valid until the next call to Feed or
-// Tick; callers must copy events they intend to hold on to.
+// Feed consumes b and returns the emissions recognized in it. Each
+// Emission carries both the semantic Event and the exact raw input
+// bytes that produced it — routing code uses the bytes to decide
+// between dropping a bound key (fire the command, discard bytes)
+// or forwarding the raw bytes to an attached pane's pty.
 //
-// Feed never emits more than one event per input rune/sequence.
-// A bare ESC byte does not produce an event; see Tick and
-// Deadline for the escape-timeout protocol.
-func (p *Parser) Feed(b []byte) []Event {
+// The returned slice is only valid until the next call to Feed or
+// Tick; the per-Emission Bytes slices are freshly allocated and
+// survive beyond that. Feed never emits more than one event per
+// input rune/sequence. A bare ESC byte does not produce an event;
+// see Tick and Deadline for the escape-timeout protocol.
+func (p *Parser) Feed(b []byte) []Emission {
 	p.out = p.out[:0]
 	for i := 0; i < len(b); i++ {
 		c := b[i]
@@ -91,16 +103,23 @@ func (p *Parser) Feed(b []byte) []Event {
 		case stateGround:
 			p.feedGround(c)
 		case stateEsc:
+			p.seqBuf = append(p.seqBuf, c)
 			p.feedEsc(c)
 		case stateCSI:
+			p.seqBuf = append(p.seqBuf, c)
 			p.feedCSI(c)
 		case stateSS3:
+			p.seqBuf = append(p.seqBuf, c)
 			p.feedSS3(c)
 		case statePaste:
 			// The end marker is CSI 201 ~. We detect the ESC that
 			// starts it, then route subsequent bytes through the
 			// CSI state machine until the ~ arrives. Until then,
-			// raw bytes accumulate in pasteBuf.
+			// raw bytes accumulate in pasteBuf. seqBuf accumulates
+			// the full envelope — opening marker, payload, and
+			// closing marker — so the emission carries the whole
+			// paste as one byte span.
+			p.seqBuf = append(p.seqBuf, c)
 			if c == 0x1B {
 				p.state = stateEsc
 				p.escPending = false // inside a paste ESC cannot stand alone
@@ -108,6 +127,7 @@ func (p *Parser) Feed(b []byte) []Event {
 				p.pasteBuf = append(p.pasteBuf, c)
 			}
 		case stateUTF8:
+			p.seqBuf = append(p.seqBuf, c)
 			p.feedUTF8(c)
 		}
 	}
@@ -117,15 +137,22 @@ func (p *Parser) Feed(b []byte) []Event {
 // Tick fires pending time-driven events. The caller passes the
 // current time; Parser has no clock of its own. If a bare ESC was
 // buffered and now is at or past the ESC deadline, Tick emits a
-// KeyEscape event and clears the pending state. Otherwise Tick
+// KeyEscape emission and clears the pending state. Otherwise Tick
 // returns an empty slice.
-func (p *Parser) Tick(now time.Time) []Event {
+//
+// The Bytes field of a Tick-emitted KeyEscape is nil: the event is
+// time-driven, not byte-driven — the original ESC byte was consumed
+// on a prior Feed. Routing code treats a nil Bytes as "no bytes to
+// forward" (the bound-command path still fires; the passthrough
+// path has nothing to send).
+func (p *Parser) Tick(now time.Time) []Emission {
 	p.out = p.out[:0]
 	if p.escPending && !now.Before(p.escDeadline) {
-		p.emitKey(keys.KeyEscape, 0, "")
+		p.emitKey(keys.KeyEscape, 0, "", nil)
 		p.escPending = false
 		p.escDeadline = time.Time{}
 		p.state = stateGround
+		p.seqBuf = p.seqBuf[:0]
 	}
 	return p.out
 }
@@ -151,6 +178,7 @@ func (p *Parser) Reset() {
 	p.escPending = false
 	p.escDeadline = time.Time{}
 	p.pasteBuf = p.pasteBuf[:0]
+	p.seqBuf = p.seqBuf[:0]
 	p.out = p.out[:0]
 }
 
@@ -161,41 +189,44 @@ func (p *Parser) feedGround(c byte) {
 	switch {
 	case c == 0x1B:
 		// ESC: start a new sequence. Do not emit yet; the next
-		// byte (or a Tick past the deadline) resolves it.
+		// byte (or a Tick past the deadline) resolves it. Seed
+		// seqBuf with the ESC byte so subsequent bytes extend a
+		// single envelope.
 		p.state = stateEsc
 		p.escPending = true
 		p.escDeadline = time.Now().Add(escTimeout)
+		p.seqBuf = append(p.seqBuf[:0], c)
 	case c == 0x00:
-		p.emitKey(keys.KeySpace, keys.ModCtrl, "")
+		p.emitKey(keys.KeySpace, keys.ModCtrl, "", []byte{c})
 	case c >= 0x01 && c <= 0x1A:
 		// Ctrl-A..Ctrl-Z, except the special cases above. 0x08
 		// (BS), 0x09 (HT), 0x0A (LF), 0x0D (CR) are more useful
 		// as the keycap keys the user actually pressed.
 		switch c {
 		case 0x08:
-			p.emitKey(keys.KeyBackspace, 0, "")
+			p.emitKey(keys.KeyBackspace, 0, "", []byte{c})
 		case 0x09:
-			p.emitKey(keys.KeyTab, 0, "")
+			p.emitKey(keys.KeyTab, 0, "", []byte{c})
 		case 0x0A, 0x0D:
-			p.emitKey(keys.KeyEnter, 0, "")
+			p.emitKey(keys.KeyEnter, 0, "", []byte{c})
 		default:
-			p.emitKey(keys.KeyA+keys.Key(c-1), keys.ModCtrl, "")
+			p.emitKey(keys.KeyA+keys.Key(c-1), keys.ModCtrl, "", []byte{c})
 		}
 	case c == 0x1C:
-		p.emitKey(keys.KeyBackslash, keys.ModCtrl, "")
+		p.emitKey(keys.KeyBackslash, keys.ModCtrl, "", []byte{c})
 	case c == 0x1D:
-		p.emitKey(keys.KeyBracketRight, keys.ModCtrl, "")
+		p.emitKey(keys.KeyBracketRight, keys.ModCtrl, "", []byte{c})
 	case c == 0x1E:
 		// Ctrl-^ is Ctrl-Shift-6 on US keyboards; no dedicated
 		// Key exists, so emit with Key=Digit6 and Mods=Ctrl|Shift.
 		// This is the same shape tmux's tty-keys.c settles on.
-		p.emitKey(keys.KeyDigit6, keys.ModCtrl|keys.ModShift, "")
+		p.emitKey(keys.KeyDigit6, keys.ModCtrl|keys.ModShift, "", []byte{c})
 	case c == 0x1F:
 		// Ctrl-_ maps to Ctrl-Shift-- on US keyboards; again
 		// there is no dedicated keycap.
-		p.emitKey(keys.KeyMinus, keys.ModCtrl|keys.ModShift, "")
+		p.emitKey(keys.KeyMinus, keys.ModCtrl|keys.ModShift, "", []byte{c})
 	case c == 0x7F:
-		p.emitKey(keys.KeyBackspace, 0, "")
+		p.emitKey(keys.KeyBackspace, 0, "", []byte{c})
 	case c >= 0x20 && c <= 0x7E:
 		p.emitPrintable(c)
 	case c >= 0x80:
@@ -203,6 +234,7 @@ func (p *Parser) feedGround(c byte) {
 		p.utfBuf[0] = c
 		p.utfLen = 1
 		p.state = stateUTF8
+		p.seqBuf = append(p.seqBuf[:0], c)
 	}
 }
 
@@ -221,28 +253,88 @@ func (p *Parser) feedEsc(c byte) {
 		p.state = stateSS3
 	case 0x1B:
 		// ESC ESC: the first was a real Escape; the second starts
-		// something new.
-		p.emitKey(keys.KeyEscape, 0, "")
+		// something new. The first ESC's bytes are just \x1B; the
+		// second begins a fresh envelope.
+		p.emitKey(keys.KeyEscape, 0, "", []byte{0x1B})
 		p.state = stateEsc
 		p.escPending = true
 		p.escDeadline = time.Now().Add(escTimeout)
+		p.seqBuf = append(p.seqBuf[:0], c)
 	default:
 		// ESC <anything else>: Alt-prefix. Printable ASCII and
 		// controls alike become the same key they would be alone,
-		// with ModAlt added.
+		// with ModAlt added. Use a private sub-call so feedGround
+		// does not re-bind the emission bytes to a single-byte
+		// slice — we want the full ESC+c envelope from seqBuf.
 		p.state = stateGround
 		before := len(p.out)
-		p.feedGround(c)
+		p.feedGroundSeq(c)
 		after := len(p.out)
-		// Add ModAlt to every event produced (normally one).
+		// Add ModAlt to every KeyEvent produced (normally one).
 		for i := before; i < after; i++ {
-			ke, ok := p.out[i].(KeyEvent)
+			ke, ok := p.out[i].Event.(KeyEvent)
 			if !ok {
 				continue
 			}
 			ke.Mods |= keys.ModAlt
-			p.out[i] = ke
+			p.out[i].Event = ke
 		}
+		// After an Alt-prefix emission, the sequence is done.
+		p.seqBuf = p.seqBuf[:0]
+	}
+}
+
+// feedGroundSeq mirrors feedGround but binds emitted events to the
+// accumulated sequence bytes in seqBuf rather than a single-byte
+// slice. Used only by feedEsc for the Alt-prefix path, where the
+// emission's raw bytes must include the leading ESC.
+func (p *Parser) feedGroundSeq(c byte) {
+	// Snapshot seqBuf once — every emit in this call uses the
+	// same envelope.
+	raw := p.copySeq()
+	switch {
+	case c == 0x1B:
+		// ESC inside ESC was handled by feedEsc's 0x1B case; not
+		// reachable here.
+		p.state = stateEsc
+		p.escPending = true
+		p.escDeadline = time.Now().Add(escTimeout)
+	case c == 0x00:
+		p.emitKey(keys.KeySpace, keys.ModCtrl, "", raw)
+	case c >= 0x01 && c <= 0x1A:
+		switch c {
+		case 0x08:
+			p.emitKey(keys.KeyBackspace, 0, "", raw)
+		case 0x09:
+			p.emitKey(keys.KeyTab, 0, "", raw)
+		case 0x0A, 0x0D:
+			p.emitKey(keys.KeyEnter, 0, "", raw)
+		default:
+			p.emitKey(keys.KeyA+keys.Key(c-1), keys.ModCtrl, "", raw)
+		}
+	case c == 0x1C:
+		p.emitKey(keys.KeyBackslash, keys.ModCtrl, "", raw)
+	case c == 0x1D:
+		p.emitKey(keys.KeyBracketRight, keys.ModCtrl, "", raw)
+	case c == 0x1E:
+		p.emitKey(keys.KeyDigit6, keys.ModCtrl|keys.ModShift, "", raw)
+	case c == 0x1F:
+		p.emitKey(keys.KeyMinus, keys.ModCtrl|keys.ModShift, "", raw)
+	case c == 0x7F:
+		p.emitKey(keys.KeyBackspace, 0, "", raw)
+	case c >= 0x20 && c <= 0x7E:
+		k := asciiKey[c]
+		var mods keys.Mods
+		if c >= 'A' && c <= 'Z' {
+			mods = keys.ModShift
+		}
+		p.emitKey(k, mods, string([]byte{c}), raw)
+	case c >= 0x80:
+		// An 8-bit byte after ESC: start a UTF-8 accumulation.
+		// Rare in practice.
+		p.utfBuf[0] = c
+		p.utfLen = 1
+		p.state = stateUTF8
 	}
 }
 
@@ -259,6 +351,14 @@ func (p *Parser) feedCSI(c byte) {
 		p.state = stateGround
 		p.dispatchCSI(c)
 		p.csiLen = 0
+		// dispatchCSI consumes seqBuf via copySeq when it emits,
+		// and may transition to statePaste (paste-start) in which
+		// case seqBuf must persist across the paste body to carry
+		// the full envelope through to the paste-end emission.
+		// Only reset seqBuf when we have fully returned to ground.
+		if p.state == stateGround {
+			p.seqBuf = p.seqBuf[:0]
+		}
 		return
 	}
 	// Body byte: accumulate if we have room, otherwise drop the
@@ -277,8 +377,9 @@ func (p *Parser) feedCSI(c byte) {
 func (p *Parser) feedSS3(c byte) {
 	p.state = stateGround
 	if k, ok := csiFinalKey[c]; ok {
-		p.emitKey(k, 0, "")
+		p.emitKey(k, 0, "", p.copySeq())
 	}
+	p.seqBuf = p.seqBuf[:0]
 }
 
 // feedUTF8 gathers continuation bytes of a multi-byte UTF-8
@@ -294,20 +395,29 @@ func (p *Parser) feedUTF8(c byte) {
 		r, size := utf8.DecodeRune(p.utfBuf[:p.utfLen])
 		if r == utf8.RuneError && size <= 1 {
 			// Bad lead byte: emit one Unidentified carrying the
-			// raw byte and advance one position.
+			// raw byte and advance one position. The emission's
+			// raw bytes are just the bad lead — remaining bytes,
+			// if any, will get their own emissions.
 			p.emitBadByte(p.utfBuf[0])
+			p.seqBuf = p.seqBuf[:0]
 			// The remaining bytes, if any, go back through the
 			// ground state.
 			for i := 1; i < p.utfLen; i++ {
 				p.feedGround(p.utfBuf[i])
 			}
 		} else {
-			p.out = append(p.out, KeyEvent{Event: keys.Event{
-				Action:    keys.ActionPress,
-				Key:       keys.KeyUnidentified,
-				Text:      string(p.utfBuf[:size]),
-				Unshifted: r,
-			}})
+			raw := make([]byte, size)
+			copy(raw, p.utfBuf[:size])
+			p.out = append(p.out, Emission{
+				Event: KeyEvent{Event: keys.Event{
+					Action:    keys.ActionPress,
+					Key:       keys.KeyUnidentified,
+					Text:      string(p.utfBuf[:size]),
+					Unshifted: r,
+				}},
+				Bytes: raw,
+			})
+			p.seqBuf = p.seqBuf[:0]
 			// Continuation bytes past the rune (shouldn't happen
 			// with FullRune but handle defensively).
 			for i := size; i < p.utfLen; i++ {
@@ -323,24 +433,30 @@ func (p *Parser) feedUTF8(c byte) {
 // key event whose Text is the raw byte. Callers log this shape
 // when they diagnose input issues.
 func (p *Parser) emitBadByte(c byte) {
-	p.out = append(p.out, KeyEvent{Event: keys.Event{
-		Action: keys.ActionPress,
-		Key:    keys.KeyUnidentified,
-		Text:   string([]byte{c}),
-	}})
+	p.out = append(p.out, Emission{
+		Event: KeyEvent{Event: keys.Event{
+			Action: keys.ActionPress,
+			Key:    keys.KeyUnidentified,
+			Text:   string([]byte{c}),
+		}},
+		Bytes: []byte{c},
+	})
 }
 
-// emitKey appends a plain press event for (k, mods, text) to the
-// current output buffer. text is empty for function keys and
-// control characters; for printable keys it is the UTF-8 of the
-// keycap.
-func (p *Parser) emitKey(k keys.Key, mods keys.Mods, text string) {
-	p.out = append(p.out, KeyEvent{Event: keys.Event{
-		Action: keys.ActionPress,
-		Key:    k,
-		Mods:   mods,
-		Text:   text,
-	}})
+// emitKey appends a press emission for (k, mods, text) to the
+// current output buffer, carrying the provided raw bytes. The
+// rawBytes slice is assumed to be freshly allocated by the caller
+// (or nil for Tick-emitted events); emit does not copy it again.
+func (p *Parser) emitKey(k keys.Key, mods keys.Mods, text string, rawBytes []byte) {
+	p.out = append(p.out, Emission{
+		Event: KeyEvent{Event: keys.Event{
+			Action: keys.ActionPress,
+			Key:    k,
+			Mods:   mods,
+			Text:   text,
+		}},
+		Bytes: rawBytes,
+	})
 }
 
 // emitPrintable turns one byte in the ASCII printable range into
@@ -355,7 +471,20 @@ func (p *Parser) emitPrintable(c byte) {
 	if c >= 'A' && c <= 'Z' {
 		mods = keys.ModShift
 	}
-	p.emitKey(k, mods, string([]byte{c}))
+	p.emitKey(k, mods, string([]byte{c}), []byte{c})
+}
+
+// copySeq returns a fresh copy of the in-flight sequence buffer.
+// Callers use this to bind emission bytes to the sequence that
+// produced them without sharing seqBuf's backing array (seqBuf is
+// rewritten on the next sequence start).
+func (p *Parser) copySeq() []byte {
+	if len(p.seqBuf) == 0 {
+		return nil
+	}
+	out := make([]byte, len(p.seqBuf))
+	copy(out, p.seqBuf)
+	return out
 }
 
 // asciiKey maps the printable ASCII range to keys.Key. The table
@@ -417,6 +546,10 @@ var asciiKey = func() [128]keys.Key {
 // inspects p.csiBuf[:p.csiLen] together with the final byte and
 // emits the matched event, or silently drops the sequence if no
 // pattern matches.
+//
+// On entry seqBuf contains the full CSI envelope ("\x1B[...<final>").
+// Emit helpers must snapshot seqBuf via copySeq before the caller
+// resets it on the return to ground.
 func (p *Parser) dispatchCSI(final byte) {
 	body := p.csiBuf[:p.csiLen]
 
@@ -428,13 +561,23 @@ func (p *Parser) dispatchCSI(final byte) {
 		case "200":
 			p.state = statePaste
 			p.pasteBuf = p.pasteBuf[:0]
+			// Keep seqBuf — it holds "\x1B[200~" and will extend
+			// through the payload and closing marker, so the final
+			// paste emission carries the whole envelope.
 			return
 		case "201":
-			// End of paste: emit accumulated bytes.
+			// End of paste: emit accumulated bytes. seqBuf holds
+			// the whole envelope from "\x1B[200~" through the
+			// payload and "\x1B[201~"; copy it out as the
+			// emission's Bytes and let feedCSI reset it on the
+			// return to ground.
 			data := make([]byte, len(p.pasteBuf))
 			copy(data, p.pasteBuf)
 			p.pasteBuf = p.pasteBuf[:0]
-			p.out = append(p.out, PasteEvent{Data: data})
+			p.out = append(p.out, Emission{
+				Event: PasteEvent{Data: data},
+				Bytes: p.copySeq(),
+			})
 			return
 		}
 	}
@@ -445,10 +588,16 @@ func (p *Parser) dispatchCSI(final byte) {
 	if len(body) == 0 {
 		switch final {
 		case 'I':
-			p.out = append(p.out, FocusEvent{In: true})
+			p.out = append(p.out, Emission{
+				Event: FocusEvent{In: true},
+				Bytes: p.copySeq(),
+			})
 			return
 		case 'O':
-			p.out = append(p.out, FocusEvent{In: false})
+			p.out = append(p.out, Emission{
+				Event: FocusEvent{In: false},
+				Bytes: p.copySeq(),
+			})
 			return
 		}
 	}
@@ -457,7 +606,10 @@ func (p *Parser) dispatchCSI(final byte) {
 	// We recognize the envelope and emit a placeholder MouseEvent
 	// so the bytes do not leak through as stray keys.
 	if len(body) > 0 && body[0] == '<' && (final == 'M' || final == 'm') {
-		p.out = append(p.out, MouseEvent{Button: MouseButtonNone, Press: final == 'M'})
+		p.out = append(p.out, Emission{
+			Event: MouseEvent{Button: MouseButtonNone, Press: final == 'M'},
+			Bytes: p.copySeq(),
+		})
 		return
 	}
 
@@ -484,7 +636,7 @@ func (p *Parser) dispatchCSI(final byte) {
 		if len(params) >= 2 {
 			mods = xtermModsToMods(params[1])
 		}
-		p.emitKey(k, mods, "")
+		p.emitKey(k, mods, "", p.copySeq())
 		return
 	}
 
@@ -492,13 +644,13 @@ func (p *Parser) dispatchCSI(final byte) {
 	if k, ok := csiFinalKey[final]; ok {
 		// With no parameters: plain arrow / F-key.
 		if len(body) == 0 {
-			p.emitKey(k, 0, "")
+			p.emitKey(k, 0, "", p.copySeq())
 			return
 		}
 		// "CSI 1 ; mod <letter>" carries a modifier.
 		params := parseParams(body)
 		if len(params) >= 2 {
-			p.emitKey(k, xtermModsToMods(params[1]), "")
+			p.emitKey(k, xtermModsToMods(params[1]), "", p.copySeq())
 			return
 		}
 		// Single parameter before a letter: ignore; xterm does
@@ -582,13 +734,16 @@ func (p *Parser) dispatchKKP(body []byte) {
 		}
 	}
 
-	p.out = append(p.out, KeyEvent{Event: keys.Event{
-		Action:    action,
-		Key:       k,
-		Mods:      mods,
-		Text:      text,
-		Unshifted: rune(cp),
-	}})
+	p.out = append(p.out, Emission{
+		Event: KeyEvent{Event: keys.Event{
+			Action:    action,
+			Key:       k,
+			Mods:      mods,
+			Text:      text,
+			Unshifted: rune(cp),
+		}},
+		Bytes: p.copySeq(),
+	})
 }
 
 // parseParams splits a CSI parameter buffer on ';' and parses

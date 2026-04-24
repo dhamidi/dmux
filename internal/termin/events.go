@@ -80,6 +80,37 @@ type PasteEvent struct {
 
 func (PasteEvent) isEvent() {}
 
+// Emission pairs one semantic Event with the raw input bytes that
+// produced it. Routing code uses Bytes to decide what to forward
+// to an attached pane when the event is not bound to a command:
+//
+//   - Bound key: the command fires and Bytes is dropped.
+//   - Unbound key: the bytes are written verbatim to the pane pty.
+//
+// Bytes is freshly allocated per emission — it does not share
+// backing storage with the Feed input, so callers may reuse their
+// input buffer immediately after Feed returns. The slice survives
+// beyond the next Feed / Tick call, unlike the enclosing []Emission
+// result, which is reset on every entry point.
+//
+// Bytes is nil for Tick-emitted events (currently only KeyEscape):
+// the event is time-driven, with no corresponding input byte on
+// this call — the original ESC byte was consumed by an earlier
+// Feed. Routing treats nil as "nothing to forward".
+//
+// For a bracketed paste, Bytes covers the whole envelope — the
+// opening "\x1B[200~" marker, the payload bytes, and the closing
+// "\x1B[201~" marker — so passthrough forwards the entire paste
+// transparently. The inner PasteEvent.Data field remains the
+// payload-only slice.
+type Emission struct {
+	// Event is the semantic event the parser recognized.
+	Event Event
+	// Bytes is the raw input bytes that produced Event, or nil
+	// for Tick-emitted events.
+	Bytes []byte
+}
+
 // CapsKind identifies which deferred capability response the
 // parser observed. Used when a DA/DSR/KKP reply arrives on the
 // input stream after the initial Detect probe.
