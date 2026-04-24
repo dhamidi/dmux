@@ -1,6 +1,9 @@
-// Package assert implements the assert test-only command.
+// Package assert implements the assert command.
 //
-// Builds only under the `dmuxtest` build tag.
+// assert inspects current server state and fails if the expectation
+// does not hold. Scenarios use it for state-check steps; hook
+// scripts and interactive `:` invocations can use it to query the
+// same state through the same interface.
 //
 // # Synopsis
 //

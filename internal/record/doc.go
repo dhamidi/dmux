@@ -35,7 +35,7 @@
 // to the log file and (under test) to subscribed matchers. If the
 // channel fills (producer faster than consumer, shouldn't happen at
 // normal recorder level), events are dropped with a `record.dropped`
-// counter increment. Under `test-set-recorder-level debug`, the
+// counter increment. Under `recorder set-level debug`, the
 // channel capacity is higher and dropping is treated as a scenario
 // failure.
 //
@@ -45,7 +45,7 @@
 //
 //	Normal  default. The ~30 events listed in docs/testing.md.
 //	Debug   adds per-byte, per-loop-iteration events for fine-grained
-//	        scenario assertions. Opt-in via test-set-recorder-level.
+//	        scenario assertions. Opt-in via recorder set-level.
 //
 // In production, always Normal. The log file grows predictably —
 // roughly one event per user action plus a handful per second under

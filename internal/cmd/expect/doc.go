@@ -1,6 +1,9 @@
-// Package expect implements the expect test-only command.
+// Package expect implements the expect command.
 //
-// Builds only under the `dmuxtest` build tag.
+// expect is the absence assertion: it blocks for a bounded duration
+// and fails the scenario if the named event does appear. Scenarios
+// use it for negative-path checks; any caller that wants "this must
+// not happen during the next N seconds" can use it the same way.
 //
 // # Synopsis
 //

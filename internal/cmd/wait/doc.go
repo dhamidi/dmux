@@ -1,6 +1,8 @@
-// Package wait implements the wait test-only command.
+// Package wait implements the wait command.
 //
-// Builds only under the `dmuxtest` build tag.
+// wait is scenario-oriented: it blocks until a named recorder event
+// appears, failing on timeout. Scenarios use it for synchronization;
+// hook scripts and interactive `:` invocations can use it too.
 //
 // # Synopsis
 //

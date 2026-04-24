@@ -17,7 +17,7 @@
 
 [**contracts.md**](contracts.md) — cross-cutting decisions that affect multiple packages: wire format, identify-race, command-list semantics, logging policy, error vocabulary, resize ordering, active-pane sharing, window-size policy, shutdown semantics, renderer cache shape. Read this before the first PR; the decisions are load-bearing.
 
-[**testing.md**](testing.md) — how dmux is tested. A flight recorder plus a scenario language that reuses the production command parser. Scenarios run real servers against real sockets and real ptys; no mocks, no fakes. The test-only commands are registered in the same `cmd.Registry` as production commands under the `dmuxtest` build tag.
+[**testing.md**](testing.md) — how dmux is tested. A flight recorder plus a scenario language that reuses the production command parser. Scenarios run real servers against real sockets and real ptys; no mocks, no fakes. The scenario-oriented commands (`wait`, `assert`, `attach-client`, ...) ship in every build, registered in the same `cmd.Registry` as production commands.
 
 ## Package tree
 
@@ -55,17 +55,17 @@ internal/options/                 hierarchical scoped options (server/session/wi
 internal/status/                  status line renderer
 
 internal/record/                  structured event recorder (flight recorder)
-internal/dmuxtest/                scenario runner (build tag: dmuxtest)
-internal/cmd/wait/                test-only command (build tag: dmuxtest)
-internal/cmd/assert/              test-only command
-internal/cmd/expect/              test-only command
-internal/cmd/at/                  test-only command
-internal/cmd/testattach/          test-only command
-internal/cmd/testdetach/          test-only command
-internal/cmd/testsetrecorder/     test-only command
+internal/dmuxtest/                scenario runner
+internal/cmd/wait/                scenario-oriented command
+internal/cmd/assert/              scenario-oriented command
+internal/cmd/expect/              scenario-oriented command
+internal/cmd/attachclient/        scenario-oriented command
+internal/cmd/detachclient/        scenario-oriented command
+internal/cmd/client/              client-group commands (at, ...)
+internal/cmd/recorder/            recorder-group commands (set-level, ...)
 ```
 
-Thirty-three packages total. Twenty-six production, seven test-only. The test-only packages build only under the `dmuxtest` build tag and never ship in release binaries.
+Thirty-two packages total. All of them ship in the production binary. The scenario-oriented packages (`wait`, `assert`, `expect`, `attachclient`, `detachclient`, plus the `at` subcommand in `client` and `set-level` in `recorder`) are primarily driven by scenarios but are registered alongside production commands so hook scripts, AI agents, and interactive `:` invocations can use them too.
 
 ## Principles across milestones
 

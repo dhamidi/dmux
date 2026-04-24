@@ -159,7 +159,7 @@ See `internal/termout/doc.go`.
 
 ## Testing
 
-Tested via scenario files in the production command language plus seven test-only commands (`wait`, `assert`, `expect`, `at`, `test-attach`, `test-detach`, `test-set-recorder-level`). No mocks, no fakes — real servers, real sockets, real ptys.
+Tested via scenario files in the production command language plus a handful of scenario-oriented commands that ship in the production binary (`wait`, `assert`, `expect`, `client at`, `attach-client`, `detach-client`, `recorder set-level`). No mocks, no fakes — real servers, real sockets, real ptys.
 
 Observability through the production flight recorder (`internal/record`). Scenarios wait on recorder events rather than on wall-clock time. Same recorder in production and tests; user bug reports can be replayed as scenarios.
 

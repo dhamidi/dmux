@@ -1,7 +1,11 @@
 // Package dmuxtest is the scenario runner.
 //
-// Builds only under the `dmuxtest` build tag. Never ships in
-// release binaries.
+// dmuxtest ships in every build. `_test.go` files across the tree
+// drive it through Play(t, path) and PlayInline(t, name, script);
+// the package is unexported-by-convention (no production caller
+// should import it), but it is not gated by a build tag. The name
+// dmuxtest is a semantic commitment: this package exists to run
+// scenarios against a real server, nothing else.
 //
 // # What it does
 //
@@ -12,10 +16,10 @@
 //  2. Subscribes to the recorder event stream.
 //  3. Parses the scenario via the real cmd.Parse into a cmd.List.
 //  4. Runs each command through the real server's cmdq against the
-//     real state. Test-only commands (wait, assert, expect, at,
-//     test-attach, test-detach, test-set-recorder-level) are
-//     registered in the same cmd.Registry and execute through the
-//     same path as production commands.
+//     real state. Scenario-oriented commands (wait, assert, expect,
+//     client at, attach-client, detach-client, recorder set-level)
+//     are registered in the same cmd.Registry as production
+//     commands and execute through the same path.
 //  5. On scenario completion, shuts the server down via the real
 //     force-shutdown path, verifies no goroutine leaks.
 //  6. On failure, dumps the failing line, the recorder tail filtered
@@ -37,7 +41,7 @@
 //
 // # Synthetic clients
 //
-// `test-attach =A ...` spawns a goroutine inside the test process
+// `attach-client =A ...` spawns a goroutine inside the test process
 // that:
 //
 //   - Dials the server's socket with net.Dial.
@@ -47,7 +51,7 @@
 //   - Reads Output frames and keeps a client-side screen buffer by
 //     feeding them through a real termin.Parser + vt.Terminal (the
 //     same stack the production client uses).
-//   - Exits on Bye / Exit / test-detach.
+//   - Exits on Bye / Exit / detach-client.
 //
 // The synthetic client is not a fake. It is a real dmux client
 // minus the real terminal — its stdout goes to a byte buffer
@@ -77,7 +81,7 @@
 //
 // `Play` is the common entry. `PlayInline` is for tests that want
 // to construct small scenarios programmatically or for unit tests
-// of individual test-only commands.
+// of individual scenario-oriented commands.
 //
 // # Failure diagnostics
 //

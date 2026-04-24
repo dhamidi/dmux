@@ -1,14 +1,23 @@
-// Package testattach implements the test-attach test-only command.
+// Package attachclient implements the attach-client command.
 //
-// Builds only under the `dmuxtest` build tag.
+// attach-client creates an in-process synthetic dmux client and
+// connects it to the running server. Scenarios use it to simulate
+// real user connections; hook scripts and AI agents use it to drive
+// dmux from inside the server process without spawning a second
+// binary.
+//
+// This is distinct from attach-session:
+//
+//   - attach-session retargets an already-connected client's view
+//     onto a particular session. The connection already exists; the
+//     command just rewires it.
+//   - attach-client creates the connection itself. It spawns the
+//     synthetic client, dials the socket, sends Identify, and
+//     registers a handle the rest of the scenario can refer to.
 //
 // # Synopsis
 //
-//	test-attach <handle> [-F profile] [-x cols] [-y rows]
-//
-// Spawns a synthetic dmux client in the test process and attaches
-// it to the server. From the server's perspective, indistinguishable
-// from a real `dmux` binary connecting from the command line.
+//	attach-client <handle> [-F profile] [-x cols] [-y rows]
 //
 // # Typed args
 //
@@ -27,32 +36,19 @@
 //     - The server-bound connection.
 //     - A real termin.Parser configured for Profile.
 //     - A real vt.Terminal of size Cols x Rows (for screen reads
-//       used by `assert screen -t =A`).
+//     used by `assert screen -t =A`).
 //     - Buffered Output and screen state.
 //  3. Send an Identify frame with the configured profile and size.
-//  4. Register the handle in the harness's client table.
+//  4. Register the handle in the client table.
 //  5. Return cmd.Ok once client.identified event fires.
 //
-// The synthetic client goroutine runs for the scenario's lifetime:
+// The synthetic client goroutine runs for the handle's lifetime:
 //
 //   - Reads Output frames, feeds bytes through termin + vt, updating
 //     its screen buffer.
-//   - Reads CommandResult, Exit, Beep frames, logs them for the
-//     harness.
-//   - Responds to test-detach by sending Bye then closing.
+//   - Reads CommandResult, Exit, Beep frames, logs them.
+//   - Responds to detach-client by sending Bye then closing.
 //   - Exits cleanly on Exit frame from server.
-//
-// # Why "test-attach" and not a flag on "attach-session"?
-//
-// `attach-session` requires an already-existing tty connection on
-// the server side — it binds an existing client to a session. It
-// doesn't create the connection. A real dmux client does the
-// connection setup in cmd/dmux, then runs attach-session. Scenarios
-// need to do both, so we have a command that does both.
-//
-// We could have called it `new-client`, but that's already a tmux
-// command with different semantics (spawns another instance). The
-// `test-` prefix signals "this is scaffolding, not production."
 //
 // # Profile-aware
 //
@@ -64,24 +60,23 @@
 //   - WindowsTerminal client receives legacy + modifyOtherKeys
 //     encoding; its parser handles that.
 //
-// This means scenarios can test per-profile server behaviour with
-// scenarios like:
+// This means callers can exercise per-profile server behaviour:
 //
-//	test-attach =A -F Ghostty
-//	test-attach =B -F WindowsTerminal
+//	attach-client =A -F Ghostty
+//	attach-client =B -F WindowsTerminal
 //	# same session, capabilities mediated to most-restrictive
 //
 // # Registration
 //
-//	var Cmd = cmd.New("test-attach", nil, exec)
+//	var Cmd = cmd.New("attach-client", nil, exec)
 //
 //	func init() { cmd.Register(Cmd) }
 //
 // # Scope boundary
 //
-// No session-attach side-effect. test-attach creates a client, it
+// No session-attach side-effect. attach-client creates a client, it
 // does NOT attach the client to a session — use attach-session
 // afterwards. Keeping them separate mirrors the production client
 // bootstrap (Identify + CommandList(new-session, attach-session))
 // and avoids hiding the attach in a "convenience."
-package testattach
+package attachclient
