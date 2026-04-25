@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/dhamidi/dmux/internal/pty"
+	"github.com/dhamidi/dmux/internal/record"
 	"github.com/dhamidi/dmux/internal/vt"
 )
 
@@ -272,7 +273,29 @@ func Open(ctx context.Context, cfg Config) (*Pane, error) {
 	go pane.readLoop()
 	go pane.waitLoop()
 
+	// No pane ID exists at this layer yet (session.Pane wraps us with
+	// an ID; the pane package itself is ID-free). Use the pointer
+	// address as a stable per-process handle so scenarios that care
+	// can correlate events; M1 scenarios only filter on the event name.
+	record.Emit(pCtx, "pane.ready", "pane", paneHandle(pane))
+
 	return pane, nil
+}
+
+// paneHandle formats a Pane's pointer address as a stable per-process
+// identifier for recorder events. Replaced once a real pane ID reaches
+// this layer.
+func paneHandle(p *Pane) string {
+	return fmt.Sprintf("%p", p)
+}
+
+// sampleText returns up to the last n bytes of b as a string. Used to
+// keep pty.output events bounded per docs/testing.md (max 256 bytes).
+func sampleText(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[len(b)-n:])
 }
 
 // Write sends raw stdin bytes to the child. This is the M1 SendBytes
@@ -545,6 +568,7 @@ func (p *Pane) readLoop() {
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
+			record.Emit(p.ctx, "pty.output", "pane", paneHandle(p), "text", sampleText(chunk, 256))
 			if p.vt != nil {
 				p.vtMu.Lock()
 				feedErr := p.vt.Feed(chunk)

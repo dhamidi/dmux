@@ -47,9 +47,18 @@ type Filter func(Event) bool
 //   - Capacity is the size of the internal event buffer. Events that
 //     arrive when the buffer is full are counted via Dropped() and
 //     discarded; zero or negative selects the default (1024).
+//   - ReplayBufferSize is the number of most-recent events retained
+//     for Subscribe to replay into new subscribers before live
+//     delivery begins. Zero disables replay (Subscribe sees only
+//     future events); negative is rejected with
+//     ErrInvalidReplayBufferSize. Production callers resolve the
+//     real value from the `recorded-event-buffer-size` server option
+//     (default 100); the Config zero value is what tests reach for
+//     when they want the no-replay path.
 type Config struct {
-	Logger   *slog.Logger
-	Capacity int
+	Logger           *slog.Logger
+	Capacity         int
+	ReplayBufferSize int
 }
 
 const defaultCapacity = 1024
@@ -57,6 +66,10 @@ const defaultCapacity = 1024
 // ErrAlreadyOpen is returned by Open when a recorder is already live.
 // Callers must Close first.
 var ErrAlreadyOpen = errors.New("record: recorder already open")
+
+// ErrInvalidReplayBufferSize is returned by Open when
+// Config.ReplayBufferSize is negative.
+var ErrInvalidReplayBufferSize = errors.New("record: replay buffer size must be non-negative")
 
 // Recorder is the process-wide event sink. One instance is live
 // between Open and Close; the package-level Emit / Subscribe /
@@ -74,6 +87,16 @@ type Recorder struct {
 
 	subMu sync.Mutex
 	subs  []*subscription
+	// ring is a circular buffer of the most-recent events, written by
+	// emit and snapshot-read by Subscribe. Guarded by subMu so a new
+	// subscriber can atomically capture the past (ring snapshot) and
+	// register for the future (append to subs) with no gap: any event
+	// emitted after Subscribe releases subMu goes through fanout and
+	// reaches the new sub; every event before that lock is in the
+	// ring snapshot.
+	ring     []Event
+	ringHead int // index of oldest entry when ringLen == cap(ring)
+	ringLen  int // 0..cap(ring)
 
 	done chan struct{}
 	wg   sync.WaitGroup
@@ -95,6 +118,9 @@ var (
 // The returned recorder starts a consumer goroutine that drains the
 // event buffer until Close.
 func Open(cfg Config) error {
+	if cfg.ReplayBufferSize < 0 {
+		return ErrInvalidReplayBufferSize
+	}
 	globalMu.Lock()
 	defer globalMu.Unlock()
 	if global != nil {
@@ -112,6 +138,9 @@ func Open(cfg Config) error {
 		in:     make(chan Event, capacity),
 		logger: logger,
 		done:   make(chan struct{}),
+	}
+	if cfg.ReplayBufferSize > 0 {
+		r.ring = make([]Event, cfg.ReplayBufferSize)
 	}
 	r.wg.Add(1)
 	go r.run()
@@ -251,6 +280,7 @@ func (r *Recorder) log(ev Event) {
 func (r *Recorder) fanout(ev Event) {
 	r.subMu.Lock()
 	subs := append([]*subscription(nil), r.subs...)
+	r.appendRingLocked(ev)
 	r.subMu.Unlock()
 	for _, s := range subs {
 		if s.closed.Load() {
@@ -265,6 +295,37 @@ func (r *Recorder) fanout(ev Event) {
 			r.dropped.Add(1)
 		}
 	}
+}
+
+// appendRingLocked appends ev to the replay ring. Caller must hold
+// subMu. When the ring has zero capacity (replay disabled) this is a
+// no-op. When the ring is full the oldest entry is overwritten.
+func (r *Recorder) appendRingLocked(ev Event) {
+	cap := len(r.ring)
+	if cap == 0 {
+		return
+	}
+	if r.ringLen < cap {
+		r.ring[(r.ringHead+r.ringLen)%cap] = ev
+		r.ringLen++
+		return
+	}
+	r.ring[r.ringHead] = ev
+	r.ringHead = (r.ringHead + 1) % cap
+}
+
+// ringSnapshotLocked returns the ring contents in insertion order.
+// Caller must hold subMu.
+func (r *Recorder) ringSnapshotLocked() []Event {
+	if r.ringLen == 0 {
+		return nil
+	}
+	cap := len(r.ring)
+	out := make([]Event, r.ringLen)
+	for i := 0; i < r.ringLen; i++ {
+		out[i] = r.ring[(r.ringHead+i)%cap]
+	}
+	return out
 }
 
 func (r *Recorder) close() error {

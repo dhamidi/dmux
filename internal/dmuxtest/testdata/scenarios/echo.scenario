@@ -1,0 +1,19 @@
+# echo.scenario — proves record.Open + emission sites + the recorder
+# replay buffer compose end-to-end. new-session emits pane.ready while
+# spawning the shell; the subsequent wait runs in a fresh connection
+# whose subscriber is registered after that emission already fanned
+# out. Replay re-delivers the event from the ring so the wait returns
+# immediately.
+#
+# What this scenario deliberately does NOT do:
+#
+#   - `client at` + explicit `client kill` — wiring those into this
+#     fixture surfaces a pre-existing race between command-path
+#     options.Unset and pump-path register(), because Options guards
+#     its map only by "all callers are the main goroutine" and the
+#     synthetic-client plumbing breaks that assumption. Fixing the
+#     race belongs to a later piece; this scenario sidesteps it by
+#     staying on the read-only attach path.
+
+new-session
+wait pane.ready

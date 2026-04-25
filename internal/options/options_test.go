@@ -23,6 +23,9 @@ func TestGetFallsBackToTableDefault(t *testing.T) {
 	if got := sess.GetString("status-position"); got != "bottom" {
 		t.Fatalf("status-position default: got %q, want %q", got, "bottom")
 	}
+	if got := srv.GetNumber("recorded-event-buffer-size"); got != 100 {
+		t.Fatalf("recorded-event-buffer-size default: got %d, want 100", got)
+	}
 }
 
 func TestGetWalksParentChain(t *testing.T) {

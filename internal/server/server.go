@@ -21,6 +21,7 @@ import (
 	"github.com/dhamidi/dmux/internal/pane"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/pty"
+	"github.com/dhamidi/dmux/internal/record"
 	"github.com/dhamidi/dmux/internal/session"
 	"github.com/dhamidi/dmux/internal/socket"
 	"github.com/dhamidi/dmux/internal/status"
@@ -83,12 +84,33 @@ func Run(path string) error {
 	}
 	defer rt.Close(ctx)
 
+	// Recorder lifecycle. The recorder is process-global: when a test
+	// harness has already opened one (e.g. dmuxtest driving multiple
+	// scenarios through the same binary), ErrAlreadyOpen means we are
+	// sharing theirs and must not Close on exit. Any other error is
+	// terminal. Replay buffer size is read from the server option so
+	// scenarios can subscribe to events emitted by earlier commands.
+	serverOptions := options.NewServerOptions()
+	replayBuf := serverOptions.GetNumber("recorded-event-buffer-size")
+	recOpened := false
+	if err := record.Open(record.Config{ReplayBufferSize: int(replayBuf)}); err != nil {
+		if !errors.Is(err, record.ErrAlreadyOpen) {
+			l.Close()
+			return fmt.Errorf("server: record open: %w", err)
+		}
+	} else {
+		recOpened = true
+	}
+	if recOpened {
+		defer record.Close()
+	}
+
 	state := &serverState{
 		ctx:            ctx,
 		cancel:         cancel,
 		rt:             rt,
 		registry:       session.NewRegistry(),
-		serverOptions:  options.NewServerOptions(),
+		serverOptions:  serverOptions,
 		serverSessions: make(map[session.ID]*serverSession),
 		attached:       make(map[uint64]*attachedClient),
 	}

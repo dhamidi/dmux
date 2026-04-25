@@ -159,6 +159,13 @@ var Table = []Entry{
 		Choices: []string{"top", "bottom"},
 		Help:    "Where to draw the status line.",
 	},
+	{
+		Name:    "recorded-event-buffer-size",
+		Type:    Number,
+		Scope:   ServerScope,
+		Default: NewNumber(100),
+		Help:    "Recent events retained for record.Subscribe replay.",
+	},
 }
 
 // lookupEntry walks Table linearly by name or alias. The table is

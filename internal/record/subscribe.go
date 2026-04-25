@@ -12,6 +12,18 @@ const subscriberCapacity = 256
 // filter matches every event. When no recorder is open, Subscribe
 // returns a closed channel so select loops exit promptly.
 //
+// When the recorder was opened with Config.ReplayBufferSize > 0,
+// Subscribe first replays the ring of recent events into the new
+// channel (filter applied) before returning. This lets scenarios
+// that subscribe after a triggering command finished still observe
+// the events that command emitted. The snapshot is captured under
+// the same lock that registers the subscriber, so no event is both
+// missing from the replay and missing from live fanout. A live
+// event may interleave with replay delivery — the consumer
+// goroutine's fanout writes can land in the channel before the
+// Subscribe goroutine finishes pushing the snapshot — so callers
+// must not assume strict snapshot-then-live ordering.
+//
 // Multiple subscribers are independent. A slow subscriber's channel
 // fills and causes its own events to drop (counted via Dropped())
 // without affecting other subscribers.
@@ -31,8 +43,19 @@ func Subscribe(ctx context.Context, filter Filter) <-chan Event {
 		filter: filter,
 	}
 	r.subMu.Lock()
+	replay := r.ringSnapshotLocked()
 	r.subs = append(r.subs, sub)
 	r.subMu.Unlock()
+	for _, ev := range replay {
+		if filter != nil && !filter(ev) {
+			continue
+		}
+		select {
+		case sub.ch <- ev:
+		default:
+			r.dropped.Add(1)
+		}
+	}
 	if ctx != nil {
 		go func() {
 			<-ctx.Done()
