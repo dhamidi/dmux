@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // UserOptionPrefix marks a name as a user-defined option. Names
@@ -187,12 +188,13 @@ func lookupEntry(name string) (*Entry, bool) {
 }
 
 // Options holds one scope's local option values and a pointer to its
-// parent scope for Get-chain lookups. Methods are NOT safe for
-// concurrent use; they are called only from the server's main
-// goroutine (see doc.go, Concurrency).
+// parent scope for Get-chain lookups. Methods are safe for concurrent
+// use: each scope has its own RWMutex, and Get walks the parent chain
+// child-first, holding only one scope's lock at a time.
 type Options struct {
 	scope  Scope
 	parent *Options
+	mu     sync.RWMutex
 	local  map[string]Value
 }
 
@@ -225,7 +227,10 @@ func NewScopedOptions(scope Scope, parent *Options) *Options {
 // against zero.
 func (o *Options) Get(name string) Value {
 	for cur := o; cur != nil; cur = cur.parent {
-		if v, ok := cur.local[name]; ok {
+		cur.mu.RLock()
+		v, ok := cur.local[name]
+		cur.mu.RUnlock()
+		if ok {
 			return v
 		}
 	}
@@ -293,7 +298,9 @@ func (o *Options) Set(name string, v Value) error {
 				Got:      v.typ,
 			}
 		}
+		o.mu.Lock()
 		o.local[name] = v
+		o.mu.Unlock()
 		return nil
 	}
 	e, ok := lookupEntry(name)
@@ -346,7 +353,9 @@ func (o *Options) Set(name string, v Value) error {
 			}
 		}
 	}
+	o.mu.Lock()
 	o.local[name] = v
+	o.mu.Unlock()
 	return nil
 }
 
@@ -356,20 +365,26 @@ func (o *Options) Set(name string, v Value) error {
 // unsetting a name that was never set locally is not an error.
 func (o *Options) Unset(name string) error {
 	if IsUserOption(name) {
+		o.mu.Lock()
 		delete(o.local, name)
+		o.mu.Unlock()
 		return nil
 	}
 	if _, ok := lookupEntry(name); !ok {
 		return &Error{Op: "unset", Name: name, Sentinel: ErrUnknownOption}
 	}
+	o.mu.Lock()
 	delete(o.local, name)
+	o.mu.Unlock()
 	return nil
 }
 
 // IsSetLocally reports whether this scope has its own value for name,
 // ignoring the parent chain and Table defaults.
 func (o *Options) IsSetLocally(name string) bool {
+	o.mu.RLock()
 	_, ok := o.local[name]
+	o.mu.RUnlock()
 	return ok
 }
 

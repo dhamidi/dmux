@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -45,8 +44,10 @@ func (command) Name() string { return Name }
 //
 // The `-T` flag is extracted from anywhere in argv before positional
 // parsing so scenarios can write it at either end of the line. The
-// optional text predicate is a Go-quoted string literal; it is
-// matched as a substring against the event's `text` field.
+// optional text predicate is taken verbatim from argv and matched as
+// a substring against the event's `text` field — escape decoding
+// happens at tokenize time (script.Tokenize) or in the user's shell,
+// never here.
 func (command) Exec(item cmd.Item, argv []string) cmd.Result {
 	rest, timeoutStr, err := extractTimeoutFlag(argv[1:])
 	if err != nil {
@@ -68,7 +69,7 @@ func (command) Exec(item cmd.Item, argv []string) cmd.Result {
 
 	s := args.New(Name)
 	event := s.StringArg("event", "", "recorder event name")
-	text := s.StringArg("text", "", "Go-quoted substring for the event's text field")
+	text := s.StringArg("text", "", "substring for the event's text field")
 	if err := s.Parse(rest); err != nil {
 		return cmd.Err(err)
 	}
@@ -80,20 +81,7 @@ func (command) Exec(item cmd.Item, argv []string) cmd.Result {
 		})
 	}
 
-	var needle string
-	if *text != "" {
-		n, err := strconv.Unquote("\"" + *text + "\"")
-		if err != nil {
-			return cmd.Err(&args.ParseError{
-				Phase: "positional",
-				Name:  "text",
-				Value: *text,
-				Err:   err,
-			})
-		}
-		needle = n
-	}
-
+	needle := *text
 	name := *event
 	filter := func(ev record.Event) bool {
 		if ev.Name != name {

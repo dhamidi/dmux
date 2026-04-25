@@ -113,16 +113,18 @@
 //
 // # Concurrency
 //
-// All Options instances are owned and mutated by the server's main
-// goroutine. They are read by edge goroutines only via snapshots
-// pushed at construction time (e.g. the pane goroutine receives
-// the pane's window's options as part of its Config when Spawn is
-// called).
+// Options instances are safe for concurrent use. Each scope carries
+// its own RWMutex; Get takes RLock per scope as it walks the parent
+// chain (child-first, never re-entering a scope), Set/Unset take a
+// write lock on the scope they mutate. Reads dominate; writes are
+// rare (set-option), so the lock is barely contended in practice.
 //
-// If an option that affects pane behavior changes after pane spawn
-// (M5 territory), the server pushes a control message to the pane
-// goroutine via Pane.SendOptionUpdate. The pane has its own snapshot
-// of "options I care about."
+// Pane goroutines still receive snapshots of the options they care
+// about at construction time (via Config when Spawn is called) so
+// they don't need to reach back into Options on every render. If an
+// option that affects pane behavior changes after pane spawn (M5
+// territory), the server pushes a control message to the pane
+// goroutine via Pane.SendOptionUpdate.
 //
 // # M1 scope
 //

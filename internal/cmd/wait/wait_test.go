@@ -211,35 +211,16 @@ func TestWaitBadDurationIsParseError(t *testing.T) {
 	}
 }
 
-func TestWaitBadQuotedTextIsParseError(t *testing.T) {
-	openRecorder(t)
-	c := lookupWait(t)
-	item := newFakeItem()
-
-	res := c.Exec(item, []string{wait.Name, "foo", `\z`})
-	if res.OK() {
-		t.Fatalf("wait with malformed escape returned Ok")
-	}
-	var perr *args.ParseError
-	if !errors.As(res.Error(), &perr) {
-		t.Fatalf("error not *args.ParseError: %v", res.Error())
-	}
-	if perr.Name != "text" {
-		t.Fatalf("ParseError.Name = %q, want %q", perr.Name, "text")
-	}
-}
-
-func TestWaitDecodesGoEscapes(t *testing.T) {
+func TestWaitMatchesControlBytesVerbatim(t *testing.T) {
 	openRecorder(t)
 	c := lookupWait(t)
 	item := newFakeItem()
 
 	done := make(chan cmd.Result, 1)
 	go func() {
-		// "\n" in argv is the literal two characters backslash-n;
-		// strconv.Unquote decodes it to a newline, so the emitted
-		// "line one\nline two" must match.
-		done <- c.Exec(item, []string{wait.Name, "pty.output", `\n`})
+		// argv carries final-form bytes; "\n" is one byte (LF). The
+		// command does not decode escapes — that's tokenize-time work.
+		done <- c.Exec(item, []string{wait.Name, "pty.output", "\n"})
 	}()
 
 	time.Sleep(5 * time.Millisecond)
@@ -248,7 +229,7 @@ func TestWaitDecodesGoEscapes(t *testing.T) {
 	select {
 	case res := <-done:
 		if !res.OK() {
-			t.Fatalf("wait with \\n needle returned %v, want Ok", res.Error())
+			t.Fatalf("wait with LF needle returned %v, want Ok", res.Error())
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatalf("wait did not return in time")

@@ -291,7 +291,7 @@ func TestAtDeliversBytesToLiveClient(t *testing.T) {
 	}
 	ref := item.opts.GetString(client.OptionPrefix + "shell")
 
-	res := c.Exec(item, []string{client.Name, "at", "shell", `echo hi\n`})
+	res := c.Exec(item, []string{client.Name, "at", "shell", "echo hi\n"})
 	if !res.OK() {
 		t.Fatalf("at returned %v, want Ok", res.Error())
 	}
@@ -307,17 +307,19 @@ func TestAtDeliversBytesToLiveClient(t *testing.T) {
 	}
 }
 
-func TestAtParsesGoEscapes(t *testing.T) {
+func TestAtTakesBytesVerbatim(t *testing.T) {
 	c := lookupClient(t)
 
-	// Hex escape: "\x02d" → 0x02 'd' (Ctrl-B d).
+	// Control bytes pass straight through; the command does not
+	// decode escape sequences (script.Tokenize handled that already
+	// for scripted callers, the user's shell did it for direct argv).
 	item := newFakeItem()
 	if res := c.Exec(item, []string{client.Name, "spawn", "shell"}); !res.OK() {
 		t.Fatalf("setup spawn: %v", res.Error())
 	}
-	res := c.Exec(item, []string{client.Name, "at", "shell", `\x02d`})
+	res := c.Exec(item, []string{client.Name, "at", "shell", "\x02d"})
 	if !res.OK() {
-		t.Fatalf("at with hex escape returned %v, want Ok", res.Error())
+		t.Fatalf("at with control bytes returned %v, want Ok", res.Error())
 	}
 	if len(item.clients.injected) != 1 {
 		t.Fatalf("Inject called %d times, want 1", len(item.clients.injected))
@@ -326,44 +328,6 @@ func TestAtParsesGoEscapes(t *testing.T) {
 	want := []byte{0x02, 'd'}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("Inject bytes = %v, want %v", got, want)
-	}
-
-	// Unicode escape: "\u00e9" → UTF-8 é.
-	item = newFakeItem()
-	if res := c.Exec(item, []string{client.Name, "spawn", "shell"}); !res.OK() {
-		t.Fatalf("setup spawn: %v", res.Error())
-	}
-	res = c.Exec(item, []string{client.Name, "at", "shell", `\u00e9`})
-	if !res.OK() {
-		t.Fatalf("at with unicode escape returned %v, want Ok", res.Error())
-	}
-	if len(item.clients.injected) != 1 {
-		t.Fatalf("Inject called %d times, want 1", len(item.clients.injected))
-	}
-	if string(item.clients.injected[0].bytes) != "é" {
-		t.Fatalf("Inject bytes = %q, want %q", item.clients.injected[0].bytes, "é")
-	}
-}
-
-func TestAtRejectsMalformedEscape(t *testing.T) {
-	c := lookupClient(t)
-	item := newFakeItem()
-	if res := c.Exec(item, []string{client.Name, "spawn", "shell"}); !res.OK() {
-		t.Fatalf("setup spawn: %v", res.Error())
-	}
-	res := c.Exec(item, []string{client.Name, "at", "shell", `\x`})
-	if res.OK() {
-		t.Fatalf("at with malformed escape returned Ok, want Err")
-	}
-	var perr *args.ParseError
-	if !errors.As(res.Error(), &perr) {
-		t.Fatalf("error not *args.ParseError: %v", res.Error())
-	}
-	if perr.Name != "bytes" {
-		t.Fatalf("ParseError.Name = %q, want %q", perr.Name, "bytes")
-	}
-	if len(item.clients.injected) != 0 {
-		t.Fatalf("Inject called despite parse failure: %v", item.clients.injected)
 	}
 }
 

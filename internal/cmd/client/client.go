@@ -3,7 +3,6 @@ package client
 import (
 	"errors"
 	"fmt"
-	"strconv"
 
 	"github.com/dhamidi/dmux/internal/cmd"
 	"github.com/dhamidi/dmux/internal/cmd/args"
@@ -116,16 +115,18 @@ func execKill(item cmd.Item, argv []string) cmd.Result {
 }
 
 // execAt parses the at subcommand's argv, looks up the stored handle
-// for name, decodes the Go-quoted bytes literal, and asks the
-// ClientManager to inject the resulting bytes into the named client's
-// input stream. A stale reference (Inject returns an error wrapping
-// ErrStaleClient) unsets the @client/<name> option so the next spawn
-// does not collide, then surfaces the stale-ref error — unlike kill,
-// at's caller wanted bytes delivered, so the failure is real.
+// for name, and asks the ClientManager to inject the bytes argument
+// verbatim into the named client's input stream. The bytes argv is
+// taken as final-form bytes — escape decoding happens at tokenize
+// time (script.Tokenize) or in the user's shell, never here. A stale
+// reference (Inject returns an error wrapping ErrStaleClient) unsets
+// the @client/<name> option so the next spawn does not collide, then
+// surfaces the stale-ref error — unlike kill, at's caller wanted
+// bytes delivered, so the failure is real.
 func execAt(item cmd.Item, argv []string) cmd.Result {
 	s := args.New(Name + " at")
 	name := s.StringArg("name", "", "client handle")
-	bytes := s.StringArg("bytes", "", "Go-quoted byte literal")
+	bytes := s.StringArg("bytes", "", "raw bytes to inject")
 	if err := s.Parse(argv[1:]); err != nil {
 		return cmd.Err(err)
 	}
@@ -143,20 +144,11 @@ func execAt(item cmd.Item, argv []string) cmd.Result {
 			Err:   errors.New("bytes required"),
 		})
 	}
-	unquoted, err := strconv.Unquote("\"" + *bytes + "\"")
-	if err != nil {
-		return cmd.Err(&args.ParseError{
-			Phase: "positional",
-			Name:  "bytes",
-			Value: *bytes,
-			Err:   err,
-		})
-	}
 	ref := item.Options().GetString(OptionPrefix + *name)
 	if ref == "" {
 		return cmd.Err(cmd.ErrNotFound)
 	}
-	if err := item.Clients().Inject(ref, []byte(unquoted)); err != nil {
+	if err := item.Clients().Inject(ref, []byte(*bytes)); err != nil {
 		if errors.Is(err, cmd.ErrStaleClient) {
 			_ = item.Options().Unset(OptionPrefix + *name)
 		}
