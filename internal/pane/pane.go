@@ -237,6 +237,19 @@ type Subscription struct {
 // errors.Is on pty.ErrStartProcess / pty.ErrOpenPty, and errors.As
 // on *pty.SpawnError.
 func Open(ctx context.Context, cfg Config) (*Pane, error) {
+	// Emit pane.spawning before pty.Spawn so scenarios observe the
+	// spawn intent even on failure. No pane handle exists yet (the
+	// pointer is created post-Spawn); the field is omitted and will
+	// be filled in once a real pane ID reaches this layer. The
+	// "window" field is also omitted: the pane package has no
+	// concept of windows, so the field is deferred until the
+	// session/pane wrapper carries window IDs into Config.
+	var shell string
+	if len(cfg.Argv) > 0 {
+		shell = cfg.Argv[0]
+	}
+	record.Emit(ctx, "pane.spawning", "shell", shell, "argv", cfg.Argv)
+
 	p, err := pty.Spawn(ctx, pty.Config{
 		Argv: cfg.Argv,
 		Cwd:  cfg.Cwd,
@@ -624,6 +637,24 @@ func (p *Pane) waitLoop() {
 	defer close(p.exitedCh)
 
 	st, err := p.pty.Wait()
+	// Emit pane.exited before delivering the status so scenarios
+	// using `wait pane.exited` observe the event before any consumer
+	// of Exited() reacts. pty.ExitStatus has no Reason field; derive
+	// one from Exited/Signal (or the wait error).
+	exitCode := -1
+	reason := ""
+	if err != nil {
+		reason = err.Error()
+	} else {
+		exitCode = st.Code
+		if st.Exited {
+			reason = "exited"
+		} else {
+			reason = fmt.Sprintf("signal: %d", st.Signal)
+		}
+	}
+	record.Emit(p.ctx, "pane.exited", "pane", paneHandle(p), "exit-code", exitCode, "reason", reason)
+
 	if err != nil {
 		// Deliver a zero ExitStatus on Wait failure. The server
 		// treats channel-close as the signal; the payload is a

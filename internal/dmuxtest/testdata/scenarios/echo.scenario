@@ -10,8 +10,17 @@
 # pump's parent-chain Gets are walking. Without internal/options taking
 # a mutex, -race flags this as a data race; with the mutex, the
 # scenario completes cleanly.
+#
+# Also exercises the pane.spawning emission site: the event fires
+# before pty.Spawn so scenarios observe spawn intent even on failure.
+# pane.exited is emitted from waitLoop too but does not fire reliably
+# inside the 5s wait window after `client kill c` (the shell child
+# does not always reap that quickly under -race), so it is not
+# asserted here.
 
 new-session
+wait pane.spawning
 client spawn c
 wait pane.ready
+client at c "echo hello\n"
 client kill c
