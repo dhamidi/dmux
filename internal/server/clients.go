@@ -11,6 +11,14 @@ import (
 
 	"github.com/dhamidi/dmux/internal/client"
 	"github.com/dhamidi/dmux/internal/cmd"
+	// Synthetic clients send a hard-coded attach-session
+	// CommandList from Spawn. Any binary that pulls in this package
+	// (production dmux, dmuxtest, future agent harnesses) needs the
+	// command registered or handle() rejects the CommandList as a
+	// protocol error and tears the synthetic conn down before the
+	// caller can drive it. Blank-importing here moves the dependency
+	// to the only file that actually relies on the command name.
+	_ "github.com/dhamidi/dmux/internal/cmd/attachsession"
 	"github.com/dhamidi/dmux/internal/proto"
 	"github.com/dhamidi/dmux/internal/tty"
 )
