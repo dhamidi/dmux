@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/dhamidi/dmux/internal/client"
+	"github.com/dhamidi/dmux/internal/cmd"
 	// Blank imports populate the cmd registry at process start. This is
 	// the single point where the binary decides which commands exist;
 	// the server side looks everything up by name through cmd.Lookup.
@@ -28,6 +29,7 @@ import (
 	_ "github.com/dhamidi/dmux/internal/cmd/wait"
 	"github.com/dhamidi/dmux/internal/platform"
 	"github.com/dhamidi/dmux/internal/proto"
+	"github.com/dhamidi/dmux/internal/script"
 	"github.com/dhamidi/dmux/internal/server"
 	"github.com/dhamidi/dmux/internal/socket"
 	"github.com/dhamidi/dmux/internal/sockpath"
@@ -76,24 +78,77 @@ func clientMain() error {
 		return fmt.Errorf("create socket dir: %w", err)
 	}
 
+	// Five-way split on argv shape:
+	//
+	//   1. No argv, stdin is a tty -> attach.
+	//   2. No argv, stdin is not a tty -> read script lines from stdin.
+	//   3. argv[0] is a registered command -> command-only path.
+	//   4. argv[0] is not a command but stat's as a regular file ->
+	//      treat as a script file (shebang `#!/usr/bin/env dmux` lands
+	//      here when the kernel re-exec's the script as argv[1]).
+	//   5. Anything else (unknown name, no file) -> command-only path
+	//      and let the server reject with ErrUnknownCommand.
+	//
+	// DialOrStart auto-spawns the server on first dial. Attach reuses
+	// that connection; the other modes close it and let RunLine /
+	// runCommand open their own (RunLine because it dials per line,
+	// runCommand because the existing path uses the dial-once shape).
 	conn, err := socket.DialOrStart(path, func() error {
 		return platform.SpawnServer(path)
 	})
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
 
-	// Split on the first non-flag argv element. "dmux" and
-	// "dmux -S X" both come through with flag.NArg()==0 — those
-	// hit the attach path. "dmux kill-server" and any future
-	// command-only invocation land on the command-only path,
-	// which must not open the tty. The server looks argv[0] up in
-	// cmd.Lookup; nothing on this side parses command names.
-	if flag.NArg() > 0 {
-		return runCommand(conn, flag.Args())
+	if flag.NArg() == 0 {
+		if !stdinIsTerminal() {
+			_ = conn.Close()
+			return runScript(path, os.Stdin, "<stdin>")
+		}
+		defer conn.Close()
+		return attach(conn)
 	}
-	return attach(conn)
+
+	first := flag.Arg(0)
+	if _, ok := cmd.Lookup(first); !ok {
+		if info, statErr := os.Stat(first); statErr == nil && !info.IsDir() {
+			_ = conn.Close()
+			f, openErr := os.Open(first)
+			if openErr != nil {
+				return fmt.Errorf("open script: %w", openErr)
+			}
+			defer f.Close()
+			return runScript(path, f, first)
+		}
+	}
+	defer conn.Close()
+	return runCommand(conn, flag.Args())
+}
+
+// stdinIsTerminal reports whether os.Stdin refers to a terminal
+// device. Used to choose between script-from-stdin mode and the
+// interactive attach path. The character-device probe is the
+// stdlib-only idiom; tty.Open would fail for a non-tty fd but at
+// the cost of also failing for valid attach paths during their
+// startup window, so we keep this gate cheap.
+func stdinIsTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// runScript drives the script package against r, dialing the
+// already-resolved socket path for each command. The server has
+// already been auto-spawned by clientMain's initial DialOrStart, so
+// the per-line dialer always hits a running listener.
+func runScript(socketPath string, r io.Reader, source string) error {
+	dial := func(ctx context.Context) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", socketPath)
+	}
+	return script.Run(context.Background(), dial, r, script.RunOptions{Source: source})
 }
 
 // attach is the M1 walking-skeleton client-side attach path:

@@ -1,0 +1,8 @@
+# script-mode.scenario — drives a session via the production
+# script runner. Proves dmux interprets its own command language
+# against a real server, end to end. Loaded directly by
+# script.Run against the test harness's dialer (not via the
+# Play wrapper) to exercise the runner path users hit when they
+# pipe a script on stdin or pass a file path to dmux.
+new-session
+wait pane.ready

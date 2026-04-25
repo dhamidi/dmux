@@ -1,21 +1,25 @@
 package dmuxtest
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/dhamidi/dmux/internal/script"
 )
 
 // Play reads the scenario at path and runs each line against a
 // fresh in-process server. Blank lines and lines whose first
 // non-whitespace character is `#` are skipped. Every other line is
-// tokenized and dispatched through Harness.Run; the first command
-// to fail stops the scenario with t.Fatalf, reporting the 1-based
-// line number and the underlying error.
+// tokenized and dispatched through script.RunLine; the first command
+// to fail stops the scenario with t.Fatalf, reporting the source +
+// 1-based line number and the underlying error.
 //
 // Play wires its own SpawnServer, so callers do not set up a
 // Harness themselves. Callers that want to reuse a single server
-// across multiple scenarios should construct a Harness directly.
+// across multiple scenarios should construct a Harness directly and
+// call script.Run with h.Dialer().
 func Play(t *testing.T, path string) {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -30,18 +34,10 @@ func Play(t *testing.T, path string) {
 // for diagnostics (the path-shaped prefix in the failure message).
 // Useful for small inline tests and for authoring tests of the
 // scenario-oriented commands themselves.
-func PlayInline(t *testing.T, name string, script string) {
+func PlayInline(t *testing.T, name string, scriptBody string) {
 	t.Helper()
 	h := SpawnServer(t)
-	lines := strings.Split(script, "\n")
-	for i, raw := range lines {
-		lineNum := i + 1
-		trimmed := strings.TrimSpace(raw)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if err := h.Run(trimmed); err != nil {
-			t.Fatalf("%s:%d: %s\n    %v", name, lineNum, trimmed, err)
-		}
+	if err := script.Run(context.Background(), h.Dialer(), strings.NewReader(scriptBody), script.RunOptions{Source: name}); err != nil {
+		t.Fatalf("%v", err)
 	}
 }

@@ -1,46 +1,18 @@
 package dmuxtest
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
 
-	"github.com/dhamidi/dmux/internal/proto"
+	"github.com/dhamidi/dmux/internal/script"
 	"github.com/dhamidi/dmux/internal/server"
-	"github.com/dhamidi/dmux/internal/xio"
 )
-
-// ErrCommandFailed is the sentinel returned by (*Harness).Run when a
-// scenario command completed but the server answered with a
-// non-ok CommandResult. Callers use errors.Is to distinguish this
-// from transport failures (connection drops, socket gone) — the
-// latter are wrapped directly without going through this sentinel.
-var ErrCommandFailed = errors.New("dmuxtest: command failed")
-
-// CommandError carries the structured detail for a non-ok
-// CommandResult. Err always wraps ErrCommandFailed so callers can
-// errors.Is, and the ID / Status / Message fields let diagnostics
-// pick out the specifics.
-type CommandError struct {
-	ID      uint32
-	Status  proto.CommandStatus
-	Message string
-}
-
-// Error reports the command result in a form that chains cleanly
-// with xio / proto errors above it.
-func (e *CommandError) Error() string {
-	return fmt.Sprintf("dmuxtest: command %d: %s: %s", e.ID, e.Status, e.Message)
-}
-
-// Unwrap returns ErrCommandFailed so errors.Is works.
-func (e *CommandError) Unwrap() error { return ErrCommandFailed }
 
 // goroutineLeakSlack is the grace window for short-lived runtime
 // goroutines that come and go (GC worker starts, netpoll restarts,
@@ -142,102 +114,33 @@ func waitForSocket(path string, serverDone <-chan error) error {
 // going through Run.
 func (h *Harness) SocketPath() string { return h.socketPath }
 
-// Run sends one command to the harness's server. cmdLine is parsed
-// by the package's tokenizer (whitespace + double-quoted runs with
-// Go-style escapes); the resulting argv becomes a single-element
-// CommandList with ID 1. Run returns on the first of:
+// Dialer returns a script.Dialer that opens connections to the
+// harness's server. Used by Play, PlayInline, and any test wiring
+// the script package directly.
+func (h *Harness) Dialer() script.Dialer {
+	return func(ctx context.Context) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", h.socketPath)
+	}
+}
+
+// Run sends one command to the harness's server, parsed as a single
+// script line. Returns nil on a CommandResult{Ok}; a *script.CommandError
+// wrapping script.ErrCommandFailed on any other status; or a wrapped
+// transport error on dial / framing failure.
 //
-//   - CommandResult arrives with Status = StatusOk (nil return).
-//   - CommandResult arrives with Status != StatusOk (CommandError
-//     wrapping ErrCommandFailed).
-//   - Connection closes before a result arrives (transport error).
-//
-// Run deliberately does not read more than one frame past the
-// result: kill-server races the Exit frame against connection
-// teardown, so "result then socket closes" is a normal outcome for
-// that command. The call sites that chain multiple commands do so
-// by calling Run multiple times.
+// Run is a thin wrapper around script.Tokenize + script.RunLine so
+// the harness's per-line execution stays in lock-step with the
+// production script runner.
 func (h *Harness) Run(cmdLine string) error {
-	argv, err := tokenize(cmdLine)
+	argv, err := script.Tokenize(cmdLine)
 	if err != nil {
 		return fmt.Errorf("dmuxtest: tokenize %q: %w", cmdLine, err)
 	}
 	if len(argv) == 0 {
 		return fmt.Errorf("dmuxtest: empty command line")
 	}
-
-	conn, err := net.Dial("unix", h.socketPath)
-	if err != nil {
-		return fmt.Errorf("dmuxtest: dial %s: %w", h.socketPath, err)
-	}
-	defer conn.Close()
-
-	fr := xio.NewReader(conn)
-	fw := xio.NewWriter(conn)
-
-	cwd, _ := os.Getwd()
-	ident := &proto.Identify{
-		ProtocolVersion: proto.ProtocolVersion,
-		Profile:         0,
-		InitialCols:     0,
-		InitialRows:     0,
-		Cwd:             cwd,
-		TTYName:         "",
-		TermEnv:         "",
-		Env:             nil,
-	}
-	if err := fw.WriteFrame(ident); err != nil {
-		return fmt.Errorf("dmuxtest: write Identify: %w", err)
-	}
-	if err := fw.WriteFrame(&proto.CommandList{
-		Commands: []proto.Command{{ID: 1, Argv: argv}},
-	}); err != nil {
-		return fmt.Errorf("dmuxtest: write CommandList: %w", err)
-	}
-
-	// Read frames until we see the single CommandResult for our
-	// command. After that, any follow-up behaviour is
-	// command-specific:
-	//
-	//   - kill-server and detach-family commands follow up with an
-	//     Exit frame (or close the socket). We do not wait for it
-	//     — the scenario has already gotten its ack, and the next
-	//     Run will dial a fresh connection.
-	//   - new-session / attach-session transition into the server's
-	//     pump loop and start emitting Output frames forever. We
-	//     also do not wait: closing our side of the socket makes
-	//     the server's pump observe EOF and clean up the attach
-	//     without our having to render anything.
-	//
-	// The single CommandResult is thus both the ack AND the signal
-	// to return; everything past it is server bookkeeping that our
-	// defer conn.Close will tell the server to abandon.
-	for {
-		f, err := fr.ReadFrame()
-		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				return fmt.Errorf("dmuxtest: connection closed before CommandResult")
-			}
-			return fmt.Errorf("dmuxtest: read frame: %w", err)
-		}
-		switch m := f.(type) {
-		case *proto.CommandResult:
-			if m.Status != proto.StatusOk {
-				return &CommandError{
-					ID:      m.ID,
-					Status:  m.Status,
-					Message: m.Message,
-				}
-			}
-			return nil
-		default:
-			// Other frame types (Output, Beep, CapsUpdate, Exit) can
-			// precede or follow the result on attach paths; skip
-			// them. A protocol-error Exit that arrives before any
-			// CommandResult is handled by the read-error arm above
-			// once the server closes the socket.
-		}
-	}
+	return script.RunLine(context.Background(), h.Dialer(), argv)
 }
 
 // Close tears down the harness. Safe to call multiple times (the
